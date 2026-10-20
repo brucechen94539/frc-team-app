@@ -891,8 +891,15 @@ def api_room_unplace(oid):
 
 @app.route("/api/rooms/<int:rid>/parent", methods=["POST", "DELETE"])
 def api_room_parent(rid):
-    """Room parent: the adult volunteer who checks the room in (students are
-    under 18). Any logged-in user can volunteer a parent; mentors finalize."""
+    """Room parent: the adult volunteer who checks the room in. Optional —
+    senior rooms can go without. Only parents/mentors/admins may volunteer
+    or remove; students are never allowed in this slot. The recorded name is
+    always the family's parent name, taken server-side."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] not in ("parent", "mentor", "admin"):
+        return err("parents, mentors and admins only", 403)
     if not q_one("SELECT id FROM rooms WHERE id=?", (rid,)):
         return err("room not found", 404)
     if request.method == "DELETE":
@@ -900,10 +907,13 @@ def api_room_parent(rid):
                 " WHERE id=?", (rid,))
         return jsonify({"ok": True})
     b = request.get_json(force=True, silent=True) or {}
-    if not b.get("member_id") or not (b.get("person_name") or "").strip():
-        return err("member_id and person_name required")
+    m = q_one("SELECT id, parent_name FROM members WHERE id=?",
+              (b.get("member_id"),)) if b.get("member_id") else None
+    pname = ((m["parent_name"] if m else "") or "").strip()
+    if not pname:
+        return err("choose a family with a parent on record")
     execute("UPDATE rooms SET parent_member_id=?, parent_name=? WHERE id=?",
-            (b["member_id"], b["person_name"].strip(), rid))
+            (m["id"], pname, rid))
     return jsonify({"ok": True})
 
 

@@ -853,9 +853,7 @@ async function renderTravel() {
     const sel = $("rp-" + b.dataset.rvol);
     if (!sel.value) return toast("Pick which parent is volunteering.");
     const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
-    await POST(`/api/rooms/${b.dataset.rvol}/parent`,
-      {member_id: p.member_id,
-       person_name: p.name.replace(/ \((student|parent)\)$/, "")});
+    await POST(`/api/rooms/${b.dataset.rvol}/parent`, {member_id: p.member_id});
     toast("Room parent set — thank you for volunteering!");
     renderTravel();
   }));
@@ -896,13 +894,13 @@ async function renderTravel() {
 }
 
 function hotelHTML(h, students, poptParents) {
-  const missing = h.rooms.filter((r) => !r.parent_name).length;
+  const canVol = ME && ME.role !== "student";
   return `
   <div class="sub"><b>${esc(h.name)}</b> · ${esc(h.address || "")} ·
     ${esc(h.check_in || "")} → ${esc(h.check_out || "")}</div>
   ${h.notes ? `<div class="sub">${esc(h.notes)}</div>` : ""}
-  <h3>Rooms ${missing ? `<span class="pill amber">${missing} need${missing > 1 ? "" : "s"} a room parent</span>` : ""}</h3>
-  <p class="sub">The block is already booked. Every room needs an adult <b>room parent</b> to check in — students are under 18. Parents: volunteer for a room below.</p>
+  <h3>Rooms</h3>
+  <p class="sub">The block is already booked. A room can have an adult <b>room parent</b> to check in, since students under 18 can't check in themselves — optional; senior rooms often go without. Parents can volunteer for a room below.</p>
   <div class="row mo"><input id="rm-label" placeholder="Room label *" style="max-width:200px">
     <input id="rm-cap" placeholder="Beds" inputmode="numeric" style="max-width:80px">
     <button class="btn small" id="rm-add">Add room</button></div>
@@ -916,10 +914,10 @@ function hotelHTML(h, students, poptParents) {
       <div class="row" style="margin-top:6px">
         ${r.parent_name
           ? `<span class="pill green">Room parent: ${esc(r.parent_name)}</span>
-             <button class="btn small ghost" data-rparentx="${r.id}">Remove</button>`
-          : `<span class="pill amber">Needs a room parent</span>`}
+             ${canVol ? `<button class="btn small ghost" data-rparentx="${r.id}">Remove</button>` : ""}`
+          : `<span class="pill gray">No room parent (optional)</span>`}
       </div>
-      ${!r.parent_name ? `<div class="row" style="margin-top:6px">
+      ${!r.parent_name && canVol ? `<div class="row" style="margin-top:6px">
         <select id="rp-${r.id}"><option value="">Volunteer as room parent…</option>${poptParents}</select>
         <button class="btn small" data-rvol="${r.id}">Volunteer</button></div>` : ""}
       <div class="row mo" style="margin-top:6px"><select id="plc-${r.id}">

@@ -85,9 +85,11 @@ DB=/srv/frc/team.db python app.py
 - `POST /api/hotels/<id>/requests` (upsert per student; families' rooming requests)
 - `POST /api/rooms/<id>/occupants` (mentor places; flips request to `placed`)
 - `DELETE /api/room_occupants/<id>`
-- `POST/DELETE /api/rooms/<id>/parent` — room parent: the adult volunteer who
-  checks the room in (the block is already booked; students are under 18, so
-  every room needs one — parents volunteer in the Travel tab)
+- `POST/DELETE /api/rooms/<id>/parent` — room parent (optional): the adult
+  volunteer who checks a room in, since students under 18 can't check in
+  themselves; senior rooms often go without. Parents volunteer in the Travel
+  tab (parents/mentors/admins only — students can't volunteer and can never
+  end up in this slot); the server records the family's parent name
 - `GET /api/subteams` · `GET/POST /api/users` (mentor/admin) ·
   `POST /api/users/<id>/password` (mentor/admin password reset)
 - `GET /api/people` — names-only approved-member directory for non-mentors
