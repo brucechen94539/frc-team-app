@@ -5,11 +5,26 @@ mentor approval, event RSVPs, attendance/hours tracking, a task board, carpools,
 tool sign-up, and hotel room assignments. Deliberately lightweight — a stepping
 stone between the static prototype and a production server.
 
-**No authentication in this build.** Anyone who can reach the server can use
-every feature (including the mentor queue). The `users` table already has a
-`role` column (`student`/`parent`/`mentor`/`admin`) and a nullable
-`password_hash` column stubbed for the future auth step. Do not expose this to
-the open internet without adding auth first.
+**Accounts and login are built in.** Passwords are stored in SQLite's
+`users` table, scrypt-hashed with werkzeug (the same library Flask ships
+with); login state is a signed session cookie. The landing page is the
+login screen — the only thing reachable without an account is the fresh
+sign-up application form, by design.
+
+- **First run:** when no account has a password yet (fresh install, or an
+  older database from before auth), the login page becomes "Create the
+  admin account". That account gets the `admin` role and logs you in.
+- **Adding people:** admins/mentors create accounts from Mentor Queue →
+  Team accounts (name, email, role, password), and can reset passwords there.
+- **Roles:** `student` / `parent` / `mentor` / `admin`. Everyone logged in
+  can RSVP, check in, claim carpool seats/tools, and post rooming requests.
+  The mentor queue, roster, event/task/tool/hotel creation, check-in
+  verification, and room placement are mentor/admin-only.
+- **Session key:** the app reads `SECRET_KEY` from the environment, or
+  creates `.secret_key` in the app directory (gitignored) on first run.
+
+Do not expose this to the open internet without HTTPS and login
+rate-limiting in front of it.
 
 ## Run it
 
@@ -68,7 +83,12 @@ DB=/srv/frc/team.db python app.py
 - `POST /api/hotels/<id>/requests` (upsert per student; families' rooming requests)
 - `POST /api/rooms/<id>/occupants` (mentor places; flips request to `placed`)
 - `DELETE /api/room_occupants/<id>`
-- `GET /api/subteams` · `GET/POST /api/users`
+- `GET /api/subteams` · `GET/POST /api/users` (mentor/admin) ·
+  `POST /api/users/<id>/password` (mentor/admin password reset)
+- `GET /api/people` — names-only approved-member directory for non-mentors
+- Auth: `GET /api/auth/me` · `POST /api/auth/login` ·
+  `POST /api/auth/logout` · `POST /api/auth/setup` (first-run admin only) ·
+  `POST /api/auth/password` (change own password)
 
 ## Hosting notes
 
@@ -80,11 +100,11 @@ DB=/srv/frc/team.db python app.py
   address — no public exposure at all.
 - **LAN-only:** `python app.py` binds `0.0.0.0`; teammates on the same Wi-Fi
   can open `http://<your-ip>:5000`.
-- Before any internet exposure: add authentication (hash passwords with
-  argon2id/bcrypt into `users.password_hash`, enforce `users.role`
-  server-side), put it behind HTTPS, and rate-limit logins.
+- Before any internet exposure: put it behind HTTPS and rate-limit
+  logins (no built-in rate limiting). Passwords are already hashed with
+  scrypt and roles are enforced server-side.
 
 ## Roadmap (not built yet)
 
-Auth + roles, WhatsApp OTP via the Business Cloud API, Discord OAuth login,
+WhatsApp OTP via the Business Cloud API, Discord OAuth login,
 WhatsApp announcement pushes, email notifications.

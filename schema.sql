@@ -1,4 +1,4 @@
--- FRC Team app schema (SQLite). No auth yet: users.password_hash is a stub for later.
+-- FRC Team app schema (SQLite).
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
   phone         TEXT,
   role          TEXT NOT NULL DEFAULT 'student'
                 CHECK (role IN ('student','parent','mentor','admin')),
-  password_hash TEXT,              -- NULL until auth is implemented
+  password_hash TEXT,              -- scrypt hash; NULL = no login yet
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

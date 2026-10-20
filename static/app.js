@@ -13,6 +13,11 @@ async function api(method, url, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await r.json().catch(() => ({}));
+  if (r.status === 401 && !url.startsWith("/api/auth/")) {
+    ME = null;
+    applyNav();
+    if ($("view-login").classList.contains("hidden")) showView("login");
+  }
   if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
   return data;
 }
@@ -35,25 +40,96 @@ let queueFilter = "pending";
 let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
 let trackEventId = null, travelEventId = null;
+let ME = null;          // logged-in user ({id,name,email,role}) or null
+let SETUP = false;      // first run: no account has a password yet
+const MENTOR = () => !!(ME && (ME.role === "mentor" || ME.role === "admin"));
+
+/* Show only the nav this session may use; chip + logout when logged in. */
+function applyNav() {
+  document.querySelectorAll("#nav button").forEach((b) => {
+    const v = b.dataset.view;
+    let show;
+    if (!ME) show = (v === "signup" || v === "login");
+    else if (!MENTOR()) show = (v !== "queue" && v !== "roster" && v !== "login");
+    else show = (v !== "login");
+    b.classList.toggle("navhide", !show);
+  });
+  $("account-box").classList.toggle("navhide", !ME);
+  if (ME) $("user-chip").textContent = ME.name + " \u00b7 " + ME.role;
+}
 
 /* ---------------- navigation ---------------- */
 document.querySelectorAll("#nav button").forEach((b) => {
   b.addEventListener("click", () => showView(b.dataset.view));
 });
 function showView(name) {
+  if (!ME && name !== "signup" && name !== "login") name = "login";
   document.querySelectorAll("#nav button").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
   $("view-" + name).classList.remove("hidden");
   ({signup: renderSignup, queue: renderQueue, roster: renderRoster,
-    events: renderEvents, tracking: renderTracking, travel: renderTravel})[name]();
+    events: renderEvents, tracking: renderTracking, travel: renderTravel,
+    login: renderLogin})[name]();
 }
+
+/* ---------------- login ---------------- */
+function renderLogin() {
+  const v = $("view-login");
+  if (ME) { showView("events"); return; }
+  v.innerHTML = `
+  <div class="login-wrap"><div class="card">
+    <h2>${SETUP ? "Create the admin account" : "Log in"}</h2>
+    <p class="sub">${SETUP
+      ? "First run: create the first team account — it becomes the admin. You can add everyone else later from Mentor Queue \u2192 Team accounts."
+      : "Mentors, parents and students log in here."}</p>
+    <div class="err" id="lg-err"></div>
+    ${SETUP ? '<div class="field"><label>Name</label><input id="lg-name"></div>' : ""}
+    <div class="field"><label>Email</label><input id="lg-email" type="email" autocomplete="username"></div>
+    <div class="field"><label>Password</label><input id="lg-pass" type="password" autocomplete="current-password"></div>
+    <button class="btn" id="lg-go">${SETUP ? "Create account" : "Log in"}</button>
+    ${SETUP ? "" : '<p class="sub" style="margin-top:16px">New to the team? <a href="#" id="lg-signup">Submit a sign-up application</a> — no account needed.</p>'}
+  </div></div>`;
+  $("lg-go").addEventListener("click", submitLogin);
+  $("lg-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") submitLogin(); });
+  const link = $("lg-signup");
+  if (link) link.addEventListener("click", (e) => { e.preventDefault(); showView("signup"); });
+}
+
+async function submitLogin() {
+  const errBox = $("lg-err");
+  errBox.textContent = "";
+  try {
+    const url = SETUP ? "/api/auth/setup" : "/api/auth/login";
+    const body = SETUP
+      ? {name: $("lg-name").value.trim(), email: $("lg-email").value.trim(), password: $("lg-pass").value}
+      : {email: $("lg-email").value.trim(), password: $("lg-pass").value};
+    ME = (await POST(url, body)).user;
+    SETUP = false;
+    applyNav();
+    toast("Welcome, " + ME.name + ".");
+    showView("events");
+    refreshBadges();
+  } catch (e) { errBox.textContent = e.message; }
+}
+
+async function doLogout() {
+  await POST("/api/auth/logout").catch(() => {});
+  ME = null;
+  const me = await GET("/api/auth/me").catch(() => ({setup_required: false}));
+  SETUP = !!me.setup_required;
+  applyNav();
+  showView("login");
+}
+
 async function refreshBadges() {
   try {
-    const pending = await GET("/api/members?status=pending");
-    const b = $("nav-pending");
-    b.textContent = pending.length;
-    b.classList.toggle("hidden", !pending.length);
+    if (MENTOR()) {
+      const pending = await GET("/api/members?status=pending");
+      const b = $("nav-pending");
+      b.textContent = pending.length;
+      b.classList.toggle("hidden", !pending.length);
+    }
     const events = await GET("/api/events");
     let awaiting = 0;
     for (const e of events) {
@@ -220,7 +296,25 @@ async function renderQueue() {
     <span style="flex:1"></span>
     <button class="btn danger small" id="q-clear">Clear sample entries</button>
   </div></div>
-  <div id="q-list">${members.map(queueCard).join("") || '<div class="card">Nothing here.</div>'}</div>`;
+  <div id="q-list">${members.map(queueCard).join("") || '<div class="card">Nothing here.</div>'}</div>
+  <div class="card"><h3>Team accounts</h3>
+    <p class="sub">Logins for mentors, parents and students \u2014 separate from sign-up applications. Only mentors/admins see this.</p>
+    <div id="ac-list"><span class="sub">Loading\u2026</span></div>
+    <div class="grid3" style="margin-top:12px">
+      <div class="field"><label>Name</label><input id="ac-name"></div>
+      <div class="field"><label>Email</label><input id="ac-email" type="email"></div>
+      <div class="field"><label>Role</label><select id="ac-role">
+        <option>student</option><option>parent</option><option>mentor</option><option>admin</option></select></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>Password <span class="hint">(8+ chars)</span></label><input id="ac-pass" type="password"></div>
+      <div class="field"><label>&nbsp;</label><div class="row">
+        <button class="btn small" id="ac-add">Create account</button>
+        <button class="btn small ghost" id="ac-reset">Reset password</button>
+      </div></div>
+    </div>
+    <p class="sub">Reset: put the account's email above, a new password, then hit Reset password.</p>
+  </div>`;
   v.querySelectorAll("[data-f]").forEach((b) =>
     b.addEventListener("click", () => { queueFilter = b.dataset.f; renderQueue(); }));
   $("q-clear").addEventListener("click", async () => {
@@ -231,6 +325,40 @@ async function renderQueue() {
   });
   v.querySelectorAll("[data-act]").forEach((b) =>
     b.addEventListener("click", () => queueAction(b)));
+  renderAccounts();
+}
+
+async function renderAccounts() {
+  const el = $("ac-list");
+  if (!el) return;
+  let users = [];
+  try { users = await GET("/api/users"); }
+  catch (e) { el.innerHTML = '<span class="sub">Could not load accounts.</span>'; return; }
+  el.innerHTML = users.map((u) =>
+    `<span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.name)} \u00b7 ${esc(u.role)}${u.has_password ? "" : " \u00b7 no login"}</span>`).join(" ")
+    || '<span class="sub">No accounts yet.</span>';
+  $("ac-add").onclick = async () => {
+    try {
+      await POST("/api/users", {name: $("ac-name").value.trim(),
+        email: $("ac-email").value.trim(), role: $("ac-role").value,
+        password: $("ac-pass").value});
+      toast("Account created.");
+      $("ac-name").value = $("ac-email").value = $("ac-pass").value = "";
+      renderAccounts();
+    } catch (e) { toast("Error: " + e.message); }
+  };
+  $("ac-reset").onclick = async () => {
+    try {
+      const email = $("ac-email").value.trim().toLowerCase();
+      const u = users.find((x) => (x.email || "").toLowerCase() === email);
+      if (!u) return toast("No account with that email.");
+      if (!confirm("Reset password for " + u.name + " (" + u.email + ")?")) return;
+      await POST("/api/users/" + u.id + "/password", {password: $("ac-pass").value});
+      toast("Password reset for " + u.name + ".");
+      $("ac-pass").value = "";
+      renderAccounts();
+    } catch (e) { toast("Error: " + e.message); }
+  };
 }
 
 function queueCard(m) {
@@ -348,9 +476,14 @@ function personOptions() {
   ]);
 }
 
+async function loadPeople() {
+  // Mentors get the full roster; everyone else the names-only directory.
+  rosterCache = await GET(MENTOR() ? "/api/roster" : "/api/people");
+}
+
 async function renderEvents() {
   const v = $("view-events");
-  rosterCache = await GET("/api/roster");
+  await loadPeople();
   const events = await GET("/api/events");
   const list = events.filter((e) => {
     const q = eventSearch.toLowerCase();
@@ -363,8 +496,8 @@ async function renderEvents() {
   v.innerHTML = `
   <div class="card"><h2>Events &amp; RSVPs</h2>
   <p class="sub">Mentors create events. Students and parents RSVP; over-capacity events waitlist with auto-promote.</p>
-  <h3>Create event</h3>
-  <div class="grid3">
+  <h3 class="mo">Create event</h3>
+  <div class="grid3 mo">
     <div class="field"><label>Title *</label><input id="e-title"></div>
     <div class="field"><label>Type</label><select id="e-type">
       ${types.map((t) => `<option value="${t}">${t[0].toUpperCase() + t.slice(1)}</option>`).join("")}</select></div>
@@ -375,8 +508,8 @@ async function renderEvents() {
       <input id="e-cap" inputmode="numeric"></div>
     <div class="field"><label>RSVP deadline</label><input id="e-dead" type="date"></div>
   </div>
-  <div class="field"><label>Notes</label><textarea id="e-notes"></textarea></div>
-  <div class="row"><button class="btn" id="e-create">Create event</button>
+  <div class="field mo"><label>Notes</label><textarea id="e-notes"></textarea></div>
+  <div class="row mo"><button class="btn" id="e-create">Create event</button>
     <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button></div>
   </div>
   <div class="card"><div class="row">
@@ -388,8 +521,9 @@ async function renderEvents() {
   v.querySelectorAll("[data-et]").forEach((b) =>
     b.addEventListener("click", () => { eventFilter = b.dataset.et; renderEvents(); }));
   $("e-q").addEventListener("input", (e) => { eventSearch = e.target.value; renderEvents(); });
-  $("e-create").addEventListener("click", createEvent);
-  $("e-fill").addEventListener("click", () => {
+  if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  const _ec = $("e-create"); if (_ec) _ec.addEventListener("click", createEvent);
+  const _ef = $("e-fill"); if (_ef) _ef.addEventListener("click", () => {
     $("e-title").value = "Build Session — Intake Prototype"; $("e-type").value = "build";
     $("e-date").value = "2026-11-02"; $("e-time").value = "10:00 AM";
     $("e-loc").value = "School robotics lab, Room 12"; $("e-cap").value = "12";
@@ -467,7 +601,7 @@ async function rsvpAction(b) {
 /* ---------------- tracking ---------------- */
 async function renderTracking() {
   const v = $("view-tracking");
-  rosterCache = await GET("/api/roster");
+  await loadPeople();
   const events = await GET("/api/events");
   if (!trackEventId && events.length) trackEventId = events[0].id;
   const ev = events.find((e) => e.id === trackEventId);
@@ -512,8 +646,8 @@ async function renderTracking() {
     return `<div class="row" style="margin:6px 0"><span><b>${esc(r.person_name)}</b>
       <span class="sub">(${r.person_kind})</span></span> ${st}<span style="flex:1"></span>
       ${r.person_kind === "student" && !c ? `<button class="btn small ghost" data-ci="self" data-m="${r.member_id}" data-n="${esc(r.person_name)}">Self check-in</button>` : ""}
-      ${!c ? `<button class="btn small" data-ci="mentor" data-m="${r.member_id}" data-k="${r.person_kind}" data-n="${esc(r.person_name)}">Mentor check-in</button>` : ""}
-      ${c && !c.verified ? `<button class="btn small" data-verify="${c.id}">Verify</button>` : ""}
+      ${!c && MENTOR() ? `<button class="btn small" data-ci="mentor" data-m="${r.member_id}" data-k="${r.person_kind}" data-n="${esc(r.person_name)}">Mentor check-in</button>` : ""}
+      ${c && !c.verified && MENTOR() ? `<button class="btn small" data-verify="${c.id}">Verify</button>` : ""}
     </div>`;
   }).join("") || '<span class="sub">No "going" RSVPs for this event yet.</span>'}
   </div></div>
@@ -526,7 +660,7 @@ async function renderTracking() {
     </table></details>`).join("") || '<span class="sub">No hours logged yet.</span>'}
   </div>
   <div class="card"><h3>Task board</h3>
-    <div class="row">
+    <div class="row mo">
       <input id="tk-title" placeholder="Task title *" style="flex:2;min-width:180px">
       <select id="tk-sub"><option value="">Subteam…</option>
         ${SUBTEAMS.map((s) => `<option>${esc(s.name)}</option>`).join("")}</select>
@@ -565,7 +699,8 @@ async function renderTracking() {
     await PATCH(`/api/checkins/${b.dataset.verify}`, {verified: true});
     toast("Verified."); renderTracking();
   }));
-  $("tk-add").addEventListener("click", async () => {
+  if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  const _tk = $("tk-add"); if (_tk) _tk.addEventListener("click", async () => {
     const t = $("tk-title").value.trim();
     if (!t) return toast("Task title is required.");
     await POST("/api/tasks", {title: t, subteam: $("tk-sub").value,
@@ -586,7 +721,7 @@ async function renderTracking() {
 /* ---------------- travel & logistics ---------------- */
 async function renderTravel() {
   const v = $("view-travel");
-  rosterCache = await GET("/api/roster");
+  await loadPeople();
   const events = await GET("/api/events");
   if (!travelEventId && events.length) travelEventId = events[0].id;
   if (!events.length) {
@@ -634,7 +769,7 @@ async function renderTravel() {
 
   <div class="card"><h3>Tool sign-up</h3>
   <p class="sub">Mentors list what the event needs; anyone claims what they'll bring.</p>
-  <div class="row">
+  <div class="row mo">
     <input id="tl-name" placeholder="Tool or gear needed *" style="flex:2;min-width:160px">
     <input id="tl-qty" placeholder="Qty" inputmode="numeric" style="max-width:70px">
     <input id="tl-notes" placeholder="Notes" style="flex:1;min-width:120px">
@@ -653,15 +788,15 @@ async function renderTravel() {
   <div class="card"><h3>Hotel assignments</h3>
   ${t.hotel ? hotelHTML(t.hotel, students) : `
     <p class="sub">No hotel block for this event. Add one for remote tournaments:</p>
-    <div class="grid3">
+    <div class="grid3 mo">
       <div class="field"><label>Hotel name *</label><input id="h-name"></div>
       <div class="field"><label>Address</label><input id="h-addr"></div>
       <div class="field"><label>Check-in</label><input id="h-in" type="date"></div>
       <div class="field"><label>Check-out</label><input id="h-out" type="date"></div>
     </div>
-    <div class="field"><label>Notes <span class="hint">(room block details)</span></label>
+    <div class="field mo"><label>Notes <span class="hint">(room block details)</span></label>
       <textarea id="h-notes"></textarea></div>
-    <button class="btn small" id="h-add">Save hotel block</button>`}
+    <button class="btn small mo" id="h-add">Save hotel block</button>`}
   </div>`;
   $("tr-ev").addEventListener("change", (e) => { travelEventId = parseInt(e.target.value, 10); renderTravel(); });
   const hb = $("h-add");
@@ -695,7 +830,8 @@ async function renderTravel() {
     toast(r.promoted ? `${r.promoted.person_name} promoted from the waitlist.` : "Released.");
     renderTravel();
   }));
-  $("tl-add").addEventListener("click", async () => {
+  if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  const _tl = $("tl-add"); if (_tl) _tl.addEventListener("click", async () => {
     if (!$("tl-name").value.trim()) return toast("Tool name is required.");
     await POST("/api/tools", {event_id: travelEventId, name: $("tl-name").value.trim(),
       qty: parseInt($("tl-qty").value, 10) || 1, notes: $("tl-notes").value.trim()});
@@ -748,18 +884,17 @@ function hotelHTML(h, students) {
     ${esc(h.check_in || "")} → ${esc(h.check_out || "")}</div>
   ${h.notes ? `<div class="sub">${esc(h.notes)}</div>` : ""}
   <h3>Rooms</h3>
-  <div class="row"><input id="rm-label" placeholder="Room label *" style="max-width:200px">
+  <div class="row mo"><input id="rm-label" placeholder="Room label *" style="max-width:200px">
     <input id="rm-cap" placeholder="Beds" inputmode="numeric" style="max-width:80px">
     <button class="btn small" id="rm-add">Add room</button></div>
   ${h.rooms.map((r) => {
     const occ = r.occupants.map((o) =>
-      `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}
-       <a href="#" data-unplace="${o.id}" title="remove">✕</a></span>`).join("");
+      `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${MENTOR() ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
     return `<div class="card"><div class="row"><b>${esc(r.label)}</b>
       <span class="pill ${r.occupants.length >= r.capacity ? "red" : "green"}">
       ${r.occupants.length}/${r.capacity} beds</span></div>
       <div>${occ || '<span class="sub">empty</span>'}</div>
-      <div class="row" style="margin-top:6px"><select id="plc-${r.id}">
+      <div class="row mo" style="margin-top:6px"><select id="plc-${r.id}">
         <option value="">Place a student…</option>${students}</select>
         <button class="btn small" data-place="${r.id}">Place</button></div></div>`;
   }).join("")}
@@ -786,6 +921,16 @@ function hotelHTML(h, students) {
       esc(location.origin) + ". Is the Flask server running?</p>";
     return;
   }
-  showView("signup");
-  refreshBadges();
+  let me = {user: null, setup_required: false};
+  try { me = await GET("/api/auth/me"); } catch (e) { /* auth unreachable */ }
+  ME = me.user;
+  SETUP = !!me.setup_required;
+  $("logout-btn").addEventListener("click", doLogout);
+  applyNav();
+  if (ME) {
+    showView("events");
+    refreshBadges();
+  } else {
+    showView("login");
+  }
 })();

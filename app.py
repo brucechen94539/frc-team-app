@@ -1,24 +1,50 @@
 """FRC Team Sign-Up — lightweight self-hosted app.
 
-Stack: Flask + stdlib sqlite3. No auth in this build (see README);
-users.password_hash is stubbed NULL for the future auth step.
+Stack: Flask + stdlib sqlite3. Accounts live in the users table with
+scrypt-hashed passwords; login state is a signed session cookie (see README).
 
 Run:  pip install -r requirements.txt && python app.py
 Env:  DB=<path>   SQLite file (default: data.db next to this file)
       DB=:memory: ephemeral in-memory mode (data lost on restart)
       PORT=<port>  default 5000
 """
+import functools
 import json
 import os
+import secrets
 import sqlite3
 import threading
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, session
+from werkzeug.security import check_password_hash, generate_password_hash
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB", os.path.join(BASE_DIR, "data.db"))
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
+
+
+def _load_secret_key():
+    env = os.environ.get("SECRET_KEY")
+    if env:
+        return env
+    path = os.path.join(BASE_DIR, ".secret_key")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        key = secrets.token_hex(32)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(key)
+        except OSError:
+            pass  # read-only dir: sessions just will not survive restarts
+        return key
+
+
+app.secret_key = _load_secret_key()
 
 # ----------------------------------------------------------------------------
 # Database: one shared connection + lock. Fine for a small team on one
@@ -91,6 +117,136 @@ def err(msg, code=400):
 
 
 # ----------------------------------------------------------------------------
+# Authentication — accounts live in the users table (SQLite); passwords are
+# scrypt-hashed (werkzeug). Login state is Flask's signed session cookie.
+# Public without login: the fresh sign-up application (POST /api/members),
+# the subteam list the form needs, and the /api/auth/* endpoints.
+# ----------------------------------------------------------------------------
+PUBLIC_API = {("GET", "/api/subteams"), ("POST", "/api/members")}
+MENTOR_ROLES = ("mentor", "admin")
+
+
+def current_user():
+    uid = session.get("uid")
+    if not uid:
+        return None
+    return q_one("SELECT id, name, email, role FROM users WHERE id=?", (uid,))
+
+
+def setup_required():
+    """True until at least one account has a password (first-run setup)."""
+    r = q_one("SELECT COUNT(*) AS n FROM users WHERE password_hash IS NOT NULL")
+    return not r or r["n"] == 0
+
+
+def require_role(*roles):
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            u = current_user()
+            if not u:
+                return err("login required", 401)
+            if u["role"] not in roles:
+                return err("mentor/admin access required", 403)
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
+
+
+def _mentor_denied():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] not in MENTOR_ROLES:
+        return err("mentor/admin access required", 403)
+    return None
+
+
+@app.before_request
+def _auth_gate():
+    p = request.path
+    if not p.startswith("/api/") or p.startswith("/api/auth/"):
+        return None
+    if (request.method, p) in PUBLIC_API:
+        return None
+    if not current_user():
+        return err("login required", 401)
+    return None
+
+
+def _public_user(u):
+    return {k: u[k] for k in ("id", "name", "email", "role")}
+
+
+@app.route("/api/auth/me")
+def api_auth_me():
+    u = current_user()
+    return jsonify({"user": _public_user(u) if u else None,
+                    "setup_required": setup_required()})
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    b = request.get_json(force=True, silent=True) or {}
+    email = (b.get("email") or "").strip().lower()
+    u = q_one("SELECT * FROM users WHERE lower(email)=?", (email,))
+    if (not u or not u["password_hash"] or
+            not check_password_hash(u["password_hash"], b.get("password") or "")):
+        return err("invalid email or password", 401)
+    session.clear()
+    session["uid"] = u["id"]
+    return jsonify({"user": _public_user(u)})
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/setup", methods=["POST"])
+def api_auth_setup():
+    if not setup_required():
+        return err("setup is already complete", 400)
+    b = request.get_json(force=True, silent=True) or {}
+    name = (b.get("name") or "").strip()
+    email = (b.get("email") or "").strip().lower()
+    pw = b.get("password") or ""
+    if not name or "@" not in email or len(pw) < 8:
+        return err("name, a valid email, and a password of 8+ characters required")
+    existing = q_one("SELECT * FROM users WHERE lower(email)=?", (email,))
+    if existing:
+        execute("UPDATE users SET name=?, password_hash=? WHERE id=?",
+                (name, generate_password_hash(pw), existing["id"]))
+        uid = existing["id"]
+    else:
+        uid = execute("INSERT INTO users (name, email, role, password_hash)"
+                      " VALUES (?,?,?,?)",
+                      (name, email, "admin", generate_password_hash(pw)))
+    session.clear()
+    session["uid"] = uid
+    return jsonify({"user": _public_user(q_one(
+        "SELECT id, name, email, role FROM users WHERE id=?", (uid,)))}), 201
+
+
+@app.route("/api/auth/password", methods=["POST"])
+def api_auth_password():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    b = request.get_json(force=True, silent=True) or {}
+    full = q_one("SELECT * FROM users WHERE id=?", (u["id"],))
+    if not check_password_hash(full["password_hash"] or "", b.get("current") or ""):
+        return err("current password is incorrect", 403)
+    new = b.get("new") or ""
+    if len(new) < 8:
+        return err("new password must be 8+ characters")
+    execute("UPDATE users SET password_hash=? WHERE id=?",
+            (generate_password_hash(new), u["id"]))
+    return jsonify({"ok": True})
+
+
+# ----------------------------------------------------------------------------
 # Frontend (same origin, no CORS)
 # ----------------------------------------------------------------------------
 @app.route("/")
@@ -110,20 +266,47 @@ def api_subteams():
 
 @app.route("/api/users", methods=["GET", "POST"])
 def api_users():
+    denied = _mentor_denied()
+    if denied:
+        return denied
     if request.method == "GET":
-        return jsonify(q_all("SELECT id, name, email, phone, role, created_at"
-                             " FROM users ORDER BY name"))
+        return jsonify(q_all(
+            "SELECT id, name, email, phone, role, created_at,"
+            " (password_hash IS NOT NULL) AS has_password"
+            " FROM users ORDER BY name"))
     b = request.get_json(force=True)
     if not b.get("name") or b.get("role") not in (
             "student", "parent", "mentor", "admin"):
         return err("name and a valid role (student|parent|mentor|admin) required")
-    # password_hash deliberately NOT settable here — no auth in this build.
-    uid = execute("INSERT INTO users (name, email, phone, role) VALUES (?,?,?,?)",
-                  (b["name"], b.get("email"), b.get("phone"), b["role"]))
+    pw = b.get("password") or ""
+    if pw and len(pw) < 8:
+        return err("password must be 8+ characters")
+    try:
+        uid = execute(
+            "INSERT INTO users (name, email, phone, role, password_hash)"
+            " VALUES (?,?,?,?,?)",
+            (b["name"], b.get("email"), b.get("phone"), b["role"],
+             generate_password_hash(pw) if pw else None))
+    except sqlite3.IntegrityError:
+        return err("a user with that email already exists")
     return jsonify(q_one("SELECT id, name, email, phone, role, created_at"
                          " FROM users WHERE id=?", (uid,))), 201
 
 
+@app.route("/api/users/<int:uid>/password", methods=["POST"])
+def api_user_password(uid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    b = request.get_json(force=True, silent=True) or {}
+    pw = b.get("password") or ""
+    if len(pw) < 8:
+        return err("password must be 8+ characters")
+    if not q_one("SELECT id FROM users WHERE id=?", (uid,)):
+        return err("user not found", 404)
+    execute("UPDATE users SET password_hash=? WHERE id=?",
+            (generate_password_hash(pw), uid))
+    return jsonify({"ok": True})
 # ----------------------------------------------------------------------------
 # Members (sign-up applications + roster)
 # ----------------------------------------------------------------------------
@@ -137,6 +320,9 @@ MEMBER_COLS = ("first_name, last_name, school, grade, experience, student_email,
 @app.route("/api/members", methods=["GET", "POST"])
 def api_members():
     if request.method == "GET":
+        denied = _mentor_denied()
+        if denied:
+            return denied
         status = request.args.get("status")
         if status:
             members = q_all("SELECT * FROM members WHERE status=? ORDER BY id",
@@ -169,6 +355,7 @@ def api_members():
 
 
 @app.route("/api/members/<int:mid>", methods=["GET", "PATCH", "DELETE"])
+@require_role("mentor", "admin")
 def api_member(mid):
     m = q_one("SELECT * FROM members WHERE id=?", (mid,))
     if not m:
@@ -195,6 +382,7 @@ def api_member(mid):
 
 
 @app.route("/api/members/sample", methods=["DELETE"])
+@require_role("mentor", "admin")
 def api_members_clear_samples():
     with _lock:
         db = get_db()
@@ -204,6 +392,7 @@ def api_members_clear_samples():
 
 
 @app.route("/api/members/<int:mid>/welcome")
+@require_role("mentor", "admin")
 def api_welcome(mid):
     m = q_one("SELECT * FROM members WHERE id=?", (mid,))
     if not m:
@@ -223,12 +412,23 @@ def api_welcome(mid):
 
 
 @app.route("/api/roster")
+@require_role("mentor", "admin")
 def api_roster():
     return jsonify(q_all("SELECT * FROM members WHERE status='approved'"
                          " ORDER BY last_name, first_name"))
 
 
+@app.route("/api/people")
+def api_people():
+    """Names-only directory of approved members for RSVP/travel pickers.
+    Full contact details stay on the mentor-only roster."""
+    return jsonify(q_all(
+        "SELECT id, first_name, last_name, parent_name FROM members"
+        " WHERE status='approved' ORDER BY last_name, first_name"))
+
+
 @app.route("/api/roster.csv")
+@require_role("mentor", "admin")
 def api_roster_csv():
     import csv
     import io
@@ -256,6 +456,10 @@ def api_roster_csv():
 # ----------------------------------------------------------------------------
 @app.route("/api/events", methods=["GET", "POST"])
 def api_events():
+    if request.method == "POST":
+        denied = _mentor_denied()
+        if denied:
+            return denied
     if request.method == "GET":
         return jsonify(q_all("SELECT * FROM events ORDER BY date, id"))
     b = request.get_json(force=True)
@@ -275,6 +479,7 @@ def api_events():
 
 
 @app.route("/api/events/<int:eid>", methods=["DELETE"])
+@require_role("mentor", "admin")
 def api_event_delete(eid):
     execute("DELETE FROM events WHERE id=?", (eid,))
     return jsonify({"deleted": eid})
@@ -380,6 +585,7 @@ def api_checkin():
 
 
 @app.route("/api/checkins/<int:cid>", methods=["PATCH"])
+@require_role("mentor", "admin")
 def api_checkin_verify(cid):
     b = request.get_json(force=True)
     if "verified" not in b:
@@ -414,6 +620,10 @@ def api_hours():
 
 @app.route("/api/tasks", methods=["GET", "POST"])
 def api_tasks():
+    if request.method == "POST":
+        denied = _mentor_denied()
+        if denied:
+            return denied
     if request.method == "GET":
         return jsonify(q_all("SELECT * FROM tasks ORDER BY id"))
     b = request.get_json(force=True)
@@ -429,6 +639,10 @@ def api_tasks():
 
 @app.route("/api/tasks/<int:tid>", methods=["PATCH", "DELETE"])
 def api_task(tid):
+    if request.method == "DELETE":
+        denied = _mentor_denied()
+        if denied:
+            return denied
     if request.method == "DELETE":
         execute("DELETE FROM tasks WHERE id=?", (tid,))
         return jsonify({"deleted": tid})
@@ -541,6 +755,7 @@ def api_carpool_claim_delete(clid):
 
 
 @app.route("/api/tools", methods=["POST"])
+@require_role("mentor", "admin")
 def api_tool_create():
     b = request.get_json(force=True)
     if not b.get("event_id") or not b.get("name"):
@@ -569,6 +784,7 @@ def api_tool_unclaim(tid):
 
 
 @app.route("/api/hotels", methods=["POST"])
+@require_role("mentor", "admin")
 def api_hotel_create():
     b = request.get_json(force=True)
     if not b.get("event_id") or not b.get("name"):
@@ -590,6 +806,7 @@ def api_hotel_create():
 
 
 @app.route("/api/hotels/<int:hid>/rooms", methods=["POST"])
+@require_role("mentor", "admin")
 def api_room_create(hid):
     b = request.get_json(force=True)
     if not b.get("label"):
@@ -620,6 +837,7 @@ def api_rooming_request(hid):
 
 
 @app.route("/api/rooms/<int:rid>/occupants", methods=["POST"])
+@require_role("mentor", "admin")
 def api_room_place(rid):
     b = request.get_json(force=True)
     if not b.get("member_id"):
@@ -643,6 +861,7 @@ def api_room_place(rid):
 
 
 @app.route("/api/room_occupants/<int:oid>", methods=["DELETE"])
+@require_role("mentor", "admin")
 def api_room_unplace(oid):
     o = q_one("""SELECT o.*, r.hotel_id FROM room_occupants o
                  JOIN rooms r ON r.id = o.room_id WHERE o.id=?""", (oid,))

@@ -299,7 +299,7 @@ def seed(conn):
             " notes, status) VALUES (?,?,?,?,?)",
             (hotel_id, mid, json.dumps(rq["roommates"]), rq["notes"],
              "placed" if placed else "pending"))
-    # stub admin user (no password_hash — auth comes later)
+    # admin account without a password — first-run setup assigns it (see README)
     cur.execute(
         "INSERT INTO users (name, email, role) VALUES (?,?,?)",
         ("Team Admin", "admin@example.com", "admin"))

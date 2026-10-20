@@ -13,15 +13,21 @@
   <p class="tagline">Team HQ — sign-ups · events · tracking</p>
   <nav id="nav">
     <button data-view="signup" class="active">Sign Up</button>
+    <button data-view="login">Log in</button>
     <button data-view="queue">Mentor Queue <span id="nav-pending" class="badge hidden"></span></button>
     <button data-view="roster">Roster</button>
     <button data-view="events">Events &amp; RSVPs</button>
     <button data-view="tracking">Tracking</button>
     <button data-view="travel">Travel &amp; Logistics <span id="nav-rooms" class="badge hidden"></span></button>
   </nav>
+  <div id="account-box" class="navhide">
+    <span id="user-chip" class="pill"></span>
+    <button id="logout-btn" class="btn small ghost">Log out</button>
+  </div>
 </header>
 <main id="main">
   <section id="view-signup" class="view"></section>
+  <section id="view-login" class="view hidden"></section>
   <section id="view-queue" class="view hidden"></section>
   <section id="view-roster" class="view hidden"></section>
   <section id="view-events" class="view hidden"></section>
