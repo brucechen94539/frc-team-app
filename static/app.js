@@ -746,6 +746,7 @@ async function renderTravel() {
   </select></div></div>
 
   <div class="card"><h3>Carpools</h3>
+  ${ME.role !== "student" ? `
   <div class="grid3">
     <div class="field"><label>Driver name *</label><input id="cp-driver"></div>
     <div class="field"><label>Seats *</label><input id="cp-seats" inputmode="numeric" placeholder="4"></div>
@@ -754,7 +755,7 @@ async function renderTravel() {
     <div class="field"><label>Return plan</label><input id="cp-ret" placeholder="Sun after finals"></div>
     <div class="field"><label>Notes</label><input id="cp-notes"></div>
   </div>
-  <button class="btn small" id="cp-add">Post ride</button>
+  <button class="btn small" id="cp-add">Post ride</button>` : ""}
   <div id="cp-list" style="margin-top:10px">
   ${t.carpools.map((c) => `
     <div class="card"><div class="row"><b>${esc(c.driver_name)}</b>
@@ -809,7 +810,8 @@ async function renderTravel() {
       check_out: $("h-out").value, notes: $("h-notes").value.trim()});
     toast("Hotel block saved."); renderTravel();
   });
-  $("cp-add").addEventListener("click", async () => {
+  const cpAdd = $("cp-add");
+  if (cpAdd) cpAdd.addEventListener("click", async () => {
     if (!$("cp-driver").value.trim() || !$("cp-seats").value.trim())
       return toast("Driver name and seats are required.");
     await POST("/api/carpools", {event_id: travelEventId,

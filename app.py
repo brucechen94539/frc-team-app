@@ -713,6 +713,9 @@ def api_travel(eid):
 
 @app.route("/api/carpools", methods=["POST"])
 def api_carpool_create():
+    # Students claim seats; only parents/mentors/admins may define rides.
+    if current_user()["role"] == "student":
+        return err("parents, mentors and admins only", 403)
     b = request.get_json(force=True)
     if not b.get("event_id") or not b.get("driver_name"):
         return err("event_id and driver_name required")
