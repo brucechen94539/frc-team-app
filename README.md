@@ -22,6 +22,8 @@ sign-up application form, by design.
   verification, and room placement are mentor/admin-only.
 - **Session key:** the app reads `SECRET_KEY` from the environment, or
   creates `.secret_key` in the app directory (gitignored) on first run.
+- **Color scheme:** dark by default; the ☀ Light / 🌙 Dark button in the
+  header switches to a light scheme, remembered per browser.
 
 Do not expose this to the open internet without HTTPS and login
 rate-limiting in front of it.
@@ -83,6 +85,9 @@ DB=/srv/frc/team.db python app.py
 - `POST /api/hotels/<id>/requests` (upsert per student; families' rooming requests)
 - `POST /api/rooms/<id>/occupants` (mentor places; flips request to `placed`)
 - `DELETE /api/room_occupants/<id>`
+- `POST/DELETE /api/rooms/<id>/parent` — room parent: the adult volunteer who
+  checks the room in (the block is already booked; students are under 18, so
+  every room needs one — parents volunteer in the Travel tab)
 - `GET /api/subteams` · `GET/POST /api/users` (mentor/admin) ·
   `POST /api/users/<id>/password` (mentor/admin password reset)
 - `GET /api/people` — names-only approved-member directory for non-mentors

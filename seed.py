@@ -290,6 +290,13 @@ def seed(conn):
         for mem_code in r["occupants"]:
             cur.execute("INSERT INTO room_occupants (room_id, member_id) VALUES (?,?)",
                         (room_id, member_ids[mem_code]))
+        # sample room parent: the first occupant's parent volunteers as room parent
+        if r["occupants"]:
+            pm = cur.execute("SELECT id, parent_name FROM members WHERE code=?",
+                             (r["occupants"][0],)).fetchone()
+            if pm:
+                cur.execute("UPDATE rooms SET parent_member_id=?, parent_name=?"
+                            " WHERE id=?", (pm[0], pm[1], room_id))
     for rq in ROOMING_REQUESTS:
         mid = member_ids[rq["member"]]
         placed = cur.execute(

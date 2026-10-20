@@ -72,11 +72,23 @@ def init_db():
     db = get_db()
     with open(os.path.join(BASE_DIR, "schema.sql")) as f:
         db.executescript(f.read())
+    _migrate(db)
     from seed import seed
     with _lock:
         seeded = seed(db)
     if seeded:
         print("Seeded sample data.")
+
+
+def _migrate(db):
+    """Additive migrations for databases created before these columns."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(rooms)")}
+    with _lock:
+        if "parent_member_id" not in cols:
+            db.execute("ALTER TABLE rooms ADD COLUMN parent_member_id INTEGER")
+        if "parent_name" not in cols:
+            db.execute("ALTER TABLE rooms ADD COLUMN parent_name TEXT")
+        db.commit()
 
 
 def row(d):
@@ -875,6 +887,24 @@ def api_room_unplace(oid):
                    (o["hotel_id"], o["member_id"]))
         db.commit()
     return jsonify({"deleted": oid})
+
+
+@app.route("/api/rooms/<int:rid>/parent", methods=["POST", "DELETE"])
+def api_room_parent(rid):
+    """Room parent: the adult volunteer who checks the room in (students are
+    under 18). Any logged-in user can volunteer a parent; mentors finalize."""
+    if not q_one("SELECT id FROM rooms WHERE id=?", (rid,)):
+        return err("room not found", 404)
+    if request.method == "DELETE":
+        execute("UPDATE rooms SET parent_member_id=NULL, parent_name=NULL"
+                " WHERE id=?", (rid,))
+        return jsonify({"ok": True})
+    b = request.get_json(force=True, silent=True) or {}
+    if not b.get("member_id") or not (b.get("person_name") or "").strip():
+        return err("member_id and person_name required")
+    execute("UPDATE rooms SET parent_member_id=?, parent_name=? WHERE id=?",
+            (b["member_id"], b["person_name"].strip(), rid))
+    return jsonify({"ok": True})
 
 
 # ----------------------------------------------------------------------------

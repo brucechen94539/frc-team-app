@@ -734,6 +734,8 @@ async function renderTravel() {
   const people = personOptions();
   const popts = people.map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
+  const poptParents = people.filter((p) => p.kind === "parent").map((p) =>
+    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
   const students = rosterCache.map((m) =>
     `<option value="${m.id}">${esc(m.first_name)} ${esc(m.last_name)}</option>`).join("");
   v.innerHTML = `
@@ -786,7 +788,7 @@ async function renderTravel() {
   </div></div>
 
   <div class="card"><h3>Hotel assignments</h3>
-  ${t.hotel ? hotelHTML(t.hotel, students) : `
+  ${t.hotel ? hotelHTML(t.hotel, students, poptParents) : `
     <p class="sub">No hotel block for this event. Add one for remote tournaments:</p>
     <div class="grid3 mo">
       <div class="field"><label>Hotel name *</label><input id="h-name"></div>
@@ -847,6 +849,21 @@ async function renderTravel() {
     await POST(`/api/tools/${b.dataset.tunclaim}/unclaim`);
     toast("Unclaimed."); renderTravel();
   }));
+  v.querySelectorAll("[data-rvol]").forEach((b) => b.addEventListener("click", async () => {
+    const sel = $("rp-" + b.dataset.rvol);
+    if (!sel.value) return toast("Pick which parent is volunteering.");
+    const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
+    await POST(`/api/rooms/${b.dataset.rvol}/parent`,
+      {member_id: p.member_id,
+       person_name: p.name.replace(/ \((student|parent)\)$/, "")});
+    toast("Room parent set — thank you for volunteering!");
+    renderTravel();
+  }));
+  v.querySelectorAll("[data-rparentx]").forEach((b) => b.addEventListener("click", async () => {
+    await DEL(`/api/rooms/${b.dataset.rparentx}/parent`);
+    toast("Room parent removed.");
+    renderTravel();
+  }));
   const ra = $("rm-add");
   if (ra) ra.addEventListener("click", async () => {
     if (!$("rm-label").value.trim()) return toast("Room label is required.");
@@ -878,12 +895,14 @@ async function renderTravel() {
   });
 }
 
-function hotelHTML(h, students) {
+function hotelHTML(h, students, poptParents) {
+  const missing = h.rooms.filter((r) => !r.parent_name).length;
   return `
   <div class="sub"><b>${esc(h.name)}</b> · ${esc(h.address || "")} ·
     ${esc(h.check_in || "")} → ${esc(h.check_out || "")}</div>
   ${h.notes ? `<div class="sub">${esc(h.notes)}</div>` : ""}
-  <h3>Rooms</h3>
+  <h3>Rooms ${missing ? `<span class="pill amber">${missing} need${missing > 1 ? "" : "s"} a room parent</span>` : ""}</h3>
+  <p class="sub">The block is already booked. Every room needs an adult <b>room parent</b> to check in — students are under 18. Parents: volunteer for a room below.</p>
   <div class="row mo"><input id="rm-label" placeholder="Room label *" style="max-width:200px">
     <input id="rm-cap" placeholder="Beds" inputmode="numeric" style="max-width:80px">
     <button class="btn small" id="rm-add">Add room</button></div>
@@ -894,6 +913,15 @@ function hotelHTML(h, students) {
       <span class="pill ${r.occupants.length >= r.capacity ? "red" : "green"}">
       ${r.occupants.length}/${r.capacity} beds</span></div>
       <div>${occ || '<span class="sub">empty</span>'}</div>
+      <div class="row" style="margin-top:6px">
+        ${r.parent_name
+          ? `<span class="pill green">Room parent: ${esc(r.parent_name)}</span>
+             <button class="btn small ghost" data-rparentx="${r.id}">Remove</button>`
+          : `<span class="pill amber">Needs a room parent</span>`}
+      </div>
+      ${!r.parent_name ? `<div class="row" style="margin-top:6px">
+        <select id="rp-${r.id}"><option value="">Volunteer as room parent…</option>${poptParents}</select>
+        <button class="btn small" data-rvol="${r.id}">Volunteer</button></div>` : ""}
       <div class="row mo" style="margin-top:6px"><select id="plc-${r.id}">
         <option value="">Place a student…</option>${students}</select>
         <button class="btn small" data-place="${r.id}">Place</button></div></div>`;
@@ -926,6 +954,17 @@ function hotelHTML(h, students) {
   ME = me.user;
   SETUP = !!me.setup_required;
   $("logout-btn").addEventListener("click", doLogout);
+  const themeBtn = $("theme-btn");
+  const applyTheme = (t) => {
+    document.documentElement.setAttribute("data-theme", t);
+    themeBtn.textContent = t === "light" ? "🌙 Dark" : "☀ Light";
+    try { localStorage.setItem("frc-theme", t); } catch (e) { /* private mode */ }
+  };
+  themeBtn.addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme") || "dark";
+    applyTheme(cur === "light" ? "dark" : "light");
+  });
+  applyTheme(document.documentElement.getAttribute("data-theme") || "dark");
   applyNav();
   if (ME) {
     showView("events");

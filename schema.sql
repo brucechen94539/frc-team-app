@@ -123,7 +123,9 @@ CREATE TABLE IF NOT EXISTS rooms (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   hotel_id  INTEGER NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,
   label     TEXT NOT NULL,
-  capacity  INTEGER NOT NULL DEFAULT 4
+  capacity  INTEGER NOT NULL DEFAULT 4,
+  parent_member_id INTEGER,  -- room parent (adult volunteer; students are under 18)
+  parent_name      TEXT      -- denormalized display name, like RSVPs/check-ins
 );
 
 CREATE TABLE IF NOT EXISTS room_occupants (
