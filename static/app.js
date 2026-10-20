@@ -734,10 +734,18 @@ async function renderTravel() {
   const people = personOptions();
   const popts = people.map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
-  const poptParents = people.filter((p) => p.kind === "parent").map((p) =>
-    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
-  const students = rosterCache.map((m) =>
-    `<option value="${m.id}">${esc(m.first_name)} ${esc(m.last_name)}</option>`).join("");
+  // Travel lists pull dynamically from this event's attendees (RSVP 'going').
+  const attPeople = (t.attendees || []).map((a) => ({member_id: a.member_id,
+    kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
+  const optJSON = (p) =>
+    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`;
+  const attOpts = attPeople.map(optJSON).join("");
+  const attParents = attPeople.filter((p) => p.kind === "parent").map(optJSON).join("");
+  const attStudents = (t.attendees || []).filter((a) => a.person_kind === "student");
+  const students = attStudents.map((a) =>
+    `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
+  const studentNames = attStudents.map((a) =>
+    `<option value="${esc(a.person_name)}">${esc(a.person_name)}</option>`).join("");
   v.innerHTML = `
   <div class="card"><h2>Travel &amp; Logistics</h2>
   <p class="sub">Carpools, tool sign-up, and hotel assignments — organized per event.</p>
@@ -765,7 +773,7 @@ async function renderTravel() {
       `<span class="pill">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="release">✕</a></span>`).join("") || '<span class="sub">none yet</span>'}</div>
     ${c.waitlist.length ? `<div>Waitlist: ${c.waitlist.map((x) =>
       `<span class="pill amber">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : ""}
-    <div class="row" style="margin-top:6px"><select id="cps-${c.id}">${popts}</select>
+    <div class="row" style="margin-top:6px"><select id="cps-${c.id}">${attOpts}</select>
       <button class="btn small" data-claim="${c.id}">Claim seat</button></div>
     </div>`).join("") || '<p class="sub">No carpools posted for this event yet.</p>'}
   </div></div>
@@ -789,7 +797,7 @@ async function renderTravel() {
   </div></div>
 
   <div class="card"><h3>Hotel assignments</h3>
-  ${t.hotel ? hotelHTML(t.hotel, students, poptParents) : `
+  ${t.hotel ? hotelHTML(t.hotel, students, attParents, studentNames) : `
     <p class="sub">No hotel block for this event. Add one for remote tournaments:</p>
     <div class="grid3 mo">
       <div class="field"><label>Hotel name *</label><input id="h-name"></div>
@@ -814,19 +822,23 @@ async function renderTravel() {
   if (cpAdd) cpAdd.addEventListener("click", async () => {
     if (!$("cp-driver").value.trim() || !$("cp-seats").value.trim())
       return toast("Driver name and seats are required.");
-    await POST("/api/carpools", {event_id: travelEventId,
-      driver_name: $("cp-driver").value.trim(), seats: parseInt($("cp-seats").value, 10),
-      depart_from: $("cp-from").value.trim(), depart_time: $("cp-dt").value.trim(),
-      return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim()});
-    toast("Ride posted."); renderTravel();
+    try {
+      await POST("/api/carpools", {event_id: travelEventId,
+        driver_name: $("cp-driver").value.trim(), seats: parseInt($("cp-seats").value, 10),
+        depart_from: $("cp-from").value.trim(), depart_time: $("cp-dt").value.trim(),
+        return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim()});
+      toast("Ride posted."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
   });
   v.querySelectorAll("[data-claim]").forEach((b) => b.addEventListener("click", async () => {
     const p = JSON.parse($("cps-" + b.dataset.claim).value.replace(/&#39;/g, "'"));
-    const r = await POST(`/api/carpools/${b.dataset.claim}/claims`, {
-      member_id: p.member_id, person_kind: p.kind,
-      person_name: p.name.replace(/ \((student|parent)\)$/, "")});
-    toast(r.status === "waitlisted" ? "Car is full — added to the waitlist." : "Seat claimed.");
-    renderTravel();
+    try {
+      const r = await POST(`/api/carpools/${b.dataset.claim}/claims`, {
+        member_id: p.member_id, person_kind: p.kind,
+        person_name: p.name.replace(/ \((student|parent)\)$/, "")});
+      toast(r.status === "waitlisted" ? "Car is full — added to the waitlist." : "Seat claimed.");
+      renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
   }));
   v.querySelectorAll("[data-unclaim]").forEach((a) => a.addEventListener("click", async (e) => {
     e.preventDefault();
@@ -855,9 +867,17 @@ async function renderTravel() {
     const sel = $("rp-" + b.dataset.rvol);
     if (!sel.value) return toast("Pick which parent is volunteering.");
     const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
-    await POST(`/api/rooms/${b.dataset.rvol}/parent`, {member_id: p.member_id});
-    toast("Room parent set — thank you for volunteering!");
-    renderTravel();
+    try {
+      await POST(`/api/rooms/${b.dataset.rvol}/parent`, {member_id: p.member_id});
+      toast("Room parent set — thank you for volunteering!");
+      renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
+  v.querySelectorAll("[data-reqdel]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await DEL(`/api/rooming-requests/${b.dataset.reqdel}`);
+      toast("Request removed."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
   }));
   v.querySelectorAll("[data-rparentx]").forEach((b) => b.addEventListener("click", async () => {
     await DEL(`/api/rooms/${b.dataset.rparentx}/parent`);
@@ -888,14 +908,16 @@ async function renderTravel() {
   if (rq) rq.addEventListener("click", async () => {
     const mid = parseInt($("rq-who").value, 10);
     if (!mid) return toast("Pick a student.");
-    await POST(`/api/hotels/${t.hotel.id}/requests`, {member_id: mid,
-      preferred_roommates: $("rq-mates").value.split(",").map((s) => s.trim()).filter(Boolean),
-      notes: $("rq-notes").value.trim()});
-    toast("Rooming request saved."); renderTravel();
+    try {
+      await POST(`/api/hotels/${t.hotel.id}/requests`, {member_id: mid,
+        preferred_roommates: [...$("rq-mates").selectedOptions].map((o) => o.value),
+        notes: $("rq-notes").value.trim()});
+      toast("Rooming request saved."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
   });
 }
 
-function hotelHTML(h, students, poptParents) {
+function hotelHTML(h, students, poptParents, studentNames) {
   const canVol = ME && ME.role !== "student";
   return `
   <div class="sub"><b>${esc(h.name)}</b> · ${esc(h.address || "")} ·
@@ -927,8 +949,9 @@ function hotelHTML(h, students, poptParents) {
         <button class="btn small" data-place="${r.id}">Place</button></div></div>`;
   }).join("")}
   <h3>Rooming requests ${h.awaiting ? `<span class="pill amber">${h.awaiting} awaiting placement</span>` : ""}</h3>
+  <p class="sub">Lists show only students who RSVP'd as attending for this event.</p>
   <div class="row"><select id="rq-who"><option value="">Student…</option>${students}</select>
-    <input id="rq-mates" placeholder="Preferred roommates, comma-separated" style="flex:1;min-width:160px">
+    <select id="rq-mates" multiple size="3" title="Preferred roommates (Ctrl/Cmd-click for several)" style="flex:1;min-width:160px">${studentNames}</select>
     <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
     <button class="btn small" id="rq-add">Save request</button></div>
   <div style="margin-top:8px">
@@ -936,7 +959,10 @@ function hotelHTML(h, students, poptParents) {
     <span class="pill ${q.status === "placed" ? "green" : "amber"}">${q.status}</span>
     <b>${esc(q.first_name)} ${esc(q.last_name)}</b>
     <span class="sub">wants: ${esc((q.preferred_roommates || []).join(", ")) || "—"}</span>
-    <span class="sub">${esc(q.notes || "")}</span></div>`).join("") || '<span class="sub">No requests yet.</span>'}
+    <span class="sub">${esc(q.notes || "")}</span>
+    ${q.status === "pending" || MENTOR()
+      ? `<button class="btn small ghost" data-reqdel="${q.id}">${MENTOR() ? "Remove" : "Withdraw"}</button>` : ""}
+    </div>`).join("") || '<span class="sub">No requests yet.</span>'}
   </div>`;
 }
 

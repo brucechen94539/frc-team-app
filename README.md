@@ -28,6 +28,9 @@ sign-up application form, by design.
 Do not expose this to the open internet without HTTPS and login
 rate-limiting in front of it.
 
+**Docs:** feature rules live in [REQUIREMENTS.md](REQUIREMENTS.md);
+reported bugs and fixes in [BUGS.md](BUGS.md).
+
 ## Run it
 
 ```bash

@@ -707,8 +707,20 @@ def api_travel(eid):
                WHERE r.hotel_id=? ORDER BY r.created_at, r.id""", (hotel["id"],))
         hotel["requests"] = reqs
         hotel["awaiting"] = sum(1 for x in reqs if x["status"] == "pending")
+    attendees = q_all(
+        "SELECT member_id, person_kind, person_name FROM rsvps"
+        " WHERE event_id=? AND status='going' ORDER BY person_name", (eid,))
     return jsonify({"event": ev, "carpools": carpools, "tools": tools,
-                    "hotel": hotel})
+                    "hotel": hotel, "attendees": attendees})
+
+
+def is_attending(eid, member_id, kind):
+    """Attending = an RSVP with status 'going' for this event/person."""
+    if not member_id:
+        return False
+    return q_one("SELECT id FROM rsvps WHERE event_id=? AND member_id=?"
+                 " AND person_kind=? AND status='going'",
+                 (eid, member_id, kind)) is not None
 
 
 @app.route("/api/carpools", methods=["POST"])
@@ -721,6 +733,14 @@ def api_carpool_create():
         return err("event_id and driver_name required")
     if not b.get("seats"):
         return err("seats required")
+    # A parent offering a ride must be attending themselves (RSVP 'going');
+    # mentors/admins may also post team vehicles or coordinate rides.
+    if current_user()["role"] == "parent":
+        going_parents = {r["person_name"] for r in q_all(
+            "SELECT person_name FROM rsvps WHERE event_id=? AND"
+            " person_kind='parent' AND status='going'", (b["event_id"],))}
+        if b["driver_name"].strip() not in going_parents:
+            return err("the driver must RSVP as attending for this event first")
     cid = execute(
         """INSERT INTO carpools (event_id, driver_name, seats, depart_from,
            depart_time, return_info, notes, sample)
@@ -738,6 +758,9 @@ def api_carpool_claim(cid):
     b = request.get_json(force=True)
     if not b.get("person_name"):
         return err("person_name required")
+    if not is_attending(c["event_id"], b.get("member_id"), b.get("person_kind")):
+        return err("only people attending this event can claim a seat"
+                   " — RSVP as going first")
     taken = q_one("SELECT COUNT(*) n FROM carpool_claims"
                   " WHERE carpool_id=? AND status='claimed'", (cid,))["n"]
     status = "claimed" if taken < c["seats"] else "waitlisted"
@@ -836,6 +859,19 @@ def api_rooming_request(hid):
     b = request.get_json(force=True)
     if not b.get("member_id"):
         return err("member_id required")
+    hotel = q_one("SELECT * FROM hotels WHERE id=?", (hid,))
+    if not hotel:
+        return err("hotel not found", 404)
+    eid = hotel["event_id"]
+    if not is_attending(eid, b["member_id"], "student"):
+        return err("only students attending this event can request a room"
+                   " — RSVP as going first")
+    going_names = {r["person_name"] for r in q_all(
+        "SELECT person_name FROM rsvps WHERE event_id=? AND"
+        " person_kind='student' AND status='going'", (eid,))}
+    for name in b.get("preferred_roommates") or []:
+        if name not in going_names:
+            return err(f"{name} is not attending this event")
     with _lock:
         db = get_db()
         db.execute(
@@ -851,6 +887,22 @@ def api_rooming_request(hid):
     return jsonify({"ok": True}), 201
 
 
+@app.route("/api/rooming-requests/<int:qid>", methods=["DELETE"])
+def api_rooming_request_delete(qid):
+    """Withdraw rule: while a request is pending, the student can withdraw
+    it (any signed-in user acting for them); once placed/finalized, only
+    mentors/admins can remove it."""
+    q = q_one("SELECT * FROM rooming_requests WHERE id=?", (qid,))
+    if not q:
+        return err("request not found", 404)
+    if q["status"] == "placed":
+        u = current_user()
+        if not u or u["role"] not in ("mentor", "admin"):
+            return err("placed requests can only be removed by a mentor", 403)
+    execute("DELETE FROM rooming_requests WHERE id=?", (qid,))
+    return jsonify({"deleted": qid})
+
+
 @app.route("/api/rooms/<int:rid>/occupants", methods=["POST"])
 @require_role("mentor", "admin")
 def api_room_place(rid):
@@ -860,6 +912,10 @@ def api_room_place(rid):
     rm = q_one("SELECT * FROM rooms WHERE id=?", (rid,))
     if not rm:
         return err("room not found", 404)
+    hotel = q_one("SELECT * FROM hotels WHERE id=?", (rm["hotel_id"],))
+    if not is_attending(hotel["event_id"], b["member_id"], "student"):
+        return err("only students attending this event can be placed"
+                   " — RSVP as going first")
     occ = q_one("SELECT COUNT(*) n FROM room_occupants WHERE room_id=?", (rid,))["n"]
     if occ >= rm["capacity"]:
         return err("room is full", 409)
@@ -903,7 +959,8 @@ def api_room_parent(rid):
         return err("login required", 401)
     if u["role"] not in ("parent", "mentor", "admin"):
         return err("parents, mentors and admins only", 403)
-    if not q_one("SELECT id FROM rooms WHERE id=?", (rid,)):
+    room = q_one("SELECT * FROM rooms WHERE id=?", (rid,))
+    if not room:
         return err("room not found", 404)
     if request.method == "DELETE":
         execute("UPDATE rooms SET parent_member_id=NULL, parent_name=NULL"
@@ -915,6 +972,10 @@ def api_room_parent(rid):
     pname = ((m["parent_name"] if m else "") or "").strip()
     if not pname:
         return err("choose a family with a parent on record")
+    hotel = q_one("SELECT * FROM hotels WHERE id=?", (room["hotel_id"],))
+    if not is_attending(hotel["event_id"], m["id"], "parent"):
+        return err("room-parent volunteers must RSVP as attending"
+                   " for this event first")
     execute("UPDATE rooms SET parent_member_id=?, parent_name=? WHERE id=?",
             (m["id"], pname, rid))
     return jsonify({"ok": True})
