@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FRC Team Sign-Up</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header class="topbar">
+  <h1>FRC Team Sign-Up</h1>
+  <nav id="nav">
+    <button data-view="signup" class="active">Sign Up</button>
+    <button data-view="queue">Mentor Queue <span id="nav-pending" class="badge hidden"></span></button>
+    <button data-view="roster">Roster</button>
+    <button data-view="events">Events &amp; RSVPs</button>
+    <button data-view="tracking">Tracking</button>
+    <button data-view="travel">Travel &amp; Logistics <span id="nav-rooms" class="badge hidden"></span></button>
+  </nav>
+</header>
+<main id="main">
+  <section id="view-signup" class="view"></section>
+  <section id="view-queue" class="view hidden"></section>
+  <section id="view-roster" class="view hidden"></section>
+  <section id="view-events" class="view hidden"></section>
+  <section id="view-tracking" class="view hidden"></section>
+  <section id="view-travel" class="view hidden"></section>
+</main>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

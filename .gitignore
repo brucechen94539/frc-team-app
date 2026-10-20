@@ -1,1 +1,10 @@
+# SQLite database (created at runtime)
+data.db
+*.db
 
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
