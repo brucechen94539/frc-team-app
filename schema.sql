@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS carpools (
   driver_name  TEXT NOT NULL,
   seats        INTEGER NOT NULL,
   depart_from  TEXT, depart_time TEXT, return_info TEXT, notes TEXT,
+  vehicle      TEXT,               -- JSON {plate, color, model, make} (optional)
   sample       INTEGER NOT NULL DEFAULT 0
 );
 
@@ -124,6 +125,8 @@ CREATE TABLE IF NOT EXISTS rooms (
   hotel_id  INTEGER NOT NULL REFERENCES hotels(id) ON DELETE CASCADE,
   label     TEXT NOT NULL,
   capacity  INTEGER NOT NULL DEFAULT 4,
+  room_number TEXT,              -- actual room number, filled in after check-in
+  beds      TEXT,                -- JSON list of bed types: double|queen|king|sofa bed
   parent_member_id INTEGER,  -- room parent (adult volunteer; students are under 18)
   parent_name      TEXT      -- denormalized display name, like RSVPs/check-ins
 );

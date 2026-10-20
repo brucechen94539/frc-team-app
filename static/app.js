@@ -40,6 +40,7 @@ let queueFilter = "pending";
 let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
 let trackEventId = null, travelEventId = null;
+let pendingBeds = [];  // bed builder state for the room being composed
 let ME = null;          // logged-in user ({id,name,email,role}) or null
 let SETUP = false;      // first run: no account has a password yet
 const MENTOR = () => !!(ME && (ME.role === "mentor" || ME.role === "admin"));
@@ -632,10 +633,8 @@ async function renderTracking() {
     <div class="stat"><div class="n">${doneCount}/${tasks.length}</div><div class="l">tasks done</div></div>
   </div></div>
   <div class="card"><h3>Attendance</h3>
-  <div class="row"><select id="t-ev">
-    ${events.map((e) => `<option value="${e.id}" ${e.id === trackEventId ? "selected" : ""}>${esc(e.title)} (${esc(e.date || "")})</option>`).join("")}
-  </select>
-  <span class="sub">Session hours:</span>
+  <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === trackEventId ? "active" : ""}" data-tev="${e.id}">${esc(e.title)} (${esc(e.date || "")})</button>`).join("")}</div>
+  <div class="row" style="margin-top:8px"><span class="sub">Session hours:</span>
   <input id="t-hrs" type="number" min="0" step="0.5" value="${ev ? ev.session_hours : 2}" style="width:80px"></div>
   <div id="t-att" style="margin-top:8px">
   ${att.rsvps.filter((r) => r.status === "going").map((r) => {
@@ -686,7 +685,9 @@ async function renderTracking() {
       <div>${esc(s)} — ${p.done}/${p.total}
       <div class="bar"><div style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></div></div></div>`).join("")}
   </div>`;
-  $("t-ev").addEventListener("change", (e) => { trackEventId = parseInt(e.target.value, 10); renderTracking(); });
+  v.querySelectorAll("[data-tev]").forEach((b) => b.addEventListener("click", () => {
+    trackEventId = parseInt(b.dataset.tev, 10); renderTracking();
+  }));
   v.querySelectorAll("[data-ci]").forEach((b) => b.addEventListener("click", async () => {
     const hours = parseFloat($("t-hrs").value) || 0;
     await POST("/api/checkins", {event_id: trackEventId, member_id: parseInt(b.dataset.m, 10),
@@ -749,9 +750,7 @@ async function renderTravel() {
   v.innerHTML = `
   <div class="card"><h2>Travel &amp; Logistics</h2>
   <p class="sub">Carpools, tool sign-up, and hotel assignments — organized per event.</p>
-  <div class="row"><select id="tr-ev">
-    ${events.map((e) => `<option value="${e.id}" ${e.id === travelEventId ? "selected" : ""}>${esc(e.title)}</option>`).join("")}
-  </select></div></div>
+  <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div></div>
 
   <div class="card"><h3>Carpools</h3>
   ${ME.role !== "student" ? `
@@ -762,11 +761,16 @@ async function renderTravel() {
     <div class="field"><label>Departure time</label><input id="cp-dt" placeholder="Thu 3:30 PM"></div>
     <div class="field"><label>Return plan</label><input id="cp-ret" placeholder="Sun after finals"></div>
     <div class="field"><label>Notes</label><input id="cp-notes"></div>
+    <div class="field"><label>License plate <span class="hint">(optional)</span></label><input id="cp-vplate"></div>
+    <div class="field"><label>Color <span class="hint">(optional)</span></label><input id="cp-vcolor"></div>
+    <div class="field"><label>Make <span class="hint">(optional)</span></label><input id="cp-vmake" placeholder="Honda"></div>
+    <div class="field"><label>Model <span class="hint">(optional)</span></label><input id="cp-vmodel" placeholder="Odyssey"></div>
   </div>
   <button class="btn small" id="cp-add">Post ride</button>` : ""}
   <div id="cp-list" style="margin-top:10px">
   ${t.carpools.map((c) => `
     <div class="card"><div class="row"><b>${esc(c.driver_name)}</b>
+      ${vehicleTip(c.vehicle) ? `<span class="pill" title="${esc(vehicleTip(c.vehicle))}">\u{1F697} vehicle</span>` : ""}
       <span class="pill ${c.seats_open ? "green" : "red"}">${c.seats_open} of ${c.seats} seats open</span></div>
     <div class="sub">${esc(c.depart_from || "")} · ${esc(c.depart_time || "")} · Return: ${esc(c.return_info || "—")}</div>
     <div>Riders: ${c.claims.map((x) =>
@@ -809,7 +813,9 @@ async function renderTravel() {
       <textarea id="h-notes"></textarea></div>
     <button class="btn small mo" id="h-add">Save hotel block</button>`}
   </div>`;
-  $("tr-ev").addEventListener("change", (e) => { travelEventId = parseInt(e.target.value, 10); renderTravel(); });
+  v.querySelectorAll("[data-ev]").forEach((b) => b.addEventListener("click", () => {
+    travelEventId = parseInt(b.dataset.ev, 10); pendingBeds = []; renderTravel();
+  }));
   const hb = $("h-add");
   if (hb) hb.addEventListener("click", async () => {
     if (!$("h-name").value.trim()) return toast("Hotel name is required.");
@@ -826,7 +832,9 @@ async function renderTravel() {
       await POST("/api/carpools", {event_id: travelEventId,
         driver_name: $("cp-driver").value.trim(), seats: parseInt($("cp-seats").value, 10),
         depart_from: $("cp-from").value.trim(), depart_time: $("cp-dt").value.trim(),
-        return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim()});
+        return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim(),
+        vehicle: {plate: $("cp-vplate").value.trim(), color: $("cp-vcolor").value.trim(),
+          make: $("cp-vmake").value.trim(), model: $("cp-vmodel").value.trim()}});
       toast("Ride posted."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   });
@@ -884,13 +892,38 @@ async function renderTravel() {
     toast("Room parent removed.");
     renderTravel();
   }));
+  const paintBeds = () => {
+    const bl = $("bed-list");
+    if (!bl) return;
+    const total = pendingBeds.reduce((s, t) => s + (t === "sofa bed" ? 1 : 2), 0);
+    bl.innerHTML = pendingBeds.map((t, i) =>
+      `<span class="pill">${esc(t)} <a href="#" data-bedrm="${i}" title="remove">✕</a></span>`).join("")
+      + (pendingBeds.length ? ` <span class="sub">sleeps ${total}</span>` : "");
+    bl.querySelectorAll("[data-bedrm]").forEach((a) => a.addEventListener("click", (e) => {
+      e.preventDefault();
+      pendingBeds.splice(parseInt(a.dataset.bedrm, 10), 1);
+      paintBeds();
+    }));
+  };
+  const bedAdd = $("bed-add");
+  if (bedAdd) { bedAdd.addEventListener("click", () => {
+    pendingBeds.push($("bed-type").value); paintBeds();
+  }); paintBeds(); }
   const ra = $("rm-add");
   if (ra) ra.addEventListener("click", async () => {
-    if (!$("rm-label").value.trim()) return toast("Room label is required.");
-    await POST(`/api/hotels/${t.hotel.id}/rooms`, {label: $("rm-label").value.trim(),
-      capacity: parseInt($("rm-cap").value, 10) || 4});
-    toast("Room added."); renderTravel();
+    try {
+      const r = await POST(`/api/hotels/${t.hotel.id}/rooms`, {beds: pendingBeds});
+      pendingBeds = [];
+      toast(`${r.label} added.`); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
   });
+  v.querySelectorAll("[id^='rn-']").forEach((inp) => inp.addEventListener("change", async () => {
+    const r = await fetch(`/api/rooms/${inp.id.slice(3)}`, {method: "PUT",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({room_number: inp.value.trim()})});
+    if (r.ok) { toast("Room number saved."); renderTravel(); }
+    else toast("Error: could not save the room number.");
+  }));
   v.querySelectorAll("[data-place]").forEach((b) => b.addEventListener("click", async () => {
     const mid = parseInt($("plc-" + b.dataset.place).value, 10);
     if (!mid) return toast("Pick a student to place.");
@@ -917,6 +950,24 @@ async function renderTravel() {
   });
 }
 
+function vehicleTip(v) {
+  if (!v) return "";
+  const parts = [];
+  if (v.plate) parts.push("Plate " + v.plate);
+  if (v.color) parts.push(v.color);
+  const mm = [v.make, v.model].filter(Boolean).join(" ");
+  if (mm) parts.push(mm);
+  return parts.join(" · ");
+}
+
+function bedSummary(beds) {
+  if (!beds || !beds.length) return "";
+  const counts = {};
+  beds.forEach((b) => { counts[b] = (counts[b] || 0) + 1; });
+  return Object.entries(counts).map(([t, n]) =>
+    `${n} ${t}${n > 1 ? "s" : ""}`).join(" · ");
+}
+
 function hotelHTML(h, students, poptParents, studentNames) {
   const canVol = ME && ME.role !== "student";
   return `
@@ -925,15 +976,26 @@ function hotelHTML(h, students, poptParents, studentNames) {
   ${h.notes ? `<div class="sub">${esc(h.notes)}</div>` : ""}
   <h3>Rooms</h3>
   <p class="sub">The block is already booked. A room can have an adult <b>room parent</b> to check in, since students under 18 can't check in themselves — optional; senior rooms often go without. Parents can volunteer for a room below.</p>
-  <div class="row mo"><input id="rm-label" placeholder="Room label *" style="max-width:200px">
-    <input id="rm-cap" placeholder="Beds" inputmode="numeric" style="max-width:80px">
-    <button class="btn small" id="rm-add">Add room</button></div>
+  <div class="row mo" style="flex-wrap:wrap;gap:8px;align-items:center">
+    <select id="bed-type">
+      <option value="queen">Queen · sleeps 2</option>
+      <option value="double">Double · sleeps 2</option>
+      <option value="king">King · sleeps 2</option>
+      <option value="sofa bed">Sofa bed · sleeps 1</option>
+    </select>
+    <button class="btn small" id="bed-add">Add bed</button>
+    <span id="bed-list"></span>
+    <button class="btn small" id="rm-add">Add room</button>
+    <span class="sub">Rooms are numbered automatically (Room #1, #2, …).</span></div>
   ${h.rooms.map((r) => {
     const occ = r.occupants.map((o) =>
       `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${MENTOR() ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
     return `<div class="card"><div class="row"><b>${esc(r.label)}</b>
+      ${r.room_number ? `<span class="sub">room #${esc(r.room_number)}</span>` : ""}
+      ${MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}
       <span class="pill ${r.occupants.length >= r.capacity ? "red" : "green"}">
       ${r.occupants.length}/${r.capacity} beds</span></div>
+      ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}
       <div>${occ || '<span class="sub">empty</span>'}</div>
       <div class="row" style="margin-top:6px">
         ${r.parent_name

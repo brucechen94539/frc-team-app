@@ -172,6 +172,8 @@ CARPOOLS = [
     dict(event="EVT-205", driver_name="Daniel Kim", seats=4,
          depart_from="School lot — main gate", depart_time="Thu 3:30 PM",
          return_info="Returns Sunday after finals, ~7 PM",
+         vehicle={"plate": "8XYZ421", "color": "Silver",
+                  "model": "Odyssey", "make": "Honda"},
          notes="Driving up Thursday for Friday load-in.",
          riders=[("FRC-104", "student")]),
 ]
@@ -194,7 +196,8 @@ HOTEL = dict(event="EVT-205", name="SpringHill Suites — Davis",
              check_in="2026-11-19", check_out="2026-11-22",
              notes="Team block: rooms held under “FRC Fremont” until Nov 5. Breakfast included; bus parking in the rear lot.")
 
-ROOMS = [dict(label="Room 204 — Students", capacity=4, occupants=["FRC-104"])]
+ROOMS = [dict(label="Room #1", capacity=4, beds=["queen", "queen"],
+              room_number="2147", occupants=["FRC-104"])]
 
 ROOMING_REQUESTS = [
     dict(member="FRC-104", roommates=["Alex Kim"],
@@ -261,9 +264,11 @@ def seed(conn):
     for c in CARPOOLS:
         cur.execute(
             "INSERT INTO carpools (event_id, driver_name, seats, depart_from,"
-            " depart_time, return_info, notes, sample) VALUES (?,?,?,?,?,?,?,1)",
+            " depart_time, return_info, notes, vehicle, sample)"
+            " VALUES (?,?,?,?,?,?,?,?,1)",
             (event_ids[c["event"]], c["driver_name"], c["seats"], c["depart_from"],
-             c["depart_time"], c["return_info"], c["notes"]))
+             c["depart_time"], c["return_info"], c["notes"],
+             json.dumps(c["vehicle"]) if c.get("vehicle") else None))
         cpid = cur.lastrowid
         for mem_code, kind in c["riders"]:
             cur.execute(
@@ -284,8 +289,10 @@ def seed(conn):
          HOTEL["check_in"], HOTEL["check_out"], HOTEL["notes"]))
     hotel_id = cur.lastrowid
     for r in ROOMS:
-        cur.execute("INSERT INTO rooms (hotel_id, label, capacity) VALUES (?,?,?)",
-                    (hotel_id, r["label"], r["capacity"]))
+        cur.execute("INSERT INTO rooms (hotel_id, label, capacity, beds, room_number)"
+                    " VALUES (?,?,?,?,?)",
+                    (hotel_id, r["label"], r["capacity"],
+                     json.dumps(r.get("beds") or []), r.get("room_number")))
         room_id = cur.lastrowid
         for mem_code in r["occupants"]:
             cur.execute("INSERT INTO room_occupants (room_id, member_id) VALUES (?,?)",

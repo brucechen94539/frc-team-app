@@ -39,6 +39,8 @@ and `declined` do not count as attending.
   waitlisted.
 - When an event is full, new "going" RSVPs join the waitlist and are
   auto-promoted as spots open.
+- Event pickers in the UI are **bubbles** (chips), not dropdowns: the picked
+  event is highlighted and the sections below update to that event.
 
 ## Attendance & task tracking
 
@@ -63,6 +65,9 @@ well as in the UI.
   Mentors/admins may also post team vehicles or coordinate rides.
 - Anyone attending can claim a seat; claims beyond capacity go to the
   carpool waitlist and auto-promote when a seat is released.
+- Drivers may optionally add vehicle details — **license plate, color,
+  make, model** — shown on the ride card as a hover tooltip so riders can
+  spot the car.
 
 ### Tools & equipment
 
@@ -73,6 +78,14 @@ well as in the UI.
 
 - The room block is **already booked** by the team; the app only organizes
   who sleeps where.
+- Mentors add rooms as **Room #1, #2, #3, …** (numbered automatically).
+  After check-in, a mentor can record the hotel's **actual room number**
+  on the room; it displays next to the Room #.
+- Each room is composed with a **bed builder**: pick a bed type
+  (double / queen / king / sofa bed) and "Add bed" to add another, as many
+  as the room has. Capacity is derived from the beds: double, queen, and
+  king sleep **2** each; a sofa bed sleeps **1** (e.g. 2 queens + 1 sofa
+  bed = sleeps 5).
 - **Families request** rooming (student + preferred roommates, chosen from
   attending students); **mentors finalize** by placing students into rooms.
 - Only students attending the event can request a room, be listed as a

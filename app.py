@@ -82,19 +82,27 @@ def init_db():
 
 def _migrate(db):
     """Additive migrations for databases created before these columns."""
-    cols = {r[1] for r in db.execute("PRAGMA table_info(rooms)")}
+    room_cols = {r[1] for r in db.execute("PRAGMA table_info(rooms)")}
+    car_cols = {r[1] for r in db.execute("PRAGMA table_info(carpools)")}
     with _lock:
-        if "parent_member_id" not in cols:
+        if "parent_member_id" not in room_cols:
             db.execute("ALTER TABLE rooms ADD COLUMN parent_member_id INTEGER")
-        if "parent_name" not in cols:
+        if "parent_name" not in room_cols:
             db.execute("ALTER TABLE rooms ADD COLUMN parent_name TEXT")
+        if "room_number" not in room_cols:
+            db.execute("ALTER TABLE rooms ADD COLUMN room_number TEXT")
+        if "beds" not in room_cols:
+            db.execute("ALTER TABLE rooms ADD COLUMN beds TEXT")
+        if "vehicle" not in car_cols:
+            db.execute("ALTER TABLE carpools ADD COLUMN vehicle TEXT")
         db.commit()
 
 
 def row(d):
     """sqlite3.Row -> plain dict, parsing JSON columns."""
     d = dict(d)
-    for k in ("prefs", "discovery_chats", "agreements", "preferred_roommates"):
+    for k in ("prefs", "discovery_chats", "agreements", "preferred_roommates",
+              "vehicle", "beds"):
         if k in d and isinstance(d[k], str):
             try:
                 d[k] = json.loads(d[k])
@@ -741,12 +749,17 @@ def api_carpool_create():
             " person_kind='parent' AND status='going'", (b["event_id"],))}
         if b["driver_name"].strip() not in going_parents:
             return err("the driver must RSVP as attending for this event first")
+    veh_in = b.get("vehicle") or {}
+    vehicle = {k: str(veh_in.get(k) or "").strip()
+               for k in ("plate", "color", "model", "make")
+               if str(veh_in.get(k) or "").strip()}
     cid = execute(
         """INSERT INTO carpools (event_id, driver_name, seats, depart_from,
-           depart_time, return_info, notes, sample)
-           VALUES (?,?,?,?,?,?,?,0)""",
+           depart_time, return_info, notes, vehicle, sample)
+           VALUES (?,?,?,?,?,?,?,?,0)""",
         (b["event_id"], b["driver_name"], int(b["seats"]), b.get("depart_from"),
-         b.get("depart_time"), b.get("return_info"), b.get("notes")))
+         b.get("depart_time"), b.get("return_info"), b.get("notes"),
+         json.dumps(vehicle) if vehicle else None))
     return jsonify(q_one("SELECT * FROM carpools WHERE id=?", (cid,))), 201
 
 
@@ -846,12 +859,38 @@ def api_hotel_create():
 @app.route("/api/hotels/<int:hid>/rooms", methods=["POST"])
 @require_role("mentor", "admin")
 def api_room_create(hid):
-    b = request.get_json(force=True)
-    if not b.get("label"):
-        return err("label required")
-    rid = execute("INSERT INTO rooms (hotel_id, label, capacity) VALUES (?,?,?)",
-                  (hid, b["label"], int(b.get("capacity") or 4)))
+    """Mentors add Room #1, #2, ... — the label is automatic. Beds are picked
+    from the bed builder; capacity is derived: double/queen/king sleep 2,
+    a sofa bed sleeps 1."""
+    b = request.get_json(force=True, silent=True) or {}
+    if not q_one("SELECT id FROM hotels WHERE id=?", (hid,)):
+        return err("hotel not found", 404)
+    fits = {"double": 2, "queen": 2, "king": 2, "sofa bed": 1}
+    beds = b.get("beds") or []
+    if not isinstance(beds, list) or any(t not in fits for t in beds):
+        return err("beds must be a list of: double, queen, king, sofa bed")
+    capacity = sum(fits[t] for t in beds)
+    if capacity == 0:
+        capacity = int(b.get("capacity") or 4)
+    n = q_one("SELECT COUNT(*) n FROM rooms WHERE hotel_id=?", (hid,))["n"]
+    label = (b.get("label") or "").strip() or f"Room #{n + 1}"
+    rid = execute("INSERT INTO rooms (hotel_id, label, capacity, beds)"
+                  " VALUES (?,?,?,?)",
+                  (hid, label, capacity, json.dumps(beds)))
     return jsonify(q_one("SELECT * FROM rooms WHERE id=?", (rid,))), 201
+
+
+@app.route("/api/rooms/<int:rid>", methods=["PUT"])
+@require_role("mentor", "admin")
+def api_room_update(rid):
+    """After check-in, mentors record the hotel's actual room number."""
+    b = request.get_json(force=True, silent=True) or {}
+    if not q_one("SELECT id FROM rooms WHERE id=?", (rid,)):
+        return err("room not found", 404)
+    if "room_number" in b:
+        execute("UPDATE rooms SET room_number=? WHERE id=?",
+                ((b["room_number"] or "").strip() or None, rid))
+    return jsonify(q_one("SELECT * FROM rooms WHERE id=?", (rid,)))
 
 
 @app.route("/api/hotels/<int:hid>/requests", methods=["POST"])
