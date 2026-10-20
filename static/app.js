@@ -74,6 +74,19 @@ function prefSelect(i) {
     <select id="pref${i}">${opts}</select></div>`;
 }
 
+/* Gray out subteams already picked in another preference slot, so the
+   same subteam can't be ranked twice. Recomputed from scratch on change,
+   which also re-enables a subteam when a slot is changed or cleared. */
+function syncPrefs() {
+  const picks = [0, 1, 2].map((i) => $("pref" + i).value);
+  [0, 1, 2].forEach((i) => {
+    const sel = $("pref" + i);
+    [...sel.options].forEach((o) => {
+      o.disabled = !!o.value && o.value !== sel.value && picks.includes(o.value);
+    });
+  });
+}
+
 async function renderSignup() {
   const v = $("view-signup");
   v.innerHTML = `
@@ -135,6 +148,8 @@ async function renderSignup() {
   document.querySelectorAll("#f-chats input").forEach((cb) =>
     cb.addEventListener("change", () =>
       cb.closest(".chatcard").classList.toggle("sel", cb.checked)));
+  [0, 1, 2].forEach((i) => $("pref" + i).addEventListener("change", syncPrefs));
+  syncPrefs();
   $("f-submit").addEventListener("click", submitApplication);
   $("f-fill").addEventListener("click", () => {
     const set = (id, v) => { $(id).value = v; };
@@ -147,6 +162,7 @@ async function renderSignup() {
     set("f-wa", "+1 (510) 555-0174"); $("f-waok").checked = true;
     set("f-emname", "Minh Nguyen"); set("f-emphone", "(510) 555-0174");
     $("pref0").value = "Programming"; $("pref1").value = "Media"; $("pref2").value = "Outreach";
+    syncPrefs();
     document.querySelectorAll("#f-chats input").forEach((cb) => {
       cb.checked = ["Programming", "Media", "Outreach"].includes(cb.value);
       cb.closest(".chatcard").classList.toggle("sel", cb.checked);
@@ -165,7 +181,7 @@ async function submitApplication() {
     return void (errBox.textContent = "Student first/last name and parent name are required.");
   if (!Object.values(ag).every(Boolean))
     return void (errBox.textContent = "All four agreements must be accepted.");
-  const prefs = [0, 1, 2].map((i) => $("pref" + i).value).filter(Boolean);
+  const prefs = [...new Set([0, 1, 2].map((i) => $("pref" + i).value).filter(Boolean))];
   const chats = [...document.querySelectorAll("#f-chats input:checked")].map((c) => c.value);
   try {
     const m = await POST("/api/members", {

@@ -75,3 +75,6 @@ pre.welcome{background:#f8fafc;border:1px dashed var(--line);border-radius:8px;
 .stat{background:#fff;border:1px solid var(--line);border-radius:10px;padding:10px;text-align:center}
 .stat .n{font-size:22px;font-weight:700}
 .stat .l{font-size:12px;color:var(--muted)}
+
+/* Unavailable (already-ranked) subteam options in the preference pickers */
+select option:disabled{color:#b6b6b6}
