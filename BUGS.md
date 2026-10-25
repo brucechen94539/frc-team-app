@@ -29,7 +29,7 @@ _None right now._
   manual key and the UI offers key entry instead of a QR code, so
   enrollment works either way. A missing `cryptography` package now
   reports the exact fix (`python3 -m pip install -r requirements.txt`,
-  then restart) instead of a bare error.
+  then restart) instead of a bare error. (commit e8703091)
 
 ### 2026-10-19 — Students could define carpool rides
 - **Reported:** Bruce — a logged-in student saw the full "post a ride" form (driver name, seats, departure point/time, return plan, notes) in Travel & Logistics; students should only see the sign-up options and pick which car/parent to go with.
