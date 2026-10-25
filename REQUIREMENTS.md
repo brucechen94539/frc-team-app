@@ -91,12 +91,31 @@ and `can't make it` do not count as attending.
 - Event pickers in the UI are **bubbles** (chips), not dropdowns: the picked
   event is highlighted and the sections below update to that event.
 
-## Attendance & task tracking
+## Attendance tracking
 
 - Check-in has **two paths**: mentors mark attendance, and students can
   self check-in. A self check-in is unverified until a mentor confirms it.
-- The app tracks hours per student and a task board; mentors create tasks
-  and mark them done. A dashboard summarizes attendance and hours.
+- The app tracks hours per student; a dashboard summarizes attendance
+  and hours.
+
+## Task Board (Kanban, team-wide)
+
+- The Task Board is its **own module**, separate from Tracking: Tracking
+  is per-event attendance, while tasks are team-wide (no event scope).
+- Columns: **To do / In progress / Done**. Mentors create tasks (title,
+  subteam, due date); anyone moves cards along; deleting stays
+  mentor-only.
+- **User-focused cards:** assignees lead the card as colored initial
+  chips with names. A task may appoint **several students** (stored as a
+  list; legacy single assignees migrate to one-person lists). An "Only
+  mine" toggle filters the board to the signed-in user's cards, and
+  assignee/subteam dropdowns filter further.
+- **Declutter:** mentors can **Archive** a card (archived tasks leave
+  the columns; a "Show archived" toggle reveals an Archived column with
+  Restore). Archive/restore is mentor-only on the server; a card's
+  status is preserved through archiving. A **period filter** (All time /
+  This month / This quarter) filters by due date; undated tasks always
+  show.
 
 ## Travel & logistics (per event)
 

@@ -102,7 +102,7 @@ function showView(name) {
   document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
   $("view-" + name).classList.remove("hidden");
   ({signup: renderSignup, queue: renderQueue, roster: renderRoster,
-    events: renderEvents, tracking: renderTracking, travel: renderTravel,
+    events: renderEvents, tracking: renderTracking, tasks: renderTasks, travel: renderTravel,
     security: renderSecurity, login: renderLogin})[name]();
 }
 
@@ -834,16 +834,6 @@ async function renderTracking() {
   const byPerson = {};
   checked.forEach((c) => { byPerson[`${c.member_id}:${c.person_kind}`] = c; });
   const hours = await GET("/api/hours");
-  const tasks = await GET("/api/tasks");
-  const cols = [["todo", "To do"], ["doing", "In progress"], ["done", "Done"]];
-  const doneCount = tasks.filter((t) => t.status === "done").length;
-  const subProg = {};
-  tasks.forEach((t) => {
-    const s = t.subteam || "Unassigned";
-    subProg[s] = subProg[s] || {done: 0, total: 0};
-    subProg[s].total += 1;
-    if (t.status === "done") subProg[s].done += 1;
-  });
   const totV = hours.reduce((a, h) => a + (h.verified_hours || 0), 0);
   const totU = hours.reduce((a, h) => a + (h.unverified_hours || 0), 0);
   v.innerHTML = `
@@ -853,7 +843,6 @@ async function renderTracking() {
     <div class="stat"><div class="n">${totV}</div><div class="l">verified hours</div></div>
     <div class="stat"><div class="n">${totU}</div><div class="l">hours awaiting verify</div></div>
     <div class="stat"><div class="n">${checked.length}</div><div class="l">check-ins</div></div>
-    <div class="stat"><div class="n">${doneCount}/${tasks.length}</div><div class="l">tasks done</div></div>
   </div></div>
   <div class="card"><h3>Attendance</h3>
   <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === trackEventId ? "active" : ""}" data-tev="${e.id}">${esc(e.title)} (${esc(e.date || "")})</button>`).join("")}</div>
@@ -881,33 +870,7 @@ async function renderTracking() {
       <td>${b.hours}</td><td>${b.verified ? "verified" : "unverified (" + esc(b.method) + ")"}</td></tr>`).join("")}
     </table></details>`).join("") || '<span class="sub">No hours logged yet.</span>'}
   </div>
-  <div class="card"><h3>Task board</h3>
-    <div class="row mo">
-      <input id="tk-title" placeholder="Task title *" style="flex:2;min-width:180px">
-      <select id="tk-sub"><option value="">Subteam…</option>
-        ${SUBTEAMS.map((s) => `<option>${esc(s.name)}</option>`).join("")}</select>
-      <input id="tk-who" placeholder="Assignee" style="max-width:150px">
-      <input id="tk-due" type="date" style="max-width:150px">
-      <button class="btn small" id="tk-add">Add task</button>
-    </div>
-    <div class="cols3" style="margin-top:10px">
-    ${cols.map(([k, label]) => `<div class="col"><h4>${label}</h4>
-      ${tasks.filter((t) => t.status === k).map((t) => `
-        <div class="task"><div class="t">${esc(t.title)}</div>
-        <div class="m">${esc(t.subteam || "")} ${esc(t.assignee || "")} ${esc(t.due_date || "")}</div>
-        ${t.notes ? `<div class="m">${esc(t.notes)}</div>` : ""}
-        <div class="row" style="margin-top:4px">
-          ${k !== "todo" ? `<button class="btn small ghost" data-tmove="${t.id}" data-to="${k === "doing" ? "todo" : "doing"}">←</button>` : ""}
-          ${k !== "done" ? `<button class="btn small ghost" data-tmove="${t.id}" data-to="${k === "todo" ? "doing" : "done"}">→</button>` : ""}
-          <button class="btn small danger" data-tdel="${t.id}">✕</button>
-        </div></div>`).join("")}
-    </div>`).join("")}
-    </div>
-    <h3>Task completion by subteam</h3>
-    ${Object.entries(subProg).map(([s, p]) => `
-      <div>${esc(s)} — ${p.done}/${p.total}
-      <div class="bar"><div style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></div></div></div>`).join("")}
-  </div>`;
+`;
   v.querySelectorAll("[data-tev]").forEach((b) => b.addEventListener("click", () => {
     trackEventId = parseInt(b.dataset.tev, 10); savePlace(); renderTracking();
   }));
@@ -924,21 +887,150 @@ async function renderTracking() {
     toast("Verified."); renderTracking();
   }));
   if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+}
+
+/* ---------------- task board (Kanban) ---------------- */
+let tasksOnlyMine = false, tasksAssignee = "", tasksSubteam = "", tasksPeriod = "all",
+  tasksShowArchived = false;
+const chipColor = (name) => {
+  const palette = ["#fde8d7", "#dcefe3", "#dde8fb", "#f3e4f7", "#fdf3c4", "#e0f2f1"];
+  let h = 0;
+  for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return palette[h % palette.length];
+};
+const initials = (name) => String(name).trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join("").toUpperCase();
+const duePill = (d) => {
+  if (!d) return "";
+  const today = new Date().toISOString().slice(0, 10);
+  if (d < today) return `<span class="pill red">due ${esc(d)}</span>`;
+  const week = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
+  if (d <= week) return `<span class="pill amber">due ${esc(d)}</span>`;
+  return `<span class="pill gray">due ${esc(d)}</span>`;
+};
+const inPeriod = (d) => {
+  if (tasksPeriod === "all" || !d) return true;  // undated tasks always show
+  const now = new Date();
+  if (tasksPeriod === "month") return d.slice(0, 7) === `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const q = Math.floor(now.getMonth() / 3);
+  return d.slice(0, 7) >= `${now.getFullYear()}-${String(q * 3 + 1).padStart(2, "0")}`
+    && d.slice(0, 7) <= `${now.getFullYear()}-${String(q * 3 + 3).padStart(2, "0")}`;
+};
+
+async function renderTasks() {
+  const v = $("view-tasks");
+  await loadPeople();
+  const tasks = await GET("/api/tasks");
+  const students = personOptions().filter((p) => p.kind === "student");
+  const allAssignees = [...new Set(tasks.flatMap((t) => t.assignees || []))].sort();
+  const me = ME ? normName(ME.name) : "";
+  const open = tasks.filter((t) => !t.archived);
+  const doneCount = open.filter((t) => t.status === "done").length;
+  const archCount = tasks.filter((t) => t.archived).length;
+  const subProg = {};
+  open.forEach((t) => {
+    const s = t.subteam || "Unassigned";
+    subProg[s] = subProg[s] || {done: 0, total: 0};
+    subProg[s].total += 1;
+    if (t.status === "done") subProg[s].done += 1;
+  });
+  const list = tasks.filter((t) => {
+    if (!tasksShowArchived && t.archived) return false;
+    if (tasksOnlyMine && !(t.assignees || []).some((a) => normName(a) === me)) return false;
+    if (tasksAssignee && !(t.assignees || []).includes(tasksAssignee)) return false;
+    if (tasksSubteam && t.subteam !== tasksSubteam) return false;
+    if (!inPeriod(t.due_date)) return false;
+    return true;
+  });
+  const cols = [["todo", "To do"], ["doing", "In progress"], ["done", "Done"]];
+  if (tasksShowArchived) cols.push(["archived", "Archived"]);
+  const card = (t, k) => {
+    const chips = (t.assignees || []).map((a) =>
+      `<span class="pill" style="background:${chipColor(a)}" title="${esc(a)}">${esc(initials(a))} ${esc(a.split(" ")[0])}</span>`).join(" ");
+    return `<div class="task"><div class="t">${esc(t.title)}</div>
+      <div class="row" style="margin:4px 0;flex-wrap:wrap">${chips || '<span class="pill gray">Unassigned</span>'}</div>
+      <div class="m">${esc(t.subteam || "")} ${duePill(t.due_date)}</div>
+      ${t.notes ? `<div class="m">${esc(t.notes)}</div>` : ""}
+      <div class="row" style="margin-top:4px">
+        ${k === "archived" ? ""
+          : `${k !== "todo" ? `<button class="btn small ghost" data-tmove="${t.id}" data-to="${k === "doing" ? "todo" : "doing"}">←</button>` : ""}
+             ${k !== "done" ? `<button class="btn small ghost" data-tmove="${t.id}" data-to="${k === "todo" ? "doing" : "done"}">→</button>` : ""}`}
+        ${MENTOR() ? (k === "archived"
+          ? `<button class="btn small" data-trestore="${t.id}">Restore</button>`
+          : `<button class="btn small ghost" data-tarch="${t.id}">Archive</button>`) : ""}
+        ${MENTOR() ? `<button class="btn small danger" data-tdel="${t.id}">✕</button>` : ""}
+      </div></div>`;
+  };
+  v.innerHTML = `
+  <div class="card"><h2>Task Board</h2>
+  <p class="sub">Team-wide Kanban. Mentors create tasks and appoint students; anyone moves cards along. Archived tasks stay out of the way until restored.</p>
+  <div class="statgrid">
+    <div class="stat"><div class="n">${doneCount}/${open.length}</div><div class="l">tasks done</div></div>
+    <div class="stat"><div class="n">${archCount}</div><div class="l">archived</div></div>
+  </div></div>
+  <div class="card mo"><div class="row">
+    <input id="tk-title" placeholder="Task title *" style="flex:2;min-width:180px">
+    <select id="tk-sub"><option value="">Subteam…</option>
+      ${SUBTEAMS.map((s) => `<option>${esc(s.name)}</option>`).join("")}</select>
+    <select id="tk-who" multiple size="3" title="Appoint students (Ctrl/Cmd-click for several)" style="min-width:160px">
+      ${students.map((p) => `<option value="${esc(p.name.replace(/ \((student|parent)\)$/, ""))}">${esc(p.name)}</option>`).join("")}</select>
+    <input id="tk-due" type="date" style="max-width:150px">
+    <button class="btn small" id="tk-add">Add task</button>
+  </div></div>
+  <div class="card"><div class="row" style="flex-wrap:wrap">
+    <button class="btn small ${tasksOnlyMine ? "" : "ghost"}" id="tk-mine">Only mine</button>
+    <select id="tk-fwho"><option value="">All assignees</option>
+      ${allAssignees.map((a) => `<option ${a === tasksAssignee ? "selected" : ""}>${esc(a)}</option>`).join("")}</select>
+    <select id="tk-fsub"><option value="">All subteams</option>
+      ${SUBTEAMS.map((s) => `<option ${s.name === tasksSubteam ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
+    <select id="tk-fper">
+      <option value="all" ${tasksPeriod === "all" ? "selected" : ""}>All time</option>
+      <option value="month" ${tasksPeriod === "month" ? "selected" : ""}>This month</option>
+      <option value="quarter" ${tasksPeriod === "quarter" ? "selected" : ""}>This quarter</option>
+    </select>
+    <button class="btn small ${tasksShowArchived ? "" : "ghost"}" id="tk-arch">${tasksShowArchived ? "Hide archived" : "Show archived"}</button>
+  </div></div>
+  <div class="cols3" style="margin-top:10px">
+  ${cols.map(([k, label]) => `<div class="col"><h4>${label}</h4>
+    ${list.filter((t) => k === "archived" ? t.archived : (!t.archived && t.status === k)).map((t) => card(t, k)).join("") || '<span class="sub">Empty.</span>'}
+  </div>`).join("")}
+  </div>
+  <div class="card"><h3>Task completion by subteam</h3>
+  ${Object.entries(subProg).map(([s, p]) => `
+    <div>${esc(s)} — ${p.done}/${p.total}
+    <div class="bar"><div style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></div></div></div>`).join("") || '<span class="sub">No open tasks yet.</span>'}
+  </div>`;
+  if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
   const _tk = $("tk-add"); if (_tk) _tk.addEventListener("click", async () => {
     const t = $("tk-title").value.trim();
     if (!t) return toast("Task title is required.");
     await POST("/api/tasks", {title: t, subteam: $("tk-sub").value,
-      assignee: $("tk-who").value.trim(), due_date: $("tk-due").value});
-    toast("Task added."); renderTracking();
+      assignees: [...$("tk-who").selectedOptions].map((o) => o.value),
+      due_date: $("tk-due").value});
+    toast("Task added."); renderTasks();
   });
+  $("tk-mine").addEventListener("click", () => { tasksOnlyMine = !tasksOnlyMine; renderTasks(); });
+  $("tk-fwho").addEventListener("change", (e) => { tasksAssignee = e.target.value; renderTasks(); });
+  $("tk-fsub").addEventListener("change", (e) => { tasksSubteam = e.target.value; renderTasks(); });
+  $("tk-fper").addEventListener("change", (e) => { tasksPeriod = e.target.value; renderTasks(); });
+  $("tk-arch").addEventListener("click", () => { tasksShowArchived = !tasksShowArchived; renderTasks(); });
   v.querySelectorAll("[data-tmove]").forEach((b) => b.addEventListener("click", async () => {
     await PATCH(`/api/tasks/${b.dataset.tmove}`, {status: b.dataset.to});
-    renderTracking();
+    renderTasks();
+  }));
+  v.querySelectorAll("[data-tarch]").forEach((b) => b.addEventListener("click", async () => {
+    try { await PATCH(`/api/tasks/${b.dataset.tarch}`, {archived: 1}); toast("Archived."); }
+    catch (e) { toast("Error: " + e.message); }
+    renderTasks();
+  }));
+  v.querySelectorAll("[data-trestore]").forEach((b) => b.addEventListener("click", async () => {
+    try { await PATCH(`/api/tasks/${b.dataset.trestore}`, {archived: 0}); toast("Restored."); }
+    catch (e) { toast("Error: " + e.message); }
+    renderTasks();
   }));
   v.querySelectorAll("[data-tdel]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirm("Delete this task?")) return;
     await DEL(`/api/tasks/${b.dataset.tdel}`);
-    renderTracking();
+    renderTasks();
   }));
 }
 

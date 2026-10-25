@@ -259,9 +259,12 @@ def seed(conn):
              person_name(member_by_code[mem_code], kind), method, verified, hours))
     for t in TASKS:
         cur.execute(
-            "INSERT INTO tasks (title, subteam, assignee, due_date, notes, status, sample)"
-            " VALUES (?,?,?,?,?,?,1)",
-            (t["title"], t["subteam"], t["assignee"], t["due_date"], t["notes"], t["status"]))
+            "INSERT INTO tasks (title, subteam, assignee, assignees, due_date,"
+            " notes, status, sample)"
+            " VALUES (?,?,?,?,?,?,?,1)",
+            (t["title"], t["subteam"], t["assignee"],
+             json.dumps([t["assignee"]]) if t["assignee"] else json.dumps([]),
+             t["due_date"], t["notes"], t["status"]))
     for c in CARPOOLS:
         cur.execute(
             "INSERT INTO carpools (event_id, driver_name, seats, depart_from,"

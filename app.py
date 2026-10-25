@@ -113,6 +113,7 @@ def _migrate(db):
     room_cols = {r[1] for r in db.execute("PRAGMA table_info(rooms)")}
     car_cols = {r[1] for r in db.execute("PRAGMA table_info(carpools)")}
     user_cols = {r[1] for r in db.execute("PRAGMA table_info(users)")}
+    task_cols = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
     with _lock:
         if "parent_member_id" not in room_cols:
             db.execute("ALTER TABLE rooms ADD COLUMN parent_member_id INTEGER")
@@ -131,6 +132,18 @@ def _migrate(db):
                        " NOT NULL DEFAULT 0")
         if "totp_backup_codes" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN totp_backup_codes TEXT")
+        if "assignees" not in task_cols:
+            db.execute("ALTER TABLE tasks ADD COLUMN assignees TEXT")
+        if "archived" not in task_cols:
+            db.execute("ALTER TABLE tasks ADD COLUMN archived INTEGER"
+                       " NOT NULL DEFAULT 0")
+        # Backfill: legacy single assignee -> one-person list. Runs on
+        # every boot but only touches rows whose assignees is still NULL.
+        for r in db.execute(
+                "SELECT id, assignee FROM tasks WHERE assignees IS NULL"
+                " AND assignee IS NOT NULL AND assignee != ''"):
+            db.execute("UPDATE tasks SET assignees=? WHERE id=?",
+                       (json.dumps([r["assignee"]]), r["id"]))
         _dedupe_carpool_claims(db)
         db.commit()
         db.commit()
@@ -982,6 +995,33 @@ def api_hours():
     return jsonify(rows)
 
 
+def _task_out(r):
+    """One task row -> dict with assignees as a list and archived as int.
+    Legacy rows (assignee only) read as a one-person list."""
+    d = row(r)
+    a = d.get("assignees")
+    if isinstance(a, str):
+        try:
+            a = json.loads(a)
+        except ValueError:
+            a = [a]
+    if not isinstance(a, list):
+        a = [d["assignee"]] if d.get("assignee") else []
+    d["assignees"] = [x for x in a if x]
+    d["assignee"] = d["assignees"][0] if d["assignees"] else None
+    d["archived"] = int(d.get("archived") or 0)
+    return d
+
+
+def _task_assignees(b):
+    """assignees list from a request body (or legacy single assignee)."""
+    if isinstance(b.get("assignees"), list):
+        return [str(x).strip() for x in b["assignees"] if str(x).strip()]
+    if b.get("assignee"):
+        return [str(b["assignee"]).strip()]
+    return []
+
+
 @app.route("/api/tasks", methods=["GET", "POST"])
 def api_tasks():
     if request.method == "POST":
@@ -989,16 +1029,19 @@ def api_tasks():
         if denied:
             return denied
     if request.method == "GET":
-        return jsonify(q_all("SELECT * FROM tasks ORDER BY id"))
+        return jsonify([_task_out(r) for r in
+                        q_all("SELECT * FROM tasks ORDER BY id")])
     b = request.get_json(force=True)
     if not b.get("title"):
         return err("title is required")
+    assignees = _task_assignees(b)
     tid = execute(
-        "INSERT INTO tasks (title, subteam, assignee, due_date, notes, status, sample)"
-        " VALUES (?,?,?,?,?,'todo',0)",
-        (b["title"], b.get("subteam"), b.get("assignee"), b.get("due_date"),
-         b.get("notes")))
-    return jsonify(q_one("SELECT * FROM tasks WHERE id=?", (tid,))), 201
+        "INSERT INTO tasks (title, subteam, assignee, assignees, due_date,"
+        " notes, status, sample)"
+        " VALUES (?,?,?,?,?,?,'todo',0)",
+        (b["title"], b.get("subteam"), assignees[0] if assignees else None,
+         json.dumps(assignees), b.get("due_date"), b.get("notes")))
+    return jsonify(_task_out(q_one("SELECT * FROM tasks WHERE id=?", (tid,)))), 201
 
 
 @app.route("/api/tasks/<int:tid>", methods=["PATCH", "DELETE"])
@@ -1011,20 +1054,31 @@ def api_task(tid):
         execute("DELETE FROM tasks WHERE id=?", (tid,))
         return jsonify({"deleted": tid})
     b = request.get_json(force=True)
+    if "archived" in b and current_user()["role"] not in MENTOR_ROLES:
+        return err("only mentors can archive or restore tasks", 403)
     sets, args = [], []
-    for f in ("title", "subteam", "assignee", "due_date", "notes"):
+    for f in ("title", "subteam", "due_date", "notes"):
         if f in b:
             sets.append(f"{f}=?")
             args.append(b[f])
+    if "assignees" in b or "assignee" in b:
+        assignees = _task_assignees(b)
+        sets.append("assignees=?")
+        args.append(json.dumps(assignees))
+        sets.append("assignee=?")
+        args.append(assignees[0] if assignees else None)
     if "status" in b:
         if b["status"] not in ("todo", "doing", "done"):
             return err("bad status")
         sets.append("status=?")
         args.append(b["status"])
+    if "archived" in b:
+        sets.append("archived=?")
+        args.append(1 if b["archived"] else 0)
     if sets:
         args.append(tid)
         execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", args)
-    return jsonify(q_one("SELECT * FROM tasks WHERE id=?", (tid,)))
+    return jsonify(_task_out(q_one("SELECT * FROM tasks WHERE id=?", (tid,))))
 
 
 # ----------------------------------------------------------------------------

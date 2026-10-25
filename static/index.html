@@ -22,11 +22,12 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
       <button data-view="roster">Roster</button>
       <button data-view="events">Events &amp; RSVPs</button>
       <button data-view="tracking">Tracking</button>
+      <button data-view="tasks">Task Board</button>
       <button data-view="travel">Travel &amp; Logistics <span id="nav-rooms" class="badge hidden"></span></button>
       <button data-view="security">Security</button>
     </nav>
   </div>
-  <p class="tagline">Team HQ — sign-ups · events · tracking</p>
+  <p class="tagline">Team HQ — sign-ups · events · tracking · tasks</p>
   <div id="account-box" class="navhide">
     <span id="user-chip" class="pill"></span>
     <button id="logout-btn" class="btn small ghost">Log out</button>
@@ -39,6 +40,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
   <section id="view-roster" class="view hidden"></section>
   <section id="view-events" class="view hidden"></section>
   <section id="view-tracking" class="view hidden"></section>
+  <section id="view-tasks" class="view hidden"></section>
   <section id="view-travel" class="view hidden"></section>
   <section id="view-security" class="view hidden"></section>
 </main>
