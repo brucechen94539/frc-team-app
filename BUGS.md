@@ -9,6 +9,30 @@ _None right now._
 
 ## Fixed
 
+### RSVP: any user could RSVP for anyone else (2026-10-25)
+- **Symptom:** logged in as a student, Zander could pick "Bruce Chen
+  (parent)" in the RSVP picker and RSVP for him.
+- **Root cause:** `POST /api/events/<eid>/rsvps` had no ownership check
+  at all, and the picker listed every person. The removal check also used
+  exact name matching, so an account like 'zanderchen' could not remove
+  its own 'Zander Chen' RSVP.
+- **Fix:** non-mentors may RSVP only for themselves — students for their
+  own student record, parents for their own children (member linkage via
+  parent_name, loose name matching); mentors/admins keep the full picker
+  as override. Removal uses the same linkage. The picker for non-mentors
+  shows only their own entries (a parent with several children gets one
+  labeled entry per child); unlinked accounts get a "ask a mentor"
+  note instead of buttons.
+
+### Bare `hidden` class hid nothing (2026-10-25)
+- **Symptom:** the new collapsible RSVP lists rendered expanded despite
+  carrying class "hidden".
+- **Root cause:** style.css only defined `.badge.hidden` and
+  `.view.hidden` — a plain `hidden` class on any other element had no
+  rule, so it stayed visible.
+- **Fix:** added a global `.hidden{display:none}` rule. Every `hidden`
+  use in the app means invisible, so no other element is affected.
+
 ### Carpool: same person in Riders and Waitlist at once (2026-10-24)
 - **Symptom:** Sam Okafor appeared under both Riders and Waitlist on the
   same car (screenshot: Daniel Kim's car, 0 of 4 seats open).

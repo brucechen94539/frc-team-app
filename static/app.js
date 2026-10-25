@@ -40,6 +40,7 @@ let rosterCache = [];   // approved members
 let queueFilter = "pending";
 let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
+let openRsvpLists = new Set();  // event ids whose RSVP list is expanded
 let trackEventId = null, travelEventId = null;
 let currentView = "events";
 /* Sticky session: remember the tab + event so a reload returns the user to
@@ -632,6 +633,34 @@ function personOptions() {
   ]);
 }
 
+/* What the signed-in account may RSVP as: own student record and/or the
+   members they are a parent of. Mentors bypass this (override). */
+function selfScope() {
+  if (!ME) return {student: null, parents: []};
+  const me = normName(ME.name);
+  const student = rosterCache.find((m) =>
+    normName(m.first_name + " " + m.last_name) === me);
+  const parents = rosterCache.filter((m) =>
+    m.parent_name && normName(m.parent_name) === me).map((m) => m.id);
+  return {student: student ? student.id : null, parents};
+}
+function selfRSVPOptions() {
+  const {student, parents} = selfScope();
+  const opts = [];
+  if (student) {
+    const m = rosterCache.find((x) => x.id === student);
+    if (m) opts.push({member_id: student, kind: "student",
+      name: `${m.first_name} ${m.last_name} (student)`});
+  }
+  parents.forEach((mid) => {
+    const m = rosterCache.find((x) => x.id === mid);
+    if (!m) return;
+    opts.push({member_id: mid, kind: "parent", name: `${m.parent_name} (parent)`,
+      label: parents.length > 1 ? `${m.parent_name} (parent of ${m.first_name})` : undefined});
+  });
+  return opts;
+}
+
 async function loadPeople() {
   // Mentors get the full roster; everyone else the names-only directory.
   rosterCache = await GET(MENTOR() ? "/api/roster" : "/api/people");
@@ -651,7 +680,7 @@ async function renderEvents() {
   const types = ["meeting", "build", "competition", "outreach"];
   v.innerHTML = `
   <div class="card"><h2>Events &amp; RSVPs</h2>
-  <p class="sub">Mentors create events. Students and parents RSVP; over-capacity events waitlist with auto-promote.</p>
+  <p class="sub">Mentors create events. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote.</p>
   <h3 class="mo">Create event</h3>
   <div class="grid3 mo">
     <div class="field"><label>Title *</label><input id="e-title"></div>
@@ -672,6 +701,8 @@ async function renderEvents() {
     ${["all", ...types].map((t) =>
       `<button class="btn ${eventFilter === t ? "" : "ghost"} small" data-et="${t}">${t}</button>`).join("")}
     <input id="e-q" placeholder="Search…" value="${esc(eventSearch)}" style="max-width:200px">
+    <button class="btn small ghost" id="ev-expand-all">Expand all</button>
+    <button class="btn small ghost" id="ev-collapse-all">Collapse all</button>
   </div></div>
   <div id="ev-list">${cards.join("")}</div>`;
   v.querySelectorAll("[data-et]").forEach((b) =>
@@ -684,6 +715,25 @@ async function renderEvents() {
     $("e-date").value = "2026-11-02"; $("e-time").value = "10:00 AM";
     $("e-loc").value = "School robotics lab, Room 12"; $("e-cap").value = "12";
   });
+  const setRsvpList = (id, open) => {
+    const el = $("rl-" + id);
+    if (!el) return;
+    el.classList.toggle("hidden", !open);
+    if (open) openRsvpLists.add(id); else openRsvpLists.delete(id);
+    const b = v.querySelector(`[data-expand="${id}"]`);
+    if (b) b.textContent = open ? "Collapse list" : `Expand list (${b.dataset.count})`;
+  };
+  v.querySelectorAll("[data-expand]").forEach((b) =>
+    b.addEventListener("click", () => setRsvpList(parseInt(b.dataset.expand, 10),
+      $("rl-" + b.dataset.expand).classList.contains("hidden"))));
+  const ea = $("ev-expand-all");
+  if (ea) ea.addEventListener("click", () =>
+    v.querySelectorAll("[data-expand]").forEach((b) =>
+      setRsvpList(parseInt(b.dataset.expand, 10), true)));
+  const ca = $("ev-collapse-all");
+  if (ca) ca.addEventListener("click", () =>
+    v.querySelectorAll("[data-expand]").forEach((b) =>
+      setRsvpList(parseInt(b.dataset.expand, 10), false)));
   v.querySelectorAll("[data-rsvp]").forEach((b) =>
     b.addEventListener("click", () => rsvpAction(b)));
   v.querySelectorAll("[data-unrsvp]").forEach((b) =>
@@ -718,13 +768,25 @@ async function eventCard(e) {
   const d = await GET(`/api/events/${e.id}/rsvps`);
   const hc = d.headcounts;
   const closed = e.deadline && e.deadline < new Date().toISOString().slice(0, 10);
-  const opts = personOptions().map((p) =>
-    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
+  const pickerOpts = MENTOR() ? personOptions() : selfRSVPOptions();
+  const opts = pickerOpts.map((p) =>
+    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.label || p.name)}</option>`).join("");
+  const pickerRow = closed ? "" : pickerOpts.length
+    ? `<div class="row">
+      <select id="rp-${e.id}">${opts}</select>
+      <button class="btn small" data-rsvp="${e.id}" data-want="going">RSVP Going</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe">Maybe</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial">Partial (multi-day)</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant">Can't make it</button>
+    </div>`
+    : `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
+  const scope = selfScope();
   const row = (r) => {
     const pill = r.status === "going" ? "green" : r.status === "waitlisted" ? "amber"
       : r.status === "maybe" ? "blue" : r.status === "partial" ? "purple" : "gray";
-    const canRemove = MENTOR() || (ME && ME.name
-      && r.person_name.trim().toLowerCase() === ME.name.trim().toLowerCase());
+    const canRemove = MENTOR() || (ME
+      && ((r.person_kind === "student" && r.member_id === scope.student)
+        || (r.person_kind === "parent" && scope.parents.includes(r.member_id))));
     return `<div class="row" style="margin:4px 0">
       <span class="pill ${pill}">${r.status}</span>
       <span>${esc(r.person_name)} <span class="sub">(${r.person_kind})</span></span>
@@ -741,14 +803,9 @@ async function eventCard(e) {
       · ${hc.maybe} maybe · ${hc.partial} partial
       · ${hc.waitlisted} waitlisted · ${hc.cant} can't make it</div>
     ${e.notes ? `<div class="sub">${esc(e.notes)}</div>` : ""}
-    ${closed ? "" : `<div class="row">
-      <select id="rp-${e.id}">${opts}</select>
-      <button class="btn small" data-rsvp="${e.id}" data-want="going">RSVP Going</button>
-      <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe">Maybe</button>
-      <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial">Partial (multi-day)</button>
-      <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant">Can't make it</button>
-    </div>`}
-    <div style="margin-top:6px">${d.rsvps.map(row).join("") || '<span class="sub">No RSVPs yet.</span>'}</div>
+    ${pickerRow}
+    ${d.rsvps.length ? `<div class="row" style="margin-top:6px"><button class="btn small ghost" data-expand="${e.id}" data-count="${d.rsvps.length}">${openRsvpLists.has(e.id) ? "Collapse list" : `Expand list (${d.rsvps.length})`}</button></div>` : ""}
+    <div id="rl-${e.id}" style="margin-top:6px" class="${openRsvpLists.has(e.id) ? "" : "hidden"}">${d.rsvps.map(row).join("") || '<span class="sub">No RSVPs yet.</span>'}</div>
   </div>`;
 }
 

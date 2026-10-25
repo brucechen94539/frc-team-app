@@ -855,6 +855,16 @@ def api_rsvps(eid):
     b = request.get_json(force=True)
     if b.get("person_kind") not in ("student", "parent") or not b.get("person_name"):
         return err("person_kind (student|parent) and person_name required")
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] not in ("mentor", "admin"):
+        student_id, parent_ids = _self_rsvp_scope(u)
+        ok = (b.get("person_kind") == "student" and b.get("member_id") == student_id) \
+            or (b.get("person_kind") == "parent" and b.get("member_id") in parent_ids)
+        if not ok:
+            return err("you can only RSVP for yourself"
+                       " — mentors can RSVP for others", 403)
     want = b.get("status", "going")
     status = want
     if want in ("going", "partial") and ev["capacity"] \
@@ -888,8 +898,9 @@ def api_rsvp_delete(rid):
     if not u:
         return err("login required", 401)
     if u["role"] not in ("mentor", "admin"):
-        mine = ((r["person_name"] or "").strip().lower()
-                == (u["name"] or "").strip().lower())
+        student_id, parent_ids = _self_rsvp_scope(u)
+        mine = (r["person_kind"] == "student" and r["member_id"] == student_id) \
+            or (r["person_kind"] == "parent" and r["member_id"] in parent_ids)
         if not mine:
             return err("you can only remove your own RSVP", 403)
     with _lock:
@@ -1075,14 +1086,25 @@ def _norm_name(s):
     return "".join((s or "").strip().lower().split())
 
 
+def _self_rsvp_scope(u):
+    """What the signed-in account may RSVP as: (student member id or None,
+    member ids the account is a parent of). Names match loosely, so an
+    account named 'zanderchen' matches the member 'Zander Chen'."""
+    if not u:
+        return None, set()
+    student_id = None
+    parent_ids = set()
+    for m in q_all("SELECT id, first_name, last_name, parent_name FROM members"):
+        if _norm_name(m["first_name"] + " " + m["last_name"]) == _norm_name(u["name"]):
+            student_id = m["id"]
+        if m["parent_name"] and _norm_name(m["parent_name"]) == _norm_name(u["name"]):
+            parent_ids.add(m["id"])
+    return student_id, parent_ids
+
+
 def _own_member_id(u):
     """The member record for the signed-in account, matched by name."""
-    if not u:
-        return None
-    for m in q_all("SELECT id, first_name, last_name FROM members"):
-        if _norm_name(m["first_name"] + " " + m["last_name"]) == _norm_name(u["name"]):
-            return m["id"]
-    return None
+    return _self_rsvp_scope(u)[0] if u else None
 
 
 @app.route("/api/carpools", methods=["POST"])

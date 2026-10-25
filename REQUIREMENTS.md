@@ -68,16 +68,26 @@ and `can't make it` do not count as attending.
 ## Events & RSVPs
 
 - Mentors/admins create events (title, type, date/time, location, capacity).
-- **Students and parents** can RSVP; statuses: going / maybe / partial /
-  can't make it / waitlisted. **Partial** is for multi-day events such as
-  tournaments, when someone attends only part of the event.
+- **Students and parents** can RSVP **for themselves only** — the picker
+  shows just their own entry (a parent with several children gets one
+  entry per child, labeled by child). **Only mentors/admins can RSVP for
+  someone else** (override). The server enforces it: a non-mentor RSVP
+  for anyone else is rejected, matched by member linkage (student record
+  or parent_name), with loose name matching so 'zanderchen' matches
+  'Zander Chen'. Statuses: going / maybe / partial / can't make it /
+  waitlisted. **Partial** is for multi-day events such as tournaments,
+  when someone attends only part of the event.
 - When an event is full, new "going" or "partial" RSVPs join the waitlist
   and are auto-promoted as spots open; going + partial both count toward
   capacity.
 - **RSVP removal:** students and parents can only remove **their own**
-  RSVP (matched by account name); only mentors/admins can remove anyone
-  else's. Deleting a going/partial RSVP promotes the first waitlisted
-  person.
+  RSVP (same member-linkage matching as filing); only mentors/admins can
+  remove anyone else's. Deleting a going/partial RSVP promotes the first
+  waitlisted person.
+- **Long RSVP lists:** each event's RSVP list starts collapsed behind an
+  "Expand list (N)" button, and the Events module has "Expand all" /
+  "Collapse all" buttons. Expanded state survives re-renders within the
+  session.
 - Event pickers in the UI are **bubbles** (chips), not dropdowns: the picked
   event is highlighted and the sections below update to that event.
 
