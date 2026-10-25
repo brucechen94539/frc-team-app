@@ -1027,7 +1027,11 @@ def api_travel(eid):
         "SELECT member_id, person_kind, person_name FROM rsvps"
         " WHERE event_id=? AND status IN ('going','partial')"
         " ORDER BY person_name", (eid,))
+    parent_names = sorted({m["parent_name"] for m in q_all(
+        "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
+        " AND parent_name != ''") if m["parent_name"]})
     return jsonify({"event": ev, "carpools": carpools, "tools": tools,
+                    "parent_names": parent_names,
                     "hotel": hotel, "attendees": attendees})
 
 
@@ -1038,6 +1042,22 @@ def is_attending(eid, member_id, kind):
     return q_one("SELECT id FROM rsvps WHERE event_id=? AND member_id=?"
                  " AND person_kind=? AND status IN ('going','partial')",
                  (eid, member_id, kind)) is not None
+
+
+def _norm_name(s):
+    """Compare names loosely: case- and whitespace-insensitive, so an
+    account named 'zanderchen' matches the member 'Zander Chen'."""
+    return "".join((s or "").strip().lower().split())
+
+
+def _own_member_id(u):
+    """The member record for the signed-in account, matched by name."""
+    if not u:
+        return None
+    for m in q_all("SELECT id, first_name, last_name FROM members"):
+        if _norm_name(m["first_name"] + " " + m["last_name"]) == _norm_name(u["name"]):
+            return m["id"]
+    return None
 
 
 @app.route("/api/carpools", methods=["POST"])
@@ -1129,9 +1149,27 @@ def api_tool_create():
 
 @app.route("/api/tools/<int:tid>/claim", methods=["POST"])
 def api_tool_claim(tid):
+    """Tools are hauled by parent drivers: the claim must name a parent
+    driver with a carpool for this event — not a student."""
     b = request.get_json(force=True)
     if not b.get("claimed_by"):
         return err("claimed_by required")
+    t = q_one("SELECT * FROM tools WHERE id=?", (tid,))
+    if not t:
+        return err("tool not found", 404)
+    parent_drivers = {_norm_name(r["person_name"]) for r in q_all(
+        "SELECT person_name FROM rsvps WHERE event_id=? AND"
+        " person_kind='parent' AND status IN ('going','partial')",
+        (t["event_id"],))}
+    parent_drivers |= {_norm_name(m["parent_name"]) for m in q_all(
+        "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
+        " AND parent_name != ''")}
+    car_drivers = {_norm_name(c["driver_name"]) for c in q_all(
+        "SELECT driver_name FROM carpools WHERE event_id=?", (t["event_id"],))}
+    if (_norm_name(b["claimed_by"]) not in parent_drivers
+            or _norm_name(b["claimed_by"]) not in car_drivers):
+        return err("tools are hauled by parent drivers — pick a parent driver"
+                   " with a carpool for this event")
     execute("UPDATE tools SET claimed_by=?, claimed_at=datetime('now') WHERE id=?",
             (b["claimed_by"], tid))
     return jsonify(q_one("SELECT * FROM tools WHERE id=?", (tid,)))
@@ -1204,9 +1242,23 @@ def api_room_update(rid):
 
 @app.route("/api/hotels/<int:hid>/requests", methods=["POST"])
 def api_rooming_request(hid):
+    """Rooming requests are made by students, for themselves only.
+    Parents cannot file them; mentors may file on a student's behalf."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] == "parent":
+        return err("rooming requests are made by students", 403)
     b = request.get_json(force=True)
     if not b.get("member_id"):
         return err("member_id required")
+    if u["role"] == "student":
+        own = _own_member_id(u)
+        if not own:
+            return err("your account is not linked to a student on the roster"
+                       " — ask a mentor to check your account name", 403)
+        if int(b["member_id"]) != own:
+            return err("you can only request a room for yourself", 403)
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (hid,))
     if not hotel:
         return err("hotel not found", 404)
@@ -1214,12 +1266,18 @@ def api_rooming_request(hid):
     if not is_attending(eid, b["member_id"], "student"):
         return err("only students attending this event can request a room"
                    " — RSVP as going first")
-    going_names = {r["person_name"] for r in q_all(
+    requester = q_one("SELECT first_name, last_name FROM members WHERE id=?",
+                      (b["member_id"],))
+    requester_name = (requester["first_name"] + " " + requester["last_name"]) \
+        if requester else ""
+    attending_names = {r["person_name"] for r in q_all(
         "SELECT person_name FROM rsvps WHERE event_id=? AND"
-        " person_kind='student' AND status='going'", (eid,))}
+        " person_kind='student' AND status IN ('going','partial')", (eid,))}
     for name in b.get("preferred_roommates") or []:
-        if name not in going_names:
+        if name not in attending_names:
             return err(f"{name} is not attending this event")
+        if _norm_name(name) == _norm_name(requester_name):
+            return err("you can't list yourself as your own roommate")
     with _lock:
         db = get_db()
         db.execute(
@@ -1237,16 +1295,21 @@ def api_rooming_request(hid):
 
 @app.route("/api/rooming-requests/<int:qid>", methods=["DELETE"])
 def api_rooming_request_delete(qid):
-    """Withdraw rule: while a request is pending, the student can withdraw
-    it (any signed-in user acting for them); once placed/finalized, only
-    mentors/admins can remove it."""
+    """Withdraw rule: while a request is pending, only the student it
+    belongs to (or a mentor/admin) can withdraw it; once placed/finalized,
+    only mentors/admins can remove it."""
     q = q_one("SELECT * FROM rooming_requests WHERE id=?", (qid,))
     if not q:
         return err("request not found", 404)
+    u = current_user()
+    if not u:
+        return err("login required", 401)
     if q["status"] == "placed":
-        u = current_user()
-        if not u or u["role"] not in ("mentor", "admin"):
+        if u["role"] not in ("mentor", "admin"):
             return err("placed requests can only be removed by a mentor", 403)
+    elif u["role"] not in ("mentor", "admin"):
+        if _own_member_id(u) != q["member_id"]:
+            return err("you can only withdraw your own request", 403)
     execute("DELETE FROM rooming_requests WHERE id=?", (qid,))
     return jsonify({"deleted": qid})
 

@@ -110,8 +110,13 @@ well as in the UI.
 
 ### Tools & equipment
 
-- Mentors list the tools/gear an event needs; anyone signed in can claim
-  what they'll bring and unclaim it.
+### Tools & equipment
+
+- Mentors list the tools/gear an event needs. Tools are **hauled by parent
+  drivers**: the claim picker lists only the event's parent drivers with
+  their cars (driver + vehicle detail), never students. A claimed tool
+  shows as "loaded in <driver>'s car" with the vehicle tooltip. Anyone
+  signed in can claim a tool for a driver and unclaim it.
 
 ### Hotels & room parents
 
@@ -125,10 +130,22 @@ well as in the UI.
   as the room has. Capacity is derived from the beds: double, queen, and
   king sleep **2** each; a sofa bed sleeps **1** (e.g. 2 queens + 1 sofa
   bed = sleeps 5).
+### Rooming requests
+
 - **Families request** rooming (student + preferred roommates, chosen from
   attending students); **mentors finalize** by placing students into rooms.
 - Only students attending the event can request a room, be listed as a
-  preferred roommate, or be placed in a room.
+  preferred roommate, or be placed in a room. Preferred roommates may be
+  'going' or 'partial' attendees.
+- **A student requests only for themself:** the form shows "Requesting as
+  <you>" with no student picker, and the student never appears in their
+  own roommate picker (mentors filing on a student's behalf get the same
+  exclusion once they pick the student). The server enforces it: a
+  student filing for anyone else, or listing themself as a roommate, is
+  rejected.
+- **Parents don't see the rooming-request module at all** — they take part
+  as room parents instead. Students see only their own requests; mentors
+  see everyone's, for placement.
 - **Withdrawal:** a student can withdraw their own rooming request while it
   is **pending**. Once it is **placed/finalized**, only a mentor/admin can
   remove it.

@@ -5,6 +5,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;")
   .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const normName = (s) => String(s == null ? "" : s).toLowerCase().replace(/\s+/g, "");
 
 async function api(method, url, body) {
   const r = await fetch(url, {
@@ -252,13 +253,18 @@ async function refreshBadges() {
       b.textContent = pending.length;
       b.classList.toggle("hidden", !pending.length);
     }
+    const rb = $("nav-rooms");
+    if (ME && ME.role === "parent") { rb.classList.add("hidden"); return; }
     const events = await GET("/api/events");
     let awaiting = 0;
     for (const e of events) {
       const t = await GET(`/api/events/${e.id}/travel`);
-      if (t.hotel) awaiting += t.hotel.awaiting || 0;
+      if (!t.hotel) continue;
+      if (MENTOR()) awaiting += t.hotel.awaiting || 0;
+      else awaiting += (t.hotel.requests || []).filter((q) =>
+        q.status === "pending" && ME
+        && normName(q.first_name + " " + q.last_name) === normName(ME.name)).length;
     }
-    const rb = $("nav-rooms");
     rb.textContent = awaiting;
     rb.classList.toggle("hidden", !awaiting);
   } catch (e) { /* badges are best-effort */ }
@@ -889,6 +895,16 @@ async function renderTravel() {
   const attOpts = attPeople.map(optJSON).join("");
   const attParents = attPeople.filter((p) => p.kind === "parent").map(optJSON).join("");
   const attStudents = (t.attendees || []).filter((a) => a.person_kind === "student");
+  const knownParents = new Set([
+    ...(t.attendees || []).filter((a) => a.person_kind === "parent")
+      .map((a) => normName(a.person_name)),
+    ...(t.parent_names || []).map((n) => normName(n))]);
+  const parentDrivers = (t.carpools || []).filter((c) =>
+    knownParents.has(normName(c.driver_name)));
+  const driverOpts = parentDrivers.map((c) => {
+    const v = vehicleTip(c.vehicle);
+    return `<option value="${esc(c.driver_name)}">${esc(v ? `${c.driver_name} · ${v}` : c.driver_name)}</option>`;
+  }).join("");
   const students = attStudents.map((a) =>
     `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
   const studentNames = attStudents.map((a) =>
@@ -929,7 +945,7 @@ async function renderTravel() {
   </div></div>
 
   <div class="card"><h3>Tool sign-up</h3>
-  <p class="sub">Mentors list what the event needs; anyone claims what they'll bring.</p>
+  <p class="sub">Mentors list what the event needs; parent drivers claim what they'll haul in their cars.</p>
   <div class="row mo">
     <input id="tl-name" placeholder="Tool or gear needed *" style="flex:2;min-width:160px">
     <input id="tl-qty" placeholder="Qty" inputmode="numeric" style="max-width:70px">
@@ -937,17 +953,22 @@ async function renderTravel() {
     <button class="btn small" id="tl-add">Add</button>
   </div>
   <div style="margin-top:8px">
-  ${t.tools.map((x) => `<div class="row" style="margin:6px 0">
+  ${t.tools.map((x) => {
+    const driver = (t.carpools || []).find((c) => normName(c.driver_name) === normName(x.claimed_by));
+    const veh = driver ? vehicleTip(driver.vehicle) : "";
+    return `<div class="row" style="margin:6px 0">
     <span><b>${esc(x.name)}</b> <span class="sub">×${x.qty}</span></span>
-    ${x.claimed_by ? `<span class="pill green">covered by ${esc(x.claimed_by)}</span>
+    ${x.claimed_by ? `<span class="pill green">\u{1F697} loaded in ${esc(x.claimed_by)}'s car</span>
+      ${veh ? `<span class="pill" title="${esc(veh)}">\u{1F697} vehicle</span>` : ""}
       <button class="btn small ghost" data-tunclaim="${x.id}">Unclaim</button>`
-    : `<select id="tls-${x.id}">${popts}</select>
-      <button class="btn small" data-tclaim="${x.id}">Claim</button>`}
-  </div>`).join("") || '<p class="sub">Nothing listed yet.</p>'}
+    : driverOpts ? `<select id="tls-${x.id}">${driverOpts}</select>
+      <button class="btn small" data-tclaim="${x.id}">Claim</button>`
+    : `<span class="sub">No parent drivers with carpools for this event yet — post a ride in Carpools first.</span>`}
+  </div>`;}).join("") || '<p class="sub">Nothing listed yet.</p>'}
   </div></div>
 
   <div class="card"><h3>Hotel assignments</h3>
-  ${t.hotel ? hotelHTML(t.hotel, students, attParents, studentNames) : `
+  ${t.hotel ? hotelHTML(t.hotel, students, attParents, studentNames, attStudents) : `
     <p class="sub">No hotel block for this event. Add one for remote tournaments:</p>
     <div class="grid3 mo">
       <div class="field"><label>Hotel name *</label><input id="h-name"></div>
@@ -1008,10 +1029,12 @@ async function renderTravel() {
     toast("Tool added."); renderTravel();
   });
   v.querySelectorAll("[data-tclaim]").forEach((b) => b.addEventListener("click", async () => {
-    const p = JSON.parse($("tls-" + b.dataset.tclaim).value.replace(/&#39;/g, "'"));
-    await POST(`/api/tools/${b.dataset.tclaim}/claim`,
-      {claimed_by: p.name.replace(/ \((student|parent)\)$/, "")});
-    toast("Claimed."); renderTravel();
+    try {
+      await POST(`/api/tools/${b.dataset.tclaim}/claim`,
+        {claimed_by: $("tls-" + b.dataset.tclaim).value});
+      toast("Loaded — thank you for hauling!");
+      renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
   }));
   v.querySelectorAll("[data-tunclaim]").forEach((b) => b.addEventListener("click", async () => {
     await POST(`/api/tools/${b.dataset.tunclaim}/unclaim`);
@@ -1085,7 +1108,9 @@ async function renderTravel() {
   }));
   const rq = $("rq-add");
   if (rq) rq.addEventListener("click", async () => {
-    const mid = parseInt($("rq-who").value, 10);
+    const selfInput = $("rq-who-self");
+    const mid = selfInput ? parseInt(selfInput.value, 10)
+      : parseInt($("rq-who").value, 10);
     if (!mid) return toast("Pick a student.");
     try {
       await POST(`/api/hotels/${t.hotel.id}/requests`, {member_id: mid,
@@ -1093,6 +1118,17 @@ async function renderTravel() {
         notes: $("rq-notes").value.trim()});
       toast("Rooming request saved."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
+  });
+  const whoSel = $("rq-who");
+  if (whoSel) whoSel.addEventListener("change", () => {
+    const mid = parseInt(whoSel.value, 10);
+    const mates = $("rq-mates");
+    if (!mates) return;
+    const kept = [...mates.selectedOptions].map((o) => o.value);
+    mates.innerHTML = (attStudents || [])
+      .filter((a) => a.member_id !== mid)
+      .map((a) => `<option value="${esc(a.person_name)}">${esc(a.person_name)}</option>`).join("");
+    [...mates.options].forEach((o) => { o.selected = kept.includes(o.value); });
   });
 }
 
@@ -1114,8 +1150,47 @@ function bedSummary(beds) {
     `${n} ${t}${n > 1 ? "s" : ""}`).join(" · ");
 }
 
-function hotelHTML(h, students, poptParents, studentNames) {
+function hotelHTML(h, students, poptParents, studentNames, attStudents) {
   const canVol = ME && ME.role !== "student";
+  // Rooming requests are a student feature: a student files for themself
+  // only (never appears in their own pickers); parents don't see the
+  // module at all — they take part as room parents, above.
+  const selfStudent = ME && ME.role === "student"
+    ? (attStudents || []).find((a) => normName(a.person_name) === normName(ME.name))
+    : null;
+  const visibleReqs = MENTOR() ? h.requests
+    : ME && ME.role === "student"
+      ? h.requests.filter((q) => selfStudent && q.member_id === selfStudent.member_id)
+      : h.requests;
+  const pendingReqs = visibleReqs.filter((q) => q.status === "pending").length;
+  const matesExclSelf = (attStudents || [])
+    .filter((a) => !selfStudent || a.member_id !== selfStudent.member_id)
+    .map((a) => `<option value="${esc(a.person_name)}">${esc(a.person_name)}</option>`).join("");
+  const roomingBlock = ME.role === "parent" ? "" : `
+  <h3>Rooming requests ${pendingReqs ? `<span class="pill amber">${pendingReqs} awaiting placement</span>` : ""}</h3>
+  <p class="sub">A student requests to stay with other students — only for yourself, and you can't pick yourself as a roommate.</p>
+  ${ME.role === "student"
+    ? selfStudent
+      ? `<div class="row"><span class="sub">Requesting as <b>${esc(selfStudent.person_name)}</b></span>
+        <input type="hidden" id="rq-who-self" value="${selfStudent.member_id}">
+        <select id="rq-mates" multiple size="3" title="Preferred roommates (Ctrl/Cmd-click for several)" style="flex:1;min-width:160px">${matesExclSelf}</select>
+        <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
+        <button class="btn small" id="rq-add">Save request</button></div>`
+      : `<p class="sub">We couldn't match your account to an attending student, so you can't file a request — ask a mentor to check your account name.</p>`
+    : `<div class="row"><select id="rq-who"><option value="">Student…</option>${students}</select>
+      <select id="rq-mates" multiple size="3" title="Preferred roommates (Ctrl/Cmd-click for several)" style="flex:1;min-width:160px">${studentNames}</select>
+      <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
+      <button class="btn small" id="rq-add">Save request</button></div>`}
+  <div style="margin-top:8px">
+  ${visibleReqs.map((q) => `<div class="row" style="margin:4px 0">
+    <span class="pill ${q.status === "placed" ? "green" : "amber"}">${q.status}</span>
+    <b>${esc(q.first_name)} ${esc(q.last_name)}</b>
+    <span class="sub">wants: ${esc((q.preferred_roommates || []).join(", ")) || "—"}</span>
+    <span class="sub">${esc(q.notes || "")}</span>
+    ${q.status === "pending" || MENTOR()
+      ? `<button class="btn small ghost" data-reqdel="${q.id}">${MENTOR() ? "Remove" : "Withdraw"}</button>` : ""}
+    </div>`).join("") || '<span class="sub">No requests yet.</span>'}
+  </div>`;
   return `
   <div class="sub"><b>${esc(h.name)}</b> · ${esc(h.address || "")} ·
     ${esc(h.check_in || "")} → ${esc(h.check_out || "")}</div>
@@ -1156,22 +1231,7 @@ function hotelHTML(h, students, poptParents, studentNames) {
         <option value="">Place a student…</option>${students}</select>
         <button class="btn small" data-place="${r.id}">Place</button></div></div>`;
   }).join("")}
-  <h3>Rooming requests ${h.awaiting ? `<span class="pill amber">${h.awaiting} awaiting placement</span>` : ""}</h3>
-  <p class="sub">Lists show only students attending this event (RSVP going or partial).</p>
-  <div class="row"><select id="rq-who"><option value="">Student…</option>${students}</select>
-    <select id="rq-mates" multiple size="3" title="Preferred roommates (Ctrl/Cmd-click for several)" style="flex:1;min-width:160px">${studentNames}</select>
-    <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
-    <button class="btn small" id="rq-add">Save request</button></div>
-  <div style="margin-top:8px">
-  ${h.requests.map((q) => `<div class="row" style="margin:4px 0">
-    <span class="pill ${q.status === "placed" ? "green" : "amber"}">${q.status}</span>
-    <b>${esc(q.first_name)} ${esc(q.last_name)}</b>
-    <span class="sub">wants: ${esc((q.preferred_roommates || []).join(", ")) || "—"}</span>
-    <span class="sub">${esc(q.notes || "")}</span>
-    ${q.status === "pending" || MENTOR()
-      ? `<button class="btn small ghost" data-reqdel="${q.id}">${MENTOR() ? "Remove" : "Withdraw"}</button>` : ""}
-    </div>`).join("") || '<span class="sub">No requests yet.</span>'}
-  </div>`;
+  ${roomingBlock}`;
 }
 
 /* ---------------- boot ---------------- */
