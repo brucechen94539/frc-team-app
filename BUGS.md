@@ -19,7 +19,7 @@ _None right now._
   (403, same UTC-date rule the UI uses); mentors/admins keep an
   override and now see the picker on closed events with an override
   note, so the override is actually usable. Removing an RSVP stays
-  allowed after the deadline (it only frees a spot).
+  allowed after the deadline (it only frees a spot). (commit 04f6f22e)
 
 ### Link backfill never ran: table-existence check defeated by init order (2026-10-25)
 - **Symptom (caught in pre-push testing, never shipped):** after
@@ -31,7 +31,7 @@ _None right now._
 - **Fix:** the backfill is gated on a marker row in a new `meta`
   table (`iam_links_backfilled`) instead. Verified on a migrated old
   database: links, opt-in WhatsApp fill, and marker all land, and a
-  mentor's unlink survives a restart.
+  mentor's unlink survives a restart. (commit 04f6f22e)
 
 ### RSVP: any user could RSVP for anyone else (2026-10-25)
 - **Symptom:** logged in as a student, Zander could pick "Bruce Chen
