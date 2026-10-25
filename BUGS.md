@@ -22,7 +22,7 @@ _None right now._
   as override. Removal uses the same linkage. The picker for non-mentors
   shows only their own entries (a parent with several children gets one
   labeled entry per child); unlinked accounts get a "ask a mentor"
-  note instead of buttons.
+  note instead of buttons. (commit 3e5677f8)
 
 ### Bare `hidden` class hid nothing (2026-10-25)
 - **Symptom:** the new collapsible RSVP lists rendered expanded despite
