@@ -9,6 +9,15 @@ _None right now._
 
 ## Fixed
 
+### 2026-10-25 — Event Delete button visible to students
+- **Reported:** Bruce (screenshot) — a student account saw a red DELETE
+  button on every event card, although deleting was already rejected
+  server-side.
+- **Root cause:** the event-card Delete button rendered for every role;
+  only the event-creation form was hidden from non-mentors.
+- **Fix:** the Delete button now renders only for mentors/admins, matching
+  the server's existing role gate.
+
 ### 2026-10-19 — Students could define carpool rides
 - **Reported:** Bruce — a logged-in student saw the full "post a ride" form (driver name, seats, departure point/time, return plan, notes) in Travel & Logistics; students should only see the sign-up options and pick which car/parent to go with.
 - **Root cause:** `POST /api/carpools` had no role check, and the ride form rendered for every role.

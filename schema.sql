@@ -9,6 +9,9 @@ CREATE TABLE IF NOT EXISTS users (
   role          TEXT NOT NULL DEFAULT 'student'
                 CHECK (role IN ('student','parent','mentor','admin')),
   password_hash TEXT,              -- scrypt hash; NULL = no login yet
+  totp_secret   TEXT,              -- Fernet-encrypted TOTP secret; NULL = no 2FA
+  totp_enabled  INTEGER NOT NULL DEFAULT 0,
+  totp_backup_codes TEXT,          -- JSON list of sha256 hashes of recovery codes
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

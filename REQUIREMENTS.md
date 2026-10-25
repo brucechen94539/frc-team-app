@@ -21,6 +21,26 @@ and `can't make it` do not count as attending.
 - Mentors/admins create and reset team accounts (Mentor Queue → Team accounts).
 - Role rules are enforced on the server, not just hidden in the UI.
   Non-mentors see a names-only people directory (no contact details).
+- Event **Delete** buttons are shown to mentors/admins only (the server
+  already rejected others; the button no longer appears for them at all).
+
+## Two-factor authentication (TOTP, opt-in)
+
+- Any user can opt in from the **Security** tab: scan the QR code with
+  **Google Authenticator or Apple Passwords** (both use the standard TOTP
+  protocol, so one implementation serves both) or enter the key by hand,
+  then confirm with a code from the app.
+- Login becomes two steps for users with 2FA on: password first, then the
+  6-digit code (or a recovery code). The session stays half-open until
+  the code verifies. Codes accept ±1 time step for clock skew.
+- **Recovery codes:** 8 one-time codes shown once at setup (regenerable
+  with a current code); each works once and is consumed on use.
+- Secrets are **encrypted at rest** with a key derived from the app secret;
+  recovery-code hashes are stored, never the codes themselves.
+- **Lockout safety valve:** 5 failed codes lock 2FA attempts for 10
+  minutes; a mentor/admin can reset any user's 2FA from Team accounts
+  (lost phone), returning them to password-only login.
+- 2FA is opt-in per user; it can be made mandatory for roles later.
 
 ## Team sign-ups
 

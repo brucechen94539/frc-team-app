@@ -71,7 +71,7 @@ function showView(name) {
   $("view-" + name).classList.remove("hidden");
   ({signup: renderSignup, queue: renderQueue, roster: renderRoster,
     events: renderEvents, tracking: renderTracking, travel: renderTravel,
-    login: renderLogin})[name]();
+    security: renderSecurity, login: renderLogin})[name]();
 }
 
 /* ---------------- login ---------------- */
@@ -105,13 +105,113 @@ async function submitLogin() {
     const body = SETUP
       ? {name: $("lg-name").value.trim(), email: $("lg-email").value.trim(), password: $("lg-pass").value}
       : {email: $("lg-email").value.trim(), password: $("lg-pass").value};
-    ME = (await POST(url, body)).user;
+    const res = await POST(url, body);
+    if (res.need_2fa) { render2FAStep(); return; }
+    ME = res.user;
     SETUP = false;
     applyNav();
     toast("Welcome, " + ME.name + ".");
     showView("events");
     refreshBadges();
   } catch (e) { errBox.textContent = e.message; }
+}
+
+function render2FAStep() {
+  const v = $("view-login");
+  v.innerHTML = `
+  <div class="login-wrap"><div class="card">
+    <h2>Two-factor check</h2>
+    <p class="sub">Enter the 6-digit code from your authenticator app, or a recovery code.</p>
+    <div class="err" id="lg-err"></div>
+    <div class="field"><label>Code</label><input id="lg-code" inputmode="numeric" autocomplete="one-time-code"></div>
+    <button class="btn" id="lg-verify">Verify</button>
+  </div></div>`;
+  const go = async () => {
+    const errBox = $("lg-err"); errBox.textContent = "";
+    try {
+      ME = (await POST("/api/auth/verify-2fa", {code: $("lg-code").value.trim()})).user;
+      applyNav();
+      toast("Welcome, " + ME.name + ".");
+      showView("events");
+      refreshBadges();
+    } catch (e) { errBox.textContent = e.message; }
+  };
+  $("lg-verify").addEventListener("click", go);
+  $("lg-code").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
+  $("lg-code").focus();
+}
+
+async function renderSecurity() {
+  const v = $("view-security");
+  let st;
+  try { st = await GET("/api/auth/totp-status"); }
+  catch (e) { v.innerHTML = `<div class="card"><p class="sub">Could not load security settings.</p></div>`; return; }
+  if (!st.enabled) {
+    v.innerHTML = `
+    <div class="card"><h2>Two-factor authentication</h2>
+      <p class="sub">Add a second step to your login with an authenticator app
+      (Google Authenticator or Apple Passwords). Scan the QR code, then enter
+      the 6-digit code to confirm. Save your recovery codes somewhere safe —
+      they are the only way back in if you lose your phone.</p>
+      <button class="btn" id="t-setup">Set up authenticator app</button>
+      <div id="t-setup-area" style="margin-top:12px"></div>
+    </div>`;
+    $("t-setup").addEventListener("click", async () => {
+      try {
+        const s = await POST("/api/auth/totp-setup", {});
+        $("t-setup-area").innerHTML = `
+          <div class="sub">Scan this with your authenticator app, or enter the key by hand:</div>
+          <div style="background:#fff;padding:12px;border-radius:12px;max-width:220px">${s.qr_svg}</div>
+          <div class="field" style="max-width:320px"><label>Manual key</label>
+            <input value="${esc(s.secret)}" readonly onclick="this.select()"></div>
+          <div class="field" style="max-width:200px"><label>Code from the app</label>
+            <input id="t-code" inputmode="numeric" autocomplete="one-time-code"></div>
+          <button class="btn" id="t-verify">Verify &amp; enable</button>
+          <div id="t-verify-out" style="margin-top:12px"></div>`;
+        $("t-verify").addEventListener("click", async () => {
+          try {
+            const r = await POST("/api/auth/totp-verify", {code: $("t-code").value.trim()});
+            $("t-verify-out").innerHTML = `
+              <p class="sub"><b>Two-factor authentication is on.</b> Save these recovery codes
+              somewhere safe — each works once, and they are shown only this one time:</p>
+              <div class="row" style="flex-wrap:wrap;gap:6px">${r.backup_codes.map((c) =>
+                `<span class="pill">${esc(c)}</span>`).join("")}</div>
+              <button class="btn" id="t-done" style="margin-top:12px">Done — I saved them</button>`;
+            $("t-done").addEventListener("click", renderSecurity);
+          } catch (e) { toast("Error: " + e.message); }
+        });
+      } catch (e) { toast("Error: " + e.message); }
+    });
+    return;
+  }
+  v.innerHTML = `
+  <div class="card"><h2>Two-factor authentication</h2>
+    <p><span class="pill green">ON</span>
+    <span class="sub">${st.backup_codes_remaining} recovery codes left.</span></p>
+    <p class="sub">Disabling or regenerating codes needs a current code from your app.
+    Lost your phone? Ask a mentor to reset your 2FA from Team accounts.</p>
+    <div class="field" style="max-width:200px"><label>Current code</label>
+      <input id="t-code" inputmode="numeric" autocomplete="one-time-code"></div>
+    <div class="row">
+      <button class="btn ghost" id="t-disable">Disable 2FA</button>
+      <button class="btn ghost" id="t-regen">Regenerate recovery codes</button>
+    </div>
+    <div id="t-out" style="margin-top:12px"></div>
+  </div>`;
+  $("t-disable").addEventListener("click", async () => {
+    try {
+      await POST("/api/auth/totp-disable", {code: $("t-code").value.trim()});
+      toast("Two-factor authentication disabled."); renderSecurity();
+    } catch (e) { toast("Error: " + e.message); }
+  });
+  $("t-regen").addEventListener("click", async () => {
+    try {
+      const r = await POST("/api/auth/totp-regenerate", {code: $("t-code").value.trim()});
+      $("t-out").innerHTML = `<p class="sub">New recovery codes (old ones no longer work):</p>
+        <div class="row" style="flex-wrap:wrap;gap:6px">${r.backup_codes.map((c) =>
+          `<span class="pill">${esc(c)}</span>`).join("")}</div>`;
+    } catch (e) { toast("Error: " + e.message); }
+  });
 }
 
 async function doLogout() {
@@ -312,9 +412,10 @@ async function renderQueue() {
       <div class="field"><label>&nbsp;</label><div class="row">
         <button class="btn small" id="ac-add">Create account</button>
         <button class="btn small ghost" id="ac-reset">Reset password</button>
+        <button class="btn small ghost" id="ac-reset2fa">Reset 2FA</button>
       </div></div>
     </div>
-    <p class="sub">Reset: put the account's email above, a new password, then hit Reset password.</p>
+    <p class="sub">Reset: put the account's email above, a new password, then hit Reset password. Reset 2FA clears that account's authenticator setup (lost phone).</p>
   </div>`;
   v.querySelectorAll("[data-f]").forEach((b) =>
     b.addEventListener("click", () => { queueFilter = b.dataset.f; renderQueue(); }));
@@ -336,7 +437,7 @@ async function renderAccounts() {
   try { users = await GET("/api/users"); }
   catch (e) { el.innerHTML = '<span class="sub">Could not load accounts.</span>'; return; }
   el.innerHTML = users.map((u) =>
-    `<span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.name)} \u00b7 ${esc(u.role)}${u.has_password ? "" : " \u00b7 no login"}</span>`).join(" ")
+    `<span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.name)} \u00b7 ${esc(u.role)}${u.has_password ? "" : " \u00b7 no login"}${u.totp_enabled ? " \u00b7 \u{1F512} 2FA" : ""}</span>`).join(" ")
     || '<span class="sub">No accounts yet.</span>';
   $("ac-add").onclick = async () => {
     try {
@@ -345,6 +446,17 @@ async function renderAccounts() {
         password: $("ac-pass").value});
       toast("Account created.");
       $("ac-name").value = $("ac-email").value = $("ac-pass").value = "";
+      renderAccounts();
+    } catch (e) { toast("Error: " + e.message); }
+  };
+  $("ac-reset2fa").onclick = async () => {
+    try {
+      const email = $("ac-email").value.trim().toLowerCase();
+      const u = users.find((x) => (x.email || "").toLowerCase() === email);
+      if (!u) return toast("No account with that email.");
+      if (!confirm("Reset two-factor authentication for " + u.name + " (" + u.email + ")? They will log in with just a password until they set it up again.")) return;
+      await POST("/api/auth/totp-reset", {user_id: u.id});
+      toast("2FA reset for " + u.name + ".");
       renderAccounts();
     } catch (e) { toast("Error: " + e.message); }
   };
@@ -580,7 +692,7 @@ async function eventCard(e) {
       <span class="pill">${esc(e.type)}</span>
       ${closed ? '<span class="pill red">RSVP closed</span>' : ""}
       <span style="flex:1"></span>
-      <button class="btn small danger" data-delev="${e.id}">Delete</button></div>
+      ${MENTOR() ? `<button class="btn small danger" data-delev="${e.id}">Delete</button>` : ""}</div>
     <div class="sub">${esc(e.date || "")} ${esc(e.time || "")} · ${esc(e.location || "")}
       ${e.capacity ? `· ${hc.going}/${e.capacity} going` : `· ${hc.going} going`}
       · ${hc.maybe} maybe · ${hc.partial} partial

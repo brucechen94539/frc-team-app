@@ -8,12 +8,17 @@ Env:  DB=<path>   SQLite file (default: data.db next to this file)
       DB=:memory: ephemeral in-memory mode (data lost on restart)
       PORT=<port>  default 5000
 """
+import base64
 import functools
+import hashlib
+import hmac
 import json
 import os
 import secrets
 import sqlite3
+import struct
 import threading
+import time
 
 from flask import Flask, jsonify, request, send_from_directory, session
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -84,6 +89,7 @@ def _migrate(db):
     """Additive migrations for databases created before these columns."""
     room_cols = {r[1] for r in db.execute("PRAGMA table_info(rooms)")}
     car_cols = {r[1] for r in db.execute("PRAGMA table_info(carpools)")}
+    user_cols = {r[1] for r in db.execute("PRAGMA table_info(users)")}
     with _lock:
         if "parent_member_id" not in room_cols:
             db.execute("ALTER TABLE rooms ADD COLUMN parent_member_id INTEGER")
@@ -95,6 +101,13 @@ def _migrate(db):
             db.execute("ALTER TABLE rooms ADD COLUMN beds TEXT")
         if "vehicle" not in car_cols:
             db.execute("ALTER TABLE carpools ADD COLUMN vehicle TEXT")
+        if "totp_secret" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
+        if "totp_enabled" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN totp_enabled INTEGER"
+                       " NOT NULL DEFAULT 0")
+        if "totp_backup_codes" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN totp_backup_codes TEXT")
         db.commit()
 
 
@@ -102,7 +115,7 @@ def row(d):
     """sqlite3.Row -> plain dict, parsing JSON columns."""
     d = dict(d)
     for k in ("prefs", "discovery_chats", "agreements", "preferred_roommates",
-              "vehicle", "beds"):
+              "vehicle", "beds", "totp_backup_codes"):
         if k in d and isinstance(d[k], str):
             try:
                 d[k] = json.loads(d[k])
@@ -214,6 +227,10 @@ def api_auth_login():
             not check_password_hash(u["password_hash"], b.get("password") or "")):
         return err("invalid email or password", 401)
     session.clear()
+    if u.get("totp_enabled"):
+        # password passed, but the session stays half-open until the code
+        session["pending_uid"] = u["id"]
+        return jsonify({"need_2fa": True})
     session["uid"] = u["id"]
     return jsonify({"user": _public_user(u)})
 
@@ -267,6 +284,257 @@ def api_auth_password():
 
 
 # ----------------------------------------------------------------------------
+# Two-factor authentication (TOTP, RFC 6238) — opt-in per user.
+# Works with Google Authenticator and Apple Passwords: both accept the
+# standard otpauth:// QR code. Secrets are encrypted at rest with a key
+# derived from the app secret; recovery codes are sha256-hashed.
+# ----------------------------------------------------------------------------
+try:
+    from cryptography.fernet import Fernet
+except ImportError:  # pragma: no cover - requirements cover this
+    Fernet = None
+try:
+    import qrcode
+    import qrcode.image.svg
+except ImportError:  # pragma: no cover
+    qrcode = None
+
+_TOTP_FAILS = {}  # user_id -> [fail_count, locked_until_epoch]; in-memory only
+
+
+def _totp_fernet():
+    if Fernet is None:
+        raise RuntimeError("cryptography package is not installed")
+    digest = hashlib.sha256(app.secret_key.encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def _totp_encrypt(secret):
+    return _totp_fernet().encrypt(secret.encode()).decode()
+
+
+def _totp_decrypt(token):
+    if not token:
+        return None
+    try:
+        return _totp_fernet().decrypt(token.encode()).decode()
+    except Exception:
+        return None
+
+
+def totp_new_secret():
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def totp_uri(secret, account):
+    from urllib.parse import quote
+    issuer = "FRC Team App"
+    return ("otpauth://totp/" + quote(issuer) + ":" + quote(account)
+            + "?secret=" + secret + "&issuer=" + quote(issuer)
+            + "&algorithm=SHA1&digits=6&period=30")
+
+
+def totp_code(secret, at=None):
+    key = base64.b32decode(secret + "=" * (-len(secret) % 8))
+    counter = int((at if at is not None else time.time()) // 30)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    off = digest[-1] & 0x0F
+    return f"{(struct.unpack('>I', digest[off:off + 4])[0] & 0x7FFFFFFF) % 1000000:06d}"
+
+
+def totp_check(secret, code, window=1):
+    code = (code or "").strip().replace(" ", "").replace("-", "")
+    if not (code.isdigit() and len(code) == 6):
+        return False
+    now = int(time.time())
+    return any(hmac.compare_digest(totp_code(secret, at=now + d * 30), code)
+               for d in range(-window, window + 1))
+
+
+def _backup_codes(n=8):
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"  # no lookalike chars
+    return ["".join(secrets.choice(alphabet) for _ in range(4)) + "-" +
+            "".join(secrets.choice(alphabet) for _ in range(4))
+            for _ in range(n)]
+
+
+def _hash_code(code):
+    return hashlib.sha256(code.encode()).hexdigest()
+
+
+def _totp_throttled(uid):
+    rec = _TOTP_FAILS.get(uid)
+    return bool(rec and rec[1] > time.time())
+
+
+def _totp_fail(uid):
+    rec = _TOTP_FAILS.get(uid, [0, 0])
+    rec[0] += 1
+    if rec[0] >= 5:
+        rec[1] = time.time() + 600  # 10-minute lockout after 5 bad codes
+    _TOTP_FAILS[uid] = rec
+
+
+def _totp_clear(uid):
+    _TOTP_FAILS.pop(uid, None)
+
+
+def _totp_full_user(uid):
+    return q_one("SELECT * FROM users WHERE id=?", (uid,))
+
+
+@app.route("/api/auth/totp-status")
+def api_totp_status():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    full = _totp_full_user(u["id"])
+    codes = full.get("totp_backup_codes") or []
+    if isinstance(codes, str):
+        try:
+            codes = json.loads(codes)
+        except ValueError:
+            codes = []
+    return jsonify({"enabled": bool(full.get("totp_enabled")),
+                    "backup_codes_remaining": len(codes)})
+
+
+@app.route("/api/auth/totp-setup", methods=["POST"])
+def api_totp_setup():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if qrcode is None:
+        return err("QR code support is not installed", 503)
+    full = _totp_full_user(u["id"])
+    if full.get("totp_enabled"):
+        return err("two-factor authentication is already on;"
+                   " disable it first to set up again")
+    secret = totp_new_secret()
+    try:
+        token = _totp_encrypt(secret)
+    except RuntimeError as e:
+        return err(str(e), 503)
+    execute("UPDATE users SET totp_secret=?, totp_enabled=0,"
+            " totp_backup_codes=NULL WHERE id=?", (token, u["id"]))
+    svg = qrcode.make(totp_uri(secret, u["name"]),
+                      image_factory=qrcode.image.svg.SvgImage).to_string()
+    return jsonify({"qr_svg": svg.decode(), "secret": secret})
+
+
+@app.route("/api/auth/totp-verify", methods=["POST"])
+def api_totp_verify():
+    """Confirm enrollment: the code must match the pending secret."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    full = _totp_full_user(u["id"])
+    if full.get("totp_enabled"):
+        return err("two-factor authentication is already on")
+    secret = _totp_decrypt(full.get("totp_secret"))
+    b = request.get_json(force=True, silent=True) or {}
+    if not secret or not totp_check(secret, b.get("code")):
+        return err("that code did not match — check the app and try again")
+    codes = _backup_codes()
+    execute("UPDATE users SET totp_enabled=1, totp_backup_codes=? WHERE id=?",
+            (json.dumps([_hash_code(c.replace("-", "")) for c in codes]),
+             u["id"]))
+    return jsonify({"enabled": True, "backup_codes": codes})
+
+
+@app.route("/api/auth/totp-disable", methods=["POST"])
+def api_totp_disable():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    full = _totp_full_user(u["id"])
+    if not full.get("totp_enabled"):
+        return err("two-factor authentication is not on")
+    secret = _totp_decrypt(full.get("totp_secret"))
+    b = request.get_json(force=True, silent=True) or {}
+    if not secret or not totp_check(secret, b.get("code")):
+        return err("a current authenticator code is required to disable 2FA")
+    execute("UPDATE users SET totp_secret=NULL, totp_enabled=0,"
+            " totp_backup_codes=NULL WHERE id=?", (u["id"],))
+    return jsonify({"enabled": False})
+
+
+@app.route("/api/auth/totp-regenerate", methods=["POST"])
+def api_totp_regenerate():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    full = _totp_full_user(u["id"])
+    if not full.get("totp_enabled"):
+        return err("two-factor authentication is not on")
+    secret = _totp_decrypt(full.get("totp_secret"))
+    b = request.get_json(force=True, silent=True) or {}
+    if not secret or not totp_check(secret, b.get("code")):
+        return err("a current authenticator code is required")
+    codes = _backup_codes()
+    execute("UPDATE users SET totp_backup_codes=? WHERE id=?",
+            (json.dumps([_hash_code(c.replace("-", "")) for c in codes]),
+             u["id"]))
+    return jsonify({"backup_codes": codes})
+
+
+@app.route("/api/auth/verify-2fa", methods=["POST"])
+def api_verify_2fa():
+    """Second login step: accepts a TOTP code or an unused recovery code."""
+    uid = session.get("pending_uid")
+    if not uid:
+        return err("no two-factor login in progress", 401)
+    if _totp_throttled(uid):
+        return err("too many failed codes — try again in 10 minutes", 429)
+    full = _totp_full_user(uid)
+    if not full or not full.get("totp_enabled"):
+        return err("two-factor authentication is not on for this account", 400)
+    b = request.get_json(force=True, silent=True) or {}
+    code = (b.get("code") or "").strip()
+    secret = _totp_decrypt(full.get("totp_secret"))
+    ok = bool(secret) and totp_check(secret, code)
+    if not ok:
+        # recovery code: normalized (dashless, uppercase) so typing the
+        # code with or without its dash both work; consumed on use
+        codes = full.get("totp_backup_codes") or []
+        if isinstance(codes, str):
+            try:
+                codes = json.loads(codes)
+            except ValueError:
+                codes = []
+        digest = _hash_code(code.replace(" ", "").replace("-", "").upper())
+        if digest in codes:
+            codes.remove(digest)
+            execute("UPDATE users SET totp_backup_codes=? WHERE id=?",
+                    (json.dumps(codes), uid))
+            ok = True
+    if not ok:
+        _totp_fail(uid)
+        return err("that code did not match", 401)
+    _totp_clear(uid)
+    session.clear()
+    session["uid"] = uid
+    return jsonify({"user": _public_user(q_one(
+        "SELECT id, name, email, role FROM users WHERE id=?", (uid,)))})
+
+
+@app.route("/api/auth/totp-reset", methods=["POST"])
+@require_role("mentor", "admin")
+def api_totp_reset():
+    """Mentor safety valve: clear a user's 2FA (e.g. lost phone)."""
+    b = request.get_json(force=True, silent=True) or {}
+    if not b.get("user_id"):
+        return err("user_id required")
+    if not q_one("SELECT id FROM users WHERE id=?", (b["user_id"],)):
+        return err("user not found", 404)
+    execute("UPDATE users SET totp_secret=NULL, totp_enabled=0,"
+            " totp_backup_codes=NULL WHERE id=?", (b["user_id"],))
+    _totp_clear(b["user_id"])
+    return jsonify({"ok": True})
+
+
+
+# ----------------------------------------------------------------------------
 # Frontend (same origin, no CORS)
 # ----------------------------------------------------------------------------
 @app.route("/")
@@ -292,7 +560,8 @@ def api_users():
     if request.method == "GET":
         return jsonify(q_all(
             "SELECT id, name, email, phone, role, created_at,"
-            " (password_hash IS NOT NULL) AS has_password"
+            " (password_hash IS NOT NULL) AS has_password,"
+            " (totp_enabled IS NOT NULL AND totp_enabled != 0) AS totp_enabled"
             " FROM users ORDER BY name"))
     b = request.get_json(force=True)
     if not b.get("name") or b.get("role") not in (
