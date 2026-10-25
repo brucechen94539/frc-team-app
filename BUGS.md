@@ -31,7 +31,7 @@ _None right now._
   dev server sends `Cache-Control: no-cache, max-age=0` (a 304 then
   only means the file truly hasn't changed). Re-ran the skew
   reproduction with the fix: no errors, login works, Events reached.
-  (commit TBD)
+  (commit a8d0d361)
 
 ### RSVP deadline was UI-only: late RSVPs still accepted (2026-10-25)
 - **Symptom:** after an event's deadline, the RSVP buttons disappeared,
