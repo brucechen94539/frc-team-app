@@ -40,6 +40,9 @@ and `can't make it` do not count as attending.
   typed keys); the QR code simply isn't shown. Install with
   `python3 -m pip install -r requirements.txt` (same interpreter that
   runs the app) and restart to get QR codes back.
+- The QR SVG is normalized for HTML embedding (see BUGS.md 2026-10-25):
+  plain `<rect>` elements plus a viewBox, so it renders when inserted
+  via innerHTML.
 - Secrets are **encrypted at rest** with a key derived from the app secret;
   recovery-code hashes are stored, never the codes themselves.
 - **Lockout safety valve:** 5 failed codes lock 2FA attempts for 10

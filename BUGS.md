@@ -31,6 +31,18 @@ _None right now._
   reports the exact fix (`python3 -m pip install -r requirements.txt`,
   then restart) instead of a bare error. (commit e8703091)
 
+### 2026-10-25 — QR code renders as a blank box
+- **Reported:** Bruce (screenshot) — after installing the package, setup
+  showed the manual key but the QR area was an empty white box.
+- **Root cause:** `qrcode`'s SVG factory emits `<svg:rect>` elements.
+  Inserted into the page via innerHTML, browsers don't recognize the
+  prefixed tags as SVG shapes, so nothing draws.
+- **Fix:** the server normalizes the SVG before sending it — plain
+  `<rect>` elements, no `svg:` prefixes, millimetre coordinates converted
+  to a viewBox so the code scales to its container. Verified with a real
+  Chromium render: the old markup stays blank, the normalized markup
+  draws a crisp QR code.
+
 ### 2026-10-19 — Students could define carpool rides
 - **Reported:** Bruce — a logged-in student saw the full "post a ride" form (driver name, seats, departure point/time, return plan, notes) in Travel & Logistics; students should only see the sign-up options and pick which car/parent to go with.
 - **Root cause:** `POST /api/carpools` had no role check, and the ride form rendered for every role.

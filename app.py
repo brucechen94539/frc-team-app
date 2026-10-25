@@ -302,6 +302,30 @@ except ImportError:  # pragma: no cover
 _TOTP_FAILS = {}  # user_id -> [fail_count, locked_until_epoch]; in-memory only
 
 
+def _qr_svg_for_html(uri):
+    """QR code SVG that actually renders when inserted via innerHTML.
+
+    qrcode's SvgImage emits <svg:rect> elements, which browsers ignore
+    in HTML-parsed content (they are not SVG shapes there), so the code
+    came out as a blank box. Normalize to plain <rect> elements, and
+    convert the millimetre coordinates to a viewBox so the code scales
+    to its container instead of overflowing it.
+    """
+    import re
+    raw = qrcode.make(uri,
+                      image_factory=qrcode.image.svg.SvgImage).to_string()
+    raw = raw.decode()
+    raw = raw.replace("<svg:", "<").replace("</svg:", "</")
+    raw = raw.replace('xmlns:svg="http://www.w3.org/2000/svg" ', "")
+    m = re.search(r'width="([\d.]+)mm" height="([\d.]+)mm"', raw)
+    if m:
+        w, h = m.group(1), m.group(2)
+        raw = raw.replace(f'width="{w}mm" height="{h}mm"',
+                          f'width="100%" viewBox="0 0 {w} {h}"')
+        raw = re.sub(r'="([\d.]+)mm"', r'="\1"', raw)
+    return raw
+
+
 def _totp_fernet():
     if Fernet is None:
         raise RuntimeError("cryptography package is not installed")
@@ -421,9 +445,7 @@ def api_totp_setup():
     # via the manual key, which both authenticator apps accept.
     svg = None
     if qrcode is not None:
-        svg = qrcode.make(totp_uri(secret, u["name"]),
-                          image_factory=qrcode.image.svg.SvgImage).to_string()
-        svg = svg.decode()
+        svg = _qr_svg_for_html(totp_uri(secret, u["name"]))
     return jsonify({"qr_svg": svg, "secret": secret})
 
 
