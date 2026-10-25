@@ -533,9 +533,11 @@ async function renderEvents() {
     b.addEventListener("click", () => rsvpAction(b)));
   v.querySelectorAll("[data-unrsvp]").forEach((b) =>
     b.addEventListener("click", async () => {
-      const r = await DEL(`/api/rsvps/${b.dataset.unrsvp}`);
-      toast(r.promoted ? `Released — ${esc(r.promoted.person_name)} promoted from waitlist.` : "RSVP removed.");
-      renderEvents();
+      try {
+        const r = await DEL(`/api/rsvps/${b.dataset.unrsvp}`);
+        toast(r.promoted ? `Released — ${esc(r.promoted.person_name)} promoted from waitlist.` : "RSVP removed.");
+        renderEvents();
+      } catch (e) { toast("Error: " + e.message); }
     }));
   v.querySelectorAll("[data-delev]").forEach((b) =>
     b.addEventListener("click", async () => {
@@ -563,10 +565,16 @@ async function eventCard(e) {
   const closed = e.deadline && e.deadline < new Date().toISOString().slice(0, 10);
   const opts = personOptions().map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
-  const row = (r) => `<div class="row" style="margin:4px 0">
-      <span class="pill ${r.status === "going" ? "green" : r.status === "waitlisted" ? "amber" : "gray"}">${r.status}</span>
+  const row = (r) => {
+    const pill = r.status === "going" ? "green" : r.status === "waitlisted" ? "amber"
+      : r.status === "maybe" ? "blue" : r.status === "partial" ? "purple" : "gray";
+    const canRemove = MENTOR() || (ME && ME.name
+      && r.person_name.trim().toLowerCase() === ME.name.trim().toLowerCase());
+    return `<div class="row" style="margin:4px 0">
+      <span class="pill ${pill}">${r.status}</span>
       <span>${esc(r.person_name)} <span class="sub">(${r.person_kind})</span></span>
-      <button class="btn small ghost" data-unrsvp="${r.id}">Remove</button></div>`;
+      ${canRemove ? `<button class="btn small ghost" data-unrsvp="${r.id}">Remove</button>` : ""}</div>`;
+  };
   return `<div class="card">
     <div class="row"><b>${esc(e.title)}</b>
       <span class="pill">${esc(e.type)}</span>
@@ -575,11 +583,14 @@ async function eventCard(e) {
       <button class="btn small danger" data-delev="${e.id}">Delete</button></div>
     <div class="sub">${esc(e.date || "")} ${esc(e.time || "")} · ${esc(e.location || "")}
       ${e.capacity ? `· ${hc.going}/${e.capacity} going` : `· ${hc.going} going`}
+      · ${hc.maybe} maybe · ${hc.partial} partial
       · ${hc.waitlisted} waitlisted · ${hc.cant} can't make it</div>
     ${e.notes ? `<div class="sub">${esc(e.notes)}</div>` : ""}
     ${closed ? "" : `<div class="row">
       <select id="rp-${e.id}">${opts}</select>
       <button class="btn small" data-rsvp="${e.id}" data-want="going">RSVP Going</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe">Maybe</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial">Partial (multi-day)</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant">Can't make it</button>
     </div>`}
     <div style="margin-top:6px">${d.rsvps.map(row).join("") || '<span class="sub">No RSVPs yet.</span>'}</div>
@@ -637,7 +648,7 @@ async function renderTracking() {
   <div class="row" style="margin-top:8px"><span class="sub">Session hours:</span>
   <input id="t-hrs" type="number" min="0" step="0.5" value="${ev ? ev.session_hours : 2}" style="width:80px"></div>
   <div id="t-att" style="margin-top:8px">
-  ${att.rsvps.filter((r) => r.status === "going").map((r) => {
+  ${att.rsvps.filter((r) => r.status === "going" || r.status === "partial").map((r) => {
     const c = byPerson[`${r.member_id}:${r.person_kind}`];
     const st = c ? (c.verified ? `<span class="pill green">verified · ${c.hours}h</span>`
                                : `<span class="pill amber">self check-in · unverified · ${c.hours}h</span>`)
@@ -648,7 +659,7 @@ async function renderTracking() {
       ${!c && MENTOR() ? `<button class="btn small" data-ci="mentor" data-m="${r.member_id}" data-k="${r.person_kind}" data-n="${esc(r.person_name)}">Mentor check-in</button>` : ""}
       ${c && !c.verified && MENTOR() ? `<button class="btn small" data-verify="${c.id}">Verify</button>` : ""}
     </div>`;
-  }).join("") || '<span class="sub">No "going" RSVPs for this event yet.</span>'}
+  }).join("") || '<span class="sub">No going or partial RSVPs for this event yet.</span>'}
   </div></div>
   <div class="card"><h3>Hours by student</h3>
   ${hours.map((h) => `<details><summary>${esc(h.first_name)} ${esc(h.last_name)} —
@@ -735,7 +746,7 @@ async function renderTravel() {
   const people = personOptions();
   const popts = people.map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
-  // Travel lists pull dynamically from this event's attendees (RSVP 'going').
+  // Travel lists pull dynamically from this event's attendees (RSVP going/partial).
   const attPeople = (t.attendees || []).map((a) => ({member_id: a.member_id,
     kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
   const optJSON = (p) =>
@@ -1011,7 +1022,7 @@ function hotelHTML(h, students, poptParents, studentNames) {
         <button class="btn small" data-place="${r.id}">Place</button></div></div>`;
   }).join("")}
   <h3>Rooming requests ${h.awaiting ? `<span class="pill amber">${h.awaiting} awaiting placement</span>` : ""}</h3>
-  <p class="sub">Lists show only students who RSVP'd as attending for this event.</p>
+  <p class="sub">Lists show only students attending this event (RSVP going or partial).</p>
   <div class="row"><select id="rq-who"><option value="">Student…</option>${students}</select>
     <select id="rq-mates" multiple size="3" title="Preferred roommates (Ctrl/Cmd-click for several)" style="flex:1;min-width:160px">${studentNames}</select>
     <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">

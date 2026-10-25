@@ -255,3 +255,7 @@ pre.welcome{background:var(--fieldbg);border:1px dashed var(--accent);border-rad
 .bubble:hover{border-color:var(--accent);color:var(--ink)}
 .bubble.active{background:linear-gradient(135deg,var(--accent),var(--accent-d));
   border-color:transparent;color:#fff;box-shadow:0 4px 14px rgba(255,92,26,.35)}
+
+/* RSVP status pills */
+.pill.blue{background:rgba(56,130,246,.16);color:#7db3ff;border:1px solid rgba(56,130,246,.35)}
+.pill.purple{background:rgba(168,85,247,.16);color:#d0a6ff;border:1px solid rgba(168,85,247,.35)}

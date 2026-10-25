@@ -132,6 +132,7 @@ RSVPS = [
     ("EVT-202", "FRC-105", "parent", "cant"),
     ("EVT-204", "FRC-104", "parent", "going"),
     ("EVT-204", "FRC-105", "student", "going"),
+    ("EVT-204", "FRC-106", "student", "partial"),
     ("EVT-205", "FRC-104", "student", "going"),
     ("EVT-205", "FRC-104", "parent", "going"),
     ("EVT-205", "FRC-105", "student", "going"),

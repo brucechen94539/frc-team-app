@@ -505,9 +505,10 @@ def api_event_delete(eid):
     return jsonify({"deleted": eid})
 
 
-def _going_count(eid):
-    r = q_one("SELECT COUNT(*) c FROM rsvps WHERE event_id=? AND status='going'",
-              (eid,))
+def _occupancy_count(eid):
+    """Spots taken: going + partial both occupy a place at the event."""
+    r = q_one("SELECT COUNT(*) c FROM rsvps WHERE event_id=?"
+              " AND status IN ('going','partial')", (eid,))
     return r["c"]
 
 
@@ -524,6 +525,8 @@ def api_rsvps(eid):
             "rsvps": rsvps,
             "headcounts": {
                 "going": sum(1 for r in rsvps if r["status"] == "going"),
+                "maybe": sum(1 for r in rsvps if r["status"] == "maybe"),
+                "partial": sum(1 for r in rsvps if r["status"] == "partial"),
                 "waitlisted": sum(1 for r in rsvps if r["status"] == "waitlisted"),
                 "cant": sum(1 for r in rsvps if r["status"] == "cant"),
             },
@@ -533,7 +536,8 @@ def api_rsvps(eid):
         return err("person_kind (student|parent) and person_name required")
     want = b.get("status", "going")
     status = want
-    if want == "going" and ev["capacity"] and _going_count(eid) >= ev["capacity"]:
+    if want in ("going", "partial") and ev["capacity"] \
+            and _occupancy_count(eid) >= ev["capacity"]:
         status = "waitlisted"
     with _lock:
         db = get_db()
@@ -559,11 +563,19 @@ def api_rsvp_delete(rid):
     r = q_one("SELECT * FROM rsvps WHERE id=?", (rid,))
     if not r:
         return err("rsvp not found", 404)
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] not in ("mentor", "admin"):
+        mine = ((r["person_name"] or "").strip().lower()
+                == (u["name"] or "").strip().lower())
+        if not mine:
+            return err("you can only remove your own RSVP", 403)
     with _lock:
         db = get_db()
         db.execute("DELETE FROM rsvps WHERE id=?", (rid,))
         promoted = None
-        if r["status"] == "going":
+        if r["status"] in ("going", "partial"):
             nxt = db.execute(
                 "SELECT * FROM rsvps WHERE event_id=? AND status='waitlisted'"
                 " ORDER BY created_at, id LIMIT 1", (r["event_id"],)).fetchone()
@@ -717,17 +729,18 @@ def api_travel(eid):
         hotel["awaiting"] = sum(1 for x in reqs if x["status"] == "pending")
     attendees = q_all(
         "SELECT member_id, person_kind, person_name FROM rsvps"
-        " WHERE event_id=? AND status='going' ORDER BY person_name", (eid,))
+        " WHERE event_id=? AND status IN ('going','partial')"
+        " ORDER BY person_name", (eid,))
     return jsonify({"event": ev, "carpools": carpools, "tools": tools,
                     "hotel": hotel, "attendees": attendees})
 
 
 def is_attending(eid, member_id, kind):
-    """Attending = an RSVP with status 'going' for this event/person."""
+    """Attending = an RSVP with status 'going' or 'partial' for this event."""
     if not member_id:
         return False
     return q_one("SELECT id FROM rsvps WHERE event_id=? AND member_id=?"
-                 " AND person_kind=? AND status='going'",
+                 " AND person_kind=? AND status IN ('going','partial')",
                  (eid, member_id, kind)) is not None
 
 

@@ -5,8 +5,9 @@ Update this file whenever a feature rule changes. (Defects are tracked
 separately in [BUGS.md](BUGS.md); setup/run instructions are in the README.)
 
 **Key definition — "attending":** a person counts as attending an event
-when their RSVP for that event has status **going**. `maybe`, `waitlisted`,
-and `declined` do not count as attending.
+when their RSVP for that event has status **going** or **partial**
+(partial = attending part of a multi-day event). `maybe`, `waitlisted`,
+and `can't make it` do not count as attending.
 
 ## Accounts & roles
 
@@ -35,10 +36,16 @@ and `declined` do not count as attending.
 ## Events & RSVPs
 
 - Mentors/admins create events (title, type, date/time, location, capacity).
-- **Students and parents** can RSVP; statuses: going / maybe / declined /
-  waitlisted.
-- When an event is full, new "going" RSVPs join the waitlist and are
-  auto-promoted as spots open.
+- **Students and parents** can RSVP; statuses: going / maybe / partial /
+  can't make it / waitlisted. **Partial** is for multi-day events such as
+  tournaments, when someone attends only part of the event.
+- When an event is full, new "going" or "partial" RSVPs join the waitlist
+  and are auto-promoted as spots open; going + partial both count toward
+  capacity.
+- **RSVP removal:** students and parents can only remove **their own**
+  RSVP (matched by account name); only mentors/admins can remove anyone
+  else's. Deleting a going/partial RSVP promotes the first waitlisted
+  person.
 - Event pickers in the UI are **bubbles** (chips), not dropdowns: the picked
   event is highlighted and the sections below update to that event.
 
