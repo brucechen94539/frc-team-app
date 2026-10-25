@@ -9,6 +9,7 @@ Env:  DB=<path>   SQLite file (default: data.db next to this file)
       PORT=<port>  default 5000
 """
 import base64
+import datetime
 import functools
 import hashlib
 import hmac
@@ -132,6 +133,84 @@ def _migrate(db):
                        " NOT NULL DEFAULT 0")
         if "totp_backup_codes" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN totp_backup_codes TEXT")
+        if "first_name" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN first_name TEXT")
+        if "last_name" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN last_name TEXT")
+        if "whatsapp" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN whatsapp TEXT")
+        db.execute("CREATE TABLE IF NOT EXISTS meta ("
+                   "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        db.execute("""CREATE TABLE IF NOT EXISTS user_members (
+            user_id INTEGER NOT NULL, member_id INTEGER NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('self','parent')),
+            PRIMARY KEY (user_id, member_id, kind))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS totp_recovery_codes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL, code_hash TEXT NOT NULL,
+            used INTEGER NOT NULL DEFAULT 0, used_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (user_id, code_hash))""")
+        # Backfill: split display names into first/last, filling only
+        # columns still NULL so a later manual edit is never overwritten.
+        for r in db.execute(
+                "SELECT id, name, first_name, last_name FROM users"
+                " WHERE first_name IS NULL OR last_name IS NULL"):
+            parts = (r["name"] or "").split(None, 1)
+            if r["first_name"] is None:
+                db.execute("UPDATE users SET first_name=? WHERE id=?",
+                           (parts[0] if parts else "", r["id"]))
+            if r["last_name"] is None:
+                db.execute("UPDATE users SET last_name=? WHERE id=?",
+                           (parts[1] if len(parts) > 1 else "", r["id"]))
+        # Move legacy JSON recovery-code hashes into the dedicated table
+        # (once: the column is nulled after the move, so this never re-runs).
+        for r in db.execute(
+                "SELECT id, totp_backup_codes FROM users"
+                " WHERE totp_backup_codes IS NOT NULL"
+                " AND totp_backup_codes != ''"):
+            try:
+                hashes = json.loads(r["totp_backup_codes"])
+            except (ValueError, TypeError):
+                hashes = []
+            if isinstance(hashes, list):
+                for h in hashes:
+                    db.execute("INSERT OR IGNORE INTO totp_recovery_codes"
+                               " (user_id, code_hash) VALUES (?,?)",
+                               (r["id"], h))
+            db.execute("UPDATE users SET totp_backup_codes=NULL WHERE id=?",
+                       (r["id"],))
+        # One-time backfill, tracked by a marker row — NOT by the link
+        # table's existence, because init_db creates the table from
+        # schema.sql before _migrate runs, so existence can never signal
+        # "first boot". The marker is what lets a mentor's manual unlink
+        # survive later restarts. Later accounts link at creation, and
+        # members link at approval.
+        backfilled = db.execute(
+            "SELECT value FROM meta WHERE key='iam_links_backfilled'"
+            ).fetchone() is not None
+        if not backfilled:
+            for u in db.execute("SELECT id, name FROM users"):
+                for mid, kind in _link_candidates(
+                        u["name"], db.execute(
+                            "SELECT id, first_name, last_name, parent_name"
+                            " FROM members")):
+                    db.execute("INSERT OR IGNORE INTO user_members"
+                               " (user_id, member_id, kind) VALUES (?,?,?)",
+                               (u["id"], mid, kind))
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)",
+                       ("iam_links_backfilled", "1"))
+        # Fill an empty user whatsapp from the linked member's parent
+        # WhatsApp, but only where the family opted in to WhatsApp updates.
+        for r in db.execute(
+                "SELECT um.user_id, m.parent_whatsapp FROM user_members um"
+                " JOIN members m ON m.id = um.member_id"
+                " WHERE um.kind='parent' AND m.whatsapp_opt_in=1"
+                " AND m.parent_whatsapp IS NOT NULL"
+                " AND m.parent_whatsapp != ''"):
+            db.execute("UPDATE users SET whatsapp=? WHERE id=?"
+                       " AND (whatsapp IS NULL OR whatsapp='')",
+                       (r["parent_whatsapp"], r["user_id"]))
         if "assignees" not in task_cols:
             db.execute("ALTER TABLE tasks ADD COLUMN assignees TEXT")
         if "archived" not in task_cols:
@@ -252,8 +331,11 @@ def _public_user(u):
 @app.route("/api/auth/me")
 def api_auth_me():
     u = current_user()
-    return jsonify({"user": _public_user(u) if u else None,
-                    "setup_required": setup_required()})
+    if not u:
+        return jsonify({"user": None, "setup_required": setup_required()})
+    user = _public_user(u)
+    user["links"] = _user_links_map([u["id"]]).get(u["id"], [])
+    return jsonify({"user": user, "setup_required": setup_required()})
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -290,14 +372,20 @@ def api_auth_setup():
     if not name or "@" not in email or len(pw) < 8:
         return err("name, a valid email, and a password of 8+ characters required")
     existing = q_one("SELECT * FROM users WHERE lower(email)=?", (email,))
+    parts = name.split(None, 1)
+    first, last = parts[0], parts[1] if len(parts) > 1 else ""
     if existing:
-        execute("UPDATE users SET name=?, password_hash=? WHERE id=?",
-                (name, generate_password_hash(pw), existing["id"]))
+        execute("UPDATE users SET name=?, first_name=?, last_name=?,"
+                " password_hash=? WHERE id=?",
+                (name, first, last, generate_password_hash(pw),
+                 existing["id"]))
         uid = existing["id"]
     else:
-        uid = execute("INSERT INTO users (name, email, role, password_hash)"
-                      " VALUES (?,?,?,?)",
-                      (name, email, "admin", generate_password_hash(pw)))
+        uid = execute("INSERT INTO users (name, first_name, last_name,"
+                      " email, role, password_hash) VALUES (?,?,?,?,?,?)",
+                      (name, first, last, email, "admin",
+                       generate_password_hash(pw)))
+    _auto_link_user(uid)
     session.clear()
     session["uid"] = uid
     return jsonify({"user": _public_user(q_one(
@@ -424,6 +512,40 @@ def _hash_code(code):
     return hashlib.sha256(code.encode()).hexdigest()
 
 
+def _store_recovery_codes(uid, codes):
+    """Replace a user's recovery codes with a fresh set, stored one row
+    per code (sha256 hashes only — the plaintext codes are shown once
+    and never stored)."""
+    with _lock:
+        db = get_db()
+        db.execute("DELETE FROM totp_recovery_codes WHERE user_id=?", (uid,))
+        for c in codes:
+            db.execute("INSERT INTO totp_recovery_codes (user_id, code_hash)"
+                       " VALUES (?,?)",
+                       (uid, _hash_code(c.replace("-", ""))))
+        db.commit()
+
+
+def _consume_recovery_code(uid, digest):
+    """Atomically mark one unused recovery code used (used_at kept as an
+    audit trail). True only if an unused matching code existed — so a
+    code can never be spent twice, even by two simultaneous logins."""
+    with _lock:
+        db = get_db()
+        cur = db.execute(
+            "UPDATE totp_recovery_codes SET used=1, used_at=datetime('now')"
+            " WHERE user_id=? AND code_hash=? AND used=0", (uid, digest))
+        db.commit()
+        return cur.rowcount > 0
+
+
+def _clear_recovery_codes(uid):
+    with _lock:
+        db = get_db()
+        db.execute("DELETE FROM totp_recovery_codes WHERE user_id=?", (uid,))
+        db.commit()
+
+
 def _totp_throttled(uid):
     rec = _TOTP_FAILS.get(uid)
     return bool(rec and rec[1] > time.time())
@@ -451,14 +573,10 @@ def api_totp_status():
     if not u:
         return err("login required", 401)
     full = _totp_full_user(u["id"])
-    codes = full.get("totp_backup_codes") or []
-    if isinstance(codes, str):
-        try:
-            codes = json.loads(codes)
-        except ValueError:
-            codes = []
+    remaining = q_one("SELECT COUNT(*) AS n FROM totp_recovery_codes"
+                      " WHERE user_id=? AND used=0", (u["id"],))["n"]
     return jsonify({"enabled": bool(full.get("totp_enabled")),
-                    "backup_codes_remaining": len(codes)})
+                    "backup_codes_remaining": remaining})
 
 
 @app.route("/api/auth/totp-setup", methods=["POST"])
@@ -477,8 +595,9 @@ def api_totp_setup():
         return err("two-factor setup needs the cryptography package — run:"
                    " python3 -m pip install -r requirements.txt, then restart"
                    " the server", 503)
-    execute("UPDATE users SET totp_secret=?, totp_enabled=0,"
-            " totp_backup_codes=NULL WHERE id=?", (token, u["id"]))
+    execute("UPDATE users SET totp_secret=?, totp_enabled=0 WHERE id=?",
+            (token, u["id"]))
+    _clear_recovery_codes(u["id"])
     # QR codes need the qrcode package; without it enrollment still works
     # via the manual key, which both authenticator apps accept.
     svg = None
@@ -501,9 +620,8 @@ def api_totp_verify():
     if not secret or not totp_check(secret, b.get("code")):
         return err("that code did not match — check the app and try again")
     codes = _backup_codes()
-    execute("UPDATE users SET totp_enabled=1, totp_backup_codes=? WHERE id=?",
-            (json.dumps([_hash_code(c.replace("-", "")) for c in codes]),
-             u["id"]))
+    execute("UPDATE users SET totp_enabled=1 WHERE id=?", (u["id"],))
+    _store_recovery_codes(u["id"], codes)
     return jsonify({"enabled": True, "backup_codes": codes})
 
 
@@ -519,8 +637,9 @@ def api_totp_disable():
     b = request.get_json(force=True, silent=True) or {}
     if not secret or not totp_check(secret, b.get("code")):
         return err("a current authenticator code is required to disable 2FA")
-    execute("UPDATE users SET totp_secret=NULL, totp_enabled=0,"
-            " totp_backup_codes=NULL WHERE id=?", (u["id"],))
+    execute("UPDATE users SET totp_secret=NULL, totp_enabled=0 WHERE id=?",
+            (u["id"],))
+    _clear_recovery_codes(u["id"])
     return jsonify({"enabled": False})
 
 
@@ -537,9 +656,7 @@ def api_totp_regenerate():
     if not secret or not totp_check(secret, b.get("code")):
         return err("a current authenticator code is required")
     codes = _backup_codes()
-    execute("UPDATE users SET totp_backup_codes=? WHERE id=?",
-            (json.dumps([_hash_code(c.replace("-", "")) for c in codes]),
-             u["id"]))
+    _store_recovery_codes(u["id"], codes)
     return jsonify({"backup_codes": codes})
 
 
@@ -560,19 +677,10 @@ def api_verify_2fa():
     ok = bool(secret) and totp_check(secret, code)
     if not ok:
         # recovery code: normalized (dashless, uppercase) so typing the
-        # code with or without its dash both work; consumed on use
-        codes = full.get("totp_backup_codes") or []
-        if isinstance(codes, str):
-            try:
-                codes = json.loads(codes)
-            except ValueError:
-                codes = []
+        # code with or without its dash both work; consumed on use, and
+        # the consume is atomic — a spent code can never be reused.
         digest = _hash_code(code.replace(" ", "").replace("-", "").upper())
-        if digest in codes:
-            codes.remove(digest)
-            execute("UPDATE users SET totp_backup_codes=? WHERE id=?",
-                    (json.dumps(codes), uid))
-            ok = True
+        ok = _consume_recovery_code(uid, digest)
     if not ok:
         _totp_fail(uid)
         return err("that code did not match", 401)
@@ -592,8 +700,9 @@ def api_totp_reset():
         return err("user_id required")
     if not q_one("SELECT id FROM users WHERE id=?", (b["user_id"],)):
         return err("user not found", 404)
-    execute("UPDATE users SET totp_secret=NULL, totp_enabled=0,"
-            " totp_backup_codes=NULL WHERE id=?", (b["user_id"],))
+    execute("UPDATE users SET totp_secret=NULL, totp_enabled=0 WHERE id=?",
+            (b["user_id"],))
+    _clear_recovery_codes(b["user_id"])
     _totp_clear(b["user_id"])
     return jsonify({"ok": True})
 
@@ -617,19 +726,50 @@ def api_subteams():
                     for n, b in SUBTEAM_BLURBS.items()])
 
 
+def _user_links_map(user_ids=None):
+    """{user_id: [{member_id, kind, member_name}]} for the link table."""
+    sql = ("SELECT um.user_id, um.member_id, um.kind,"
+           " m.first_name AS m_first, m.last_name AS m_last"
+           " FROM user_members um JOIN members m ON m.id = um.member_id")
+    args = ()
+    if user_ids is not None:
+        sql += " WHERE um.user_id IN (%s)" % ",".join("?" * len(user_ids))
+        args = tuple(user_ids)
+    out = {}
+    for l in q_all(sql, args):
+        out.setdefault(l["user_id"], []).append({
+            "member_id": l["member_id"], "kind": l["kind"],
+            "member_name": ((l["m_first"] or "") + " "
+                             + (l["m_last"] or "")).strip()})
+    return out
+
+
 @app.route("/api/users", methods=["GET", "POST"])
 def api_users():
     denied = _mentor_denied()
     if denied:
         return denied
     if request.method == "GET":
-        return jsonify(q_all(
-            "SELECT id, name, email, phone, role, created_at,"
+        users = q_all(
+            "SELECT id, name, first_name, last_name, email, phone, whatsapp,"
+            " role, created_at,"
             " (password_hash IS NOT NULL) AS has_password,"
             " (totp_enabled IS NOT NULL AND totp_enabled != 0) AS totp_enabled"
-            " FROM users ORDER BY name"))
+            " FROM users ORDER BY name")
+        links = _user_links_map()
+        for u in users:
+            u["links"] = links.get(u["id"], [])
+        return jsonify(users)
     b = request.get_json(force=True)
-    if not b.get("name") or b.get("role") not in (
+    first = (b.get("first_name") or "").strip()
+    last = (b.get("last_name") or "").strip()
+    name = (b.get("name") or "").strip()
+    if first or last:
+        name = (first + " " + last).strip()
+    elif name:
+        parts = name.split(None, 1)
+        first, last = parts[0], parts[1] if len(parts) > 1 else ""
+    if not name or b.get("role") not in (
             "student", "parent", "mentor", "admin"):
         return err("name and a valid role (student|parent|mentor|admin) required")
     pw = b.get("password") or ""
@@ -637,14 +777,43 @@ def api_users():
         return err("password must be 8+ characters")
     try:
         uid = execute(
-            "INSERT INTO users (name, email, phone, role, password_hash)"
-            " VALUES (?,?,?,?,?)",
-            (b["name"], b.get("email"), b.get("phone"), b["role"],
+            "INSERT INTO users (name, first_name, last_name, email, phone,"
+            " whatsapp, role, password_hash) VALUES (?,?,?,?,?,?,?,?)",
+            (name, first, last, b.get("email"), b.get("phone"),
+             b.get("whatsapp"), b["role"],
              generate_password_hash(pw) if pw else None))
     except sqlite3.IntegrityError:
         return err("a user with that email already exists")
-    return jsonify(q_one("SELECT id, name, email, phone, role, created_at"
-                         " FROM users WHERE id=?", (uid,))), 201
+    _auto_link_user(uid)
+    user = q_one("SELECT id, name, first_name, last_name, email, phone,"
+                 " whatsapp, role, created_at FROM users WHERE id=?", (uid,))
+    user["links"] = _user_links_map([uid]).get(uid, [])
+    return jsonify(user), 201
+
+
+@app.route("/api/users/<int:uid>/links", methods=["POST", "DELETE"])
+def api_user_links(uid):
+    """Mentor-managed identity links: attach or detach an account from a
+    roster member, as 'self' or 'parent'. This is the fix for any link
+    the name backfill got wrong."""
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    if not q_one("SELECT id FROM users WHERE id=?", (uid,)):
+        return err("user not found", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    if not b.get("member_id") or b.get("kind") not in ("self", "parent"):
+        return err("member_id and kind (self|parent) required")
+    if not q_one("SELECT id FROM members WHERE id=?", (b["member_id"],)):
+        return err("member not found", 404)
+    if request.method == "POST":
+        execute("INSERT OR IGNORE INTO user_members"
+                " (user_id, member_id, kind) VALUES (?,?,?)",
+                (uid, b["member_id"], b["kind"]))
+    else:
+        execute("DELETE FROM user_members WHERE user_id=? AND member_id=?"
+                " AND kind=?", (uid, b["member_id"], b["kind"]))
+    return jsonify({"links": _user_links_map([uid]).get(uid, [])})
 
 
 @app.route("/api/users/<int:uid>/password", methods=["POST"])
@@ -718,6 +887,7 @@ def api_member(mid):
         return jsonify(m)
     if request.method == "DELETE":
         execute("DELETE FROM members WHERE id=?", (mid,))
+        execute("DELETE FROM user_members WHERE member_id=?", (mid,))
         return jsonify({"deleted": mid})
     b = request.get_json(force=True)
     sets, args = [], []
@@ -732,6 +902,10 @@ def api_member(mid):
     if sets:
         args.append(mid)
         execute(f"UPDATE members SET {', '.join(sets)} WHERE id=?", args)
+    if b.get("status") == "approved":
+        # Approval brings the member onto the team: link any existing
+        # accounts that match this member (or its parent) by name.
+        _auto_link_member(mid)
     return jsonify(q_one("SELECT * FROM members WHERE id=?", (mid,)))
 
 
@@ -740,6 +914,8 @@ def api_member(mid):
 def api_members_clear_samples():
     with _lock:
         db = get_db()
+        db.execute("DELETE FROM user_members WHERE member_id IN"
+                   " (SELECT id FROM members WHERE sample=1)")
         n = db.execute("DELETE FROM members WHERE sample=1").rowcount
         db.commit()
     return jsonify({"cleared": n})
@@ -879,6 +1055,14 @@ def api_rsvps(eid):
             return err("you can only RSVP for yourself"
                        " — mentors can RSVP for others", 403)
     want = b.get("status", "going")
+    # Deadline is enforced on the server, not just by hiding the buttons:
+    # the UI rule (deadline < today, UTC) applies here too, and only
+    # mentors/admins may RSVP past it (the override).
+    if (ev["deadline"]
+            and ev["deadline"] < datetime.datetime.utcnow().date().isoformat()
+            and u["role"] not in ("mentor", "admin")):
+        return err("RSVP deadline has passed — ask a mentor to RSVP for you",
+                   403)
     status = want
     if want in ("going", "partial") and ev["capacity"] \
             and _occupancy_count(eid) >= ev["capacity"]:
@@ -1140,24 +1324,65 @@ def _norm_name(s):
     return "".join((s or "").strip().lower().split())
 
 
+def _link_candidates(user_name, members):
+    """[(member_id, kind)] a display name corresponds to: the member with
+    that full name (kind 'self') and any member whose parent_name matches
+    (kind 'parent'). Name matching is only used to CREATE links — every
+    permission check below reads the link table, never names."""
+    n = _norm_name(user_name)
+    links = []
+    for m in members:
+        if n and n == _norm_name((m["first_name"] or "") + " "
+                                 + (m["last_name"] or "")):
+            links.append((m["id"], "self"))
+        if m["parent_name"] and n == _norm_name(m["parent_name"]):
+            links.append((m["id"], "parent"))
+    return links
+
+
+def _auto_link_user(uid):
+    """Link a (new) account to roster records by name. Idempotent."""
+    u = q_one("SELECT id, name FROM users WHERE id=?", (uid,))
+    if not u:
+        return
+    for mid, kind in _link_candidates(
+            u["name"], q_all(
+                "SELECT id, first_name, last_name, parent_name FROM members")):
+        execute("INSERT OR IGNORE INTO user_members"
+                " (user_id, member_id, kind) VALUES (?,?,?)",
+                (uid, mid, kind))
+
+
+def _auto_link_member(mid):
+    """Link all existing accounts to a (newly approved) member by name."""
+    m = q_one("SELECT id, first_name, last_name, parent_name FROM members"
+              " WHERE id=?", (mid,))
+    if not m:
+        return
+    for u in q_all("SELECT id, name FROM users"):
+        for m2, kind in _link_candidates(u["name"], [m]):
+            execute("INSERT OR IGNORE INTO user_members"
+                    " (user_id, member_id, kind) VALUES (?,?,?)",
+                    (u["id"], mid, kind))
+
+
 def _self_rsvp_scope(u):
     """What the signed-in account may RSVP as: (student member id or None,
-    member ids the account is a parent of). Names match loosely, so an
-    account named 'zanderchen' matches the member 'Zander Chen'."""
+    member ids the account is a parent of). Read from the user_members
+    link table — never from name matching, so renames and duplicate names
+    cannot move or merge someone's permissions."""
     if not u:
         return None, set()
-    student_id = None
-    parent_ids = set()
-    for m in q_all("SELECT id, first_name, last_name, parent_name FROM members"):
-        if _norm_name(m["first_name"] + " " + m["last_name"]) == _norm_name(u["name"]):
-            student_id = m["id"]
-        if m["parent_name"] and _norm_name(m["parent_name"]) == _norm_name(u["name"]):
-            parent_ids.add(m["id"])
+    rows = q_all("SELECT member_id, kind FROM user_members WHERE user_id=?",
+                 (u["id"],))
+    student_id = next((r["member_id"] for r in rows if r["kind"] == "self"),
+                      None)
+    parent_ids = {r["member_id"] for r in rows if r["kind"] == "parent"}
     return student_id, parent_ids
 
 
 def _own_member_id(u):
-    """The member record for the signed-in account, matched by name."""
+    """The member record for the signed-in account, via its 'self' link."""
     return _self_rsvp_scope(u)[0] if u else None
 
 

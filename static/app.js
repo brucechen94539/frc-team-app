@@ -7,6 +7,32 @@ const esc = (s) => String(s == null ? "" : s)
   .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const normName = (s) => String(s == null ? "" : s).toLowerCase().replace(/\s+/g, "");
 
+// Tap-to-toggle chip groups: the phone-friendly replacement for
+// <select multiple>. Ctrl/Cmd-click doesn't exist on touch screens, and
+// parents mostly use phones — so multi-picks are buttons that toggle
+// their .active state, in the same bubble style as the event selectors.
+function chipButton(value, label) {
+  return `<button type="button" class="bubble" data-val="${esc(value)}" aria-pressed="false">${esc(label)}</button>`;
+}
+function bindChipButtons(container) {
+  container.querySelectorAll(".bubble").forEach((b) => {
+    if (b._chipBound) return;
+    b._chipBound = true;
+    b.addEventListener("click", () => {
+      b.classList.toggle("active");
+      b.setAttribute("aria-pressed", b.classList.contains("active"));
+    });
+  });
+}
+function bindChips(view) {
+  view.querySelectorAll(".chipgroup").forEach(bindChipButtons);
+}
+function chipValues(id) {
+  const el = $(id);
+  if (!el) return [];
+  return [...el.querySelectorAll(".bubble.active")].map((b) => b.dataset.val);
+}
+
 async function api(method, url, body) {
   const r = await fetch(url, {
     method,
@@ -446,10 +472,15 @@ async function renderQueue() {
     <p class="sub">Logins for mentors, parents and students \u2014 separate from sign-up applications. Only mentors/admins see this.</p>
     <div id="ac-list"><span class="sub">Loading\u2026</span></div>
     <div class="grid3" style="margin-top:12px">
-      <div class="field"><label>Name</label><input id="ac-name"></div>
+      <div class="field"><label>First name</label><input id="ac-first"></div>
+      <div class="field"><label>Last name</label><input id="ac-last"></div>
       <div class="field"><label>Email</label><input id="ac-email" type="email"></div>
+    </div>
+    <div class="grid3">
       <div class="field"><label>Role</label><select id="ac-role">
         <option>student</option><option>parent</option><option>mentor</option><option>admin</option></select></div>
+      <div class="field"><label>Phone</label><input id="ac-phone"></div>
+      <div class="field"><label>WhatsApp</label><input id="ac-whatsapp"></div>
     </div>
     <div class="grid2">
       <div class="field"><label>Password <span class="hint">(8+ chars)</span></label><input id="ac-pass" type="password"></div>
@@ -478,18 +509,46 @@ async function renderAccounts() {
   const el = $("ac-list");
   if (!el) return;
   let users = [];
+  let people = [];
   try { users = await GET("/api/users"); }
   catch (e) { el.innerHTML = '<span class="sub">Could not load accounts.</span>'; return; }
-  el.innerHTML = users.map((u) =>
-    `<span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.name)} \u00b7 ${esc(u.role)}${u.has_password ? "" : " \u00b7 no login"}${u.totp_enabled ? " \u00b7 \u{1F512} 2FA" : ""}</span>`).join(" ")
-    || '<span class="sub">No accounts yet.</span>';
+  try { people = await GET("/api/people"); } catch (e) { people = []; }
+  const peopleOpts = people.map((p) =>
+    `<option value="${p.id}">${esc(p.first_name)} ${esc(p.last_name)}</option>`).join("");
+  el.innerHTML = users.map((u) => {
+    const links = (u.links || []).map((l) =>
+      `<span class="pill gray">${esc(l.member_name)} · ${l.kind} <button class="btn small ghost" data-unlink="${u.id}" data-member="${l.member_id}" data-kind="${l.kind}" style="margin-left:6px">Unlink</button></span>`).join(" ");
+    return `<div class="row" style="margin:4px 0;flex-wrap:wrap">
+      <span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.name)} · ${esc(u.role)}${u.has_password ? "" : " · no login"}${u.totp_enabled ? " · 🔒 2FA" : ""}${u.phone ? ` · ${esc(u.phone)}` : ""}${u.whatsapp ? ` · WhatsApp ${esc(u.whatsapp)}` : ""}</span>
+      ${links || '<span class="sub">No roster links.</span>'}
+      <select class="link-member" data-user="${u.id}"><option value="">Link a roster member…</option>${peopleOpts}</select>
+      <select class="link-kind" data-user="${u.id}"><option value="self">as self</option><option value="parent">as parent</option></select>
+      <button class="btn small ghost" data-link="${u.id}">Link</button>
+    </div>`;
+  }).join("") || '<span class="sub">No accounts yet.</span>';
+  el.querySelectorAll("[data-link]").forEach((b) => b.addEventListener("click", async () => {
+    const uid = b.dataset.link;
+    const mid = el.querySelector(`.link-member[data-user="${uid}"]`).value;
+    const kind = el.querySelector(`.link-kind[data-user="${uid}"]`).value;
+    if (!mid) return toast("Pick a roster member first.");
+    try { await POST(`/api/users/${uid}/links`, {member_id: +mid, kind}); toast("Linked."); renderAccounts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  el.querySelectorAll("[data-unlink]").forEach((b) => b.addEventListener("click", async () => {
+    try { await api("DELETE", `/api/users/${b.dataset.unlink}/links`, {member_id: +b.dataset.member, kind: b.dataset.kind}); toast("Unlinked."); renderAccounts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
   $("ac-add").onclick = async () => {
     try {
-      await POST("/api/users", {name: $("ac-name").value.trim(),
+      await POST("/api/users", {first_name: $("ac-first").value.trim(),
+        last_name: $("ac-last").value.trim(),
         email: $("ac-email").value.trim(), role: $("ac-role").value,
+        phone: $("ac-phone").value.trim(),
+        whatsapp: $("ac-whatsapp").value.trim(),
         password: $("ac-pass").value});
       toast("Account created.");
-      $("ac-name").value = $("ac-email").value = $("ac-pass").value = "";
+      $("ac-first").value = $("ac-last").value = $("ac-email").value
+        = $("ac-phone").value = $("ac-whatsapp").value = $("ac-pass").value = "";
       renderAccounts();
     } catch (e) { toast("Error: " + e.message); }
   };
@@ -637,6 +696,15 @@ function personOptions() {
    members they are a parent of. Mentors bypass this (override). */
 function selfScope() {
   if (!ME) return {student: null, parents: []};
+  // Identity links from /api/auth/me are authoritative. Name matching
+  // is only a fallback for accounts with no links yet (a name the
+  // backfill couldn't match — a mentor fixes it in Team accounts).
+  if (ME.links && ME.links.length) {
+    const self = ME.links.find((l) => l.kind === "self");
+    return {student: self ? self.member_id : null,
+      parents: ME.links.filter((l) => l.kind === "parent")
+        .map((l) => l.member_id)};
+  }
   const me = normName(ME.name);
   const student = rosterCache.find((m) =>
     normName(m.first_name + " " + m.last_name) === me);
@@ -647,6 +715,19 @@ function selfScope() {
 function selfRSVPOptions() {
   const {student, parents} = selfScope();
   const opts = [];
+  if (ME.links && ME.links.length) {
+    const self = ME.links.find((l) => l.kind === "self");
+    if (self) opts.push({member_id: self.member_id, kind: "student",
+      name: `${self.member_name} (student)`});
+    const plinks = ME.links.filter((l) => l.kind === "parent");
+    plinks.forEach((l) => {
+      const first = (l.member_name || "").split(" ")[0];
+      opts.push({member_id: l.member_id, kind: "parent",
+        name: `${ME.name} (parent)`,
+        label: plinks.length > 1 ? `${ME.name} (parent of ${first})` : undefined});
+    });
+    return opts;
+  }
   if (student) {
     const m = rosterCache.find((x) => x.id === student);
     if (m) opts.push({member_id: student, kind: "student",
@@ -771,14 +852,16 @@ async function eventCard(e) {
   const pickerOpts = MENTOR() ? personOptions() : selfRSVPOptions();
   const opts = pickerOpts.map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.label || p.name)}</option>`).join("");
-  const pickerRow = closed ? "" : pickerOpts.length
+  // Closed events hide the picker — except for mentors, whose override
+  // is how a late RSVP gets filed (the server enforces the same rule).
+  const pickerRow = (closed && !MENTOR()) ? "" : pickerOpts.length
     ? `<div class="row">
       <select id="rp-${e.id}">${opts}</select>
       <button class="btn small" data-rsvp="${e.id}" data-want="going">RSVP Going</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe">Maybe</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial">Partial (multi-day)</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant">Can't make it</button>
-    </div>`
+    </div>${closed ? `<p class="sub">Deadline passed — mentor override: you can still RSVP for others.</p>` : ""}`
     : `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
   const scope = selfScope();
   const row = (r) => {
@@ -971,8 +1054,8 @@ async function renderTasks() {
     <input id="tk-title" placeholder="Task title *" style="flex:2;min-width:180px">
     <select id="tk-sub"><option value="">Subteam…</option>
       ${SUBTEAMS.map((s) => `<option>${esc(s.name)}</option>`).join("")}</select>
-    <select id="tk-who" multiple size="3" title="Appoint students (Ctrl/Cmd-click for several)" style="min-width:160px">
-      ${students.map((p) => `<option value="${esc(p.name.replace(/ \((student|parent)\)$/, ""))}">${esc(p.name)}</option>`).join("")}</select>
+    <div class="bubbles chipgroup" id="tk-who" title="Tap students to appoint them" style="min-width:160px;max-height:120px;overflow-y:auto">
+      ${students.map((p) => chipButton(p.name.replace(/ \((student|parent)\)$/, ""), p.name)).join("")}</div>
     <input id="tk-due" type="date" style="max-width:150px">
     <button class="btn small" id="tk-add">Add task</button>
   </div></div>
@@ -1000,11 +1083,12 @@ async function renderTasks() {
     <div class="bar"><div style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></div></div></div>`).join("") || '<span class="sub">No open tasks yet.</span>'}
   </div>`;
   if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  bindChips(v);
   const _tk = $("tk-add"); if (_tk) _tk.addEventListener("click", async () => {
     const t = $("tk-title").value.trim();
     if (!t) return toast("Task title is required.");
     await POST("/api/tasks", {title: t, subteam: $("tk-sub").value,
-      assignees: [...$("tk-who").selectedOptions].map((o) => o.value),
+      assignees: chipValues("tk-who"),
       due_date: $("tk-due").value});
     toast("Task added."); renderTasks();
   });
@@ -1071,7 +1155,7 @@ async function renderTravel() {
   const students = attStudents.map((a) =>
     `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
   const studentNames = attStudents.map((a) =>
-    `<option value="${esc(a.person_name)}">${esc(a.person_name)}</option>`).join("");
+    chipButton(a.person_name, a.person_name)).join("");
   v.innerHTML = `
   <div class="card"><h2>Travel &amp; Logistics</h2>
   <p class="sub">Carpools, tool sign-up, and hotel assignments — organized per event.</p>
@@ -1289,7 +1373,7 @@ async function renderTravel() {
     if (!mid) return toast("Pick a student.");
     try {
       await POST(`/api/hotels/${t.hotel.id}/requests`, {member_id: mid,
-        preferred_roommates: [...$("rq-mates").selectedOptions].map((o) => o.value),
+        preferred_roommates: chipValues("rq-mates"),
         notes: $("rq-notes").value.trim()});
       toast("Rooming request saved."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
@@ -1299,12 +1383,19 @@ async function renderTravel() {
     const mid = parseInt(whoSel.value, 10);
     const mates = $("rq-mates");
     if (!mates) return;
-    const kept = [...mates.selectedOptions].map((o) => o.value);
+    const kept = chipValues("rq-mates");
     mates.innerHTML = (attStudents || [])
       .filter((a) => a.member_id !== mid)
-      .map((a) => `<option value="${esc(a.person_name)}">${esc(a.person_name)}</option>`).join("");
-    [...mates.options].forEach((o) => { o.selected = kept.includes(o.value); });
+      .map((a) => chipButton(a.person_name, a.person_name)).join("");
+    mates.querySelectorAll(".bubble").forEach((b) => {
+      if (kept.includes(b.dataset.val)) {
+        b.classList.add("active");
+        b.setAttribute("aria-pressed", "true");
+      }
+    });
+    bindChipButtons(mates);
   });
+  bindChips(v);
 }
 
 function vehicleTip(v) {
@@ -1340,7 +1431,7 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents) {
   const pendingReqs = visibleReqs.filter((q) => q.status === "pending").length;
   const matesExclSelf = (attStudents || [])
     .filter((a) => !selfStudent || a.member_id !== selfStudent.member_id)
-    .map((a) => `<option value="${esc(a.person_name)}">${esc(a.person_name)}</option>`).join("");
+    .map((a) => chipButton(a.person_name, a.person_name)).join("");
   const roomingBlock = ME.role === "parent" ? "" : `
   <h3>Rooming requests ${pendingReqs ? `<span class="pill amber">${pendingReqs} awaiting placement</span>` : ""}</h3>
   <p class="sub">A student requests to stay with other students — only for yourself, and you can't pick yourself as a roommate.</p>
@@ -1348,12 +1439,12 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents) {
     ? selfStudent
       ? `<div class="row"><span class="sub">Requesting as <b>${esc(selfStudent.person_name)}</b></span>
         <input type="hidden" id="rq-who-self" value="${selfStudent.member_id}">
-        <select id="rq-mates" multiple size="3" title="Preferred roommates (Ctrl/Cmd-click for several)" style="flex:1;min-width:160px">${matesExclSelf}</select>
+        <div class="bubbles chipgroup" id="rq-mates" title="Tap preferred roommates" style="flex:1;min-width:160px;max-height:120px;overflow-y:auto">${matesExclSelf}</div>
         <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
         <button class="btn small" id="rq-add">Save request</button></div>`
       : `<p class="sub">We couldn't match your account to an attending student, so you can't file a request — ask a mentor to check your account name.</p>`
     : `<div class="row"><select id="rq-who"><option value="">Student…</option>${students}</select>
-      <select id="rq-mates" multiple size="3" title="Preferred roommates (Ctrl/Cmd-click for several)" style="flex:1;min-width:160px">${studentNames}</select>
+      <div class="bubbles chipgroup" id="rq-mates" title="Tap preferred roommates" style="flex:1;min-width:160px;max-height:120px;overflow-y:auto">${studentNames}</div>
       <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
       <button class="btn small" id="rq-add">Save request</button></div>`}
   <div style="margin-top:8px">

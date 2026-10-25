@@ -9,6 +9,30 @@ _None right now._
 
 ## Fixed
 
+### RSVP deadline was UI-only: late RSVPs still accepted (2026-10-25)
+- **Symptom:** after an event's deadline, the RSVP buttons disappeared,
+  but the endpoint still accepted a filed RSVP — anyone could post one
+  past the deadline.
+- **Root cause:** `POST /api/events/<eid>/rsvps` never checked the
+  event's deadline; only the frontend hid the picker.
+- **Fix:** the server rejects non-mentor RSVPs once the deadline passes
+  (403, same UTC-date rule the UI uses); mentors/admins keep an
+  override and now see the picker on closed events with an override
+  note, so the override is actually usable. Removing an RSVP stays
+  allowed after the deadline (it only frees a spot).
+
+### Link backfill never ran: table-existence check defeated by init order (2026-10-25)
+- **Symptom (caught in pre-push testing, never shipped):** after
+  migrating an old database, the `user_members` table stayed empty —
+  no account linked to any roster member.
+- **Root cause:** the one-time backfill was gated on the link table
+  not existing yet, but `init_db` runs `schema.sql` (which creates the
+  table) before `_migrate` runs, so the gate was always false.
+- **Fix:** the backfill is gated on a marker row in a new `meta`
+  table (`iam_links_backfilled`) instead. Verified on a migrated old
+  database: links, opt-in WhatsApp fill, and marker all land, and a
+  mentor's unlink survives a restart.
+
 ### RSVP: any user could RSVP for anyone else (2026-10-25)
 - **Symptom:** logged in as a student, Zander could pick "Bruce Chen
   (parent)" in the RSVP picker and RSVP for him.

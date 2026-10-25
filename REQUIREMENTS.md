@@ -19,6 +19,21 @@ and `can't make it` do not count as attending.
 - First run: if no account has a password, the login page offers one-time
   admin-account creation.
 - Mentors/admins create and reset team accounts (Mentor Queue → Team accounts).
+- **Identity model:** each account has a long-int userId, first/last
+  name, email (unique), phone, WhatsApp, password hash, OTP fields,
+  and a **group** — its role (student/parent/mentor/admin). Accounts
+  link to roster members through a `user_members` table: kind `self`
+  (the student's own record) or `parent` (their children's records).
+  **Every ownership rule (RSVP, rooming, removal) reads this table,
+  never names** — so renames and duplicate names can't move or merge
+  someone's permissions. Links are created three ways: a one-time
+  backfill by name when the table first appears (tracked by a marker
+  row, so a mentor's manual unlink survives restarts), automatically
+  when an account is created, and automatically when a member is
+  approved. Mentors can fix any link by hand in Team accounts
+  (Link/Unlink per account). Name matching survives only as the
+  link-creation heuristic, plus a fallback for accounts with no links
+  yet.
 - Role rules are enforced on the server, not just hidden in the UI.
   Non-mentors see a names-only people directory (no contact details).
 - Event **Delete** buttons are shown to mentors/admins only (the server
@@ -39,6 +54,12 @@ and `can't make it` do not count as attending.
   so scan the QR shown that time.
 - **Recovery codes:** 8 one-time codes shown once at setup (regenerable
   with a current code); each works once and is consumed on use.
+  Codes are stored as **one row per code** in `totp_recovery_codes`
+  (sha256 hashes only, never the codes themselves): consuming a code
+  is a single atomic update, so a code can never be spent twice even
+  by two simultaneous logins, and spent codes stay on file with a
+  timestamp as an audit trail. The Security tab shows how many codes
+  remain.
 - If the `qrcode` package is missing for the Python running the server,
   setup still works via the manual key (both authenticator apps accept
   typed keys); the QR code simply isn't shown. Install with
@@ -77,6 +98,13 @@ and `can't make it` do not count as attending.
   'Zander Chen'. Statuses: going / maybe / partial / can't make it /
   waitlisted. **Partial** is for multi-day events such as tournaments,
   when someone attends only part of the event.
+- **RSVP deadlines are enforced on the server, not just by hiding the
+  buttons:** once an event's deadline passes, non-mentors get a 403
+  filing an RSVP (the UI hides their picker and shows an "RSVP closed"
+  pill). Mentors/admins still see the picker on closed events with a
+  "mentor override" note and may file late RSVPs. Releasing a seat
+  (removing an RSVP) stays allowed after the deadline, since it only
+  frees a spot for the waitlist.
 - When an event is full, new "going" or "partial" RSVPs join the waitlist
   and are auto-promoted as spots open; going + partial both count toward
   capacity.
@@ -107,7 +135,9 @@ and `can't make it` do not count as attending.
   mentor-only.
 - **User-focused cards:** assignees lead the card as colored initial
   chips with names. A task may appoint **several students** (stored as a
-  list; legacy single assignees migrate to one-person lists). An "Only
+  list; legacy single assignees migrate to one-person lists), picked
+  with **tap-to-toggle chips** — not a Ctrl/Cmd-click multi-select,
+  which doesn't work on phones. An "Only
   mine" toggle filters the board to the signed-in user's cards, and
   assignee/subteam dropdowns filter further.
 - **Declutter:** mentors can **Archive** a card (archived tasks leave
@@ -176,7 +206,9 @@ well as in the UI.
   own roommate picker (mentors filing on a student's behalf get the same
   exclusion once they pick the student). The server enforces it: a
   student filing for anyone else, or listing themself as a roommate, is
-  rejected.
+  rejected. Preferred roommates are picked with **tap-to-toggle
+  chips**, not a Ctrl/Cmd-click multi-select, so the form works on
+  phones.
 - **Parents don't see the rooming-request module at all** — they take part
   as room parents instead. Students see only their own requests; mentors
   see everyone's, for placement.

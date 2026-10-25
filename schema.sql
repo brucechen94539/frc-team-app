@@ -3,16 +3,49 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Identity: long-int userId. role IS the group
+  -- (student|parent|mentor|admin); names split for reliable matching.
   name          TEXT NOT NULL,
+  first_name    TEXT,
+  last_name     TEXT,
   email         TEXT UNIQUE,
   phone         TEXT,
+  whatsapp      TEXT,
   role          TEXT NOT NULL DEFAULT 'student'
                 CHECK (role IN ('student','parent','mentor','admin')),
   password_hash TEXT,              -- scrypt hash; NULL = no login yet
   totp_secret   TEXT,              -- Fernet-encrypted TOTP secret; NULL = no 2FA
   totp_enabled  INTEGER NOT NULL DEFAULT 0,
-  totp_backup_codes TEXT,          -- JSON list of sha256 hashes of recovery codes
+  totp_backup_codes TEXT,          -- LEGACY: moved to totp_recovery_codes; NULL
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Identity links: which roster member(s) an account IS (self, for
+-- students) or is the parent of (parent). This table — not name
+-- matching — drives every ownership rule (RSVP, rooming, removal).
+CREATE TABLE IF NOT EXISTS user_members (
+  user_id   INTEGER NOT NULL,
+  member_id INTEGER NOT NULL,
+  kind      TEXT NOT NULL CHECK (kind IN ('self','parent')),
+  PRIMARY KEY (user_id, member_id, kind)
+);
+
+-- One row per 2FA recovery code: persisted, atomically consumable, and
+-- kept after use (used_at) as an audit trail.
+CREATE TABLE IF NOT EXISTS totp_recovery_codes (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    INTEGER NOT NULL,
+  code_hash  TEXT NOT NULL,
+  used       INTEGER NOT NULL DEFAULT 0,
+  used_at    TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE (user_id, code_hash)
+);
+
+-- One-row-per-key metadata (migration markers, etc.).
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 
 -- Team sign-up applications. status: pending | approved | waitlisted | declined
