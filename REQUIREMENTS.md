@@ -33,6 +33,10 @@ and `can't make it` do not count as attending.
 - Login becomes two steps for users with 2FA on: password first, then the
   6-digit code (or a recovery code). The session stays half-open until
   the code verifies. Codes accept ±1 time step for clock skew.
+- Scanning the QR code alone does **not** turn 2FA on — it stays off,
+  and login remains password-only, until the confirm code is verified
+  with Verify & enable. Clicking setup again generates a fresh secret,
+  so scan the QR shown that time.
 - **Recovery codes:** 8 one-time codes shown once at setup (regenerable
   with a current code); each works once and is consumed on use.
 - If the `qrcode` package is missing for the Python running the server,
