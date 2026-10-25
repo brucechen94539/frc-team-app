@@ -28,6 +28,10 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB", os.path.join(BASE_DIR, "data.db"))
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+# Dev server, iterated daily: never let the browser cache the page or
+# the script for hours, or a pull shows yesterday's HTML against today's
+# JS (which once killed the whole page — see BUGS.md).
+app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
 

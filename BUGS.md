@@ -9,6 +9,30 @@ _None right now._
 
 ## Fixed
 
+### Blank page, no login: stale cached page + new script killed all JS (2026-10-25)
+- **Symptom:** header rendered but the main area was empty — no login
+  form, no working button. The page title still showed the pre-rename
+  team name even though `git log` showed the latest commit, and the
+  server log showed 304 for `/`, `style.css`, and `app.js` on every
+  reload, so reloading changed nothing.
+- **Root cause (two parts):** (1) the browser reused a cached
+  pre-avatar `index.html` while running the current `app.js`; the
+  avatar round's top-level `$("user-avatar").addEventListener(...)`
+  ran against a page without that element, threw at script load, and
+  no boot code ever ran — so no view rendered at all. Reproduced
+  exactly: old HTML + new JS gives "Cannot read properties of null
+  (reading 'addEventListener')", no login form, empty main. (2)
+  Flask's default 12-hour static cache meant the browser could keep
+  serving yesterday's page for hours after a pull, and plain reloads
+  kept revalidating into 304s instead of fetching fresh files.
+- **Fix:** guard the header-avatar binding (skipped when the element
+  is absent), make `showView` fall back to Events for an unknown view
+  instead of throwing, and set `SEND_FILE_MAX_AGE_DEFAULT = 0` so the
+  dev server sends `Cache-Control: no-cache, max-age=0` (a 304 then
+  only means the file truly hasn't changed). Re-ran the skew
+  reproduction with the fix: no errors, login works, Events reached.
+  (commit TBD)
+
 ### RSVP deadline was UI-only: late RSVPs still accepted (2026-10-25)
 - **Symptom:** after an event's deadline, the RSVP buttons disappeared,
   but the endpoint still accepted a filed RSVP — anyone could post one

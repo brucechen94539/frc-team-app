@@ -151,7 +151,8 @@ function closeMenu() {
 document.querySelectorAll("#nav button").forEach((b) => {
   b.addEventListener("click", () => { showView(b.dataset.view); closeMenu(); });
 });
-$("user-avatar").addEventListener("click", () => showView("profile"));
+const _ua = $("user-avatar");
+if (_ua) _ua.addEventListener("click", () => showView("profile"));
 $("menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   const open = $("nav").classList.toggle("open");
@@ -171,9 +172,12 @@ function showView(name) {
     b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
   $("view-" + name).classList.remove("hidden");
-  ({signup: renderSignup, queue: renderQueue, roster: renderRoster,
+  const _views = {signup: renderSignup, queue: renderQueue, roster: renderRoster,
     events: renderEvents, tracking: renderTracking, tasks: renderTasks, travel: renderTravel,
-    security: renderSecurity, profile: renderProfile, login: renderLogin})[name]();
+    security: renderSecurity, profile: renderProfile, login: renderLogin};
+  // Unknown view (e.g. a newer nav button with an older script) falls
+  // back to Events instead of throwing and leaving a blank page.
+  (_views[name] || _views.events)();
 }
 
 /* ---------------- login ---------------- */
