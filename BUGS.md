@@ -41,7 +41,7 @@ _None right now._
   `<rect>` elements, no `svg:` prefixes, millimetre coordinates converted
   to a viewBox so the code scales to its container. Verified with a real
   Chromium render: the old markup stays blank, the normalized markup
-  draws a crisp QR code.
+  draws a crisp QR code. (commit 70c532f7)
 
 ### 2026-10-19 — Students could define carpool rides
 - **Reported:** Bruce — a logged-in student saw the full "post a ride" form (driver name, seats, departure point/time, return plan, notes) in Travel & Logistics; students should only see the sign-up options and pick which car/parent to go with.
