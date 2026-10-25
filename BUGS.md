@@ -21,7 +21,7 @@ _None right now._
   Idempotent (the match disappears after the rewrite) and scoped to
   the exact phrase — other notes, including other lunch mentions, are
   untouched. Verified on a test database with all three cases.
-  (commit TBD)
+  (commit f462428e)
 
 ### Operation toast had wrong contrast (2026-10-25)
 - **Symptom:** the bottom operation bubble was hard to read.
@@ -33,7 +33,7 @@ _None right now._
 - **Fix:** theme-aware toast background (`--toastbg`: lighter slate in
   dark mode, white in light mode). Measured after the fix: 12.3:1 in
   dark mode, 16.4:1 in light mode, and the bubble now stands out from
-  the cards behind it. (commit TBD)
+  the cards behind it. (commit f462428e)
 
 ### Blank page, no login: stale cached page + new script killed all JS (2026-10-25)
 - **Symptom:** header rendered but the main area was empty — no login
