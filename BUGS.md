@@ -20,7 +20,7 @@ _None right now._
   the same carpool (409, under lock); promotion skips waitlisted people
   who already hold a claimed seat; server boot collapses pre-existing
   duplicates (earliest claimed kept, else earliest waitlisted); and the
-  seat picker no longer offers people already on the ride or waitlist.
+  seat picker no longer offers people already on the ride or waitlist. (commit 429815d6)
 
 ### Rooming requests: anyone could withdraw anyone's pending request, and a student could pick themself as roommate (2026-10-24)
 - **Symptom:** the rooming form let any signed-in user file for any student and list the requester as their own roommate, and the pending-request delete had no ownership check — any user could withdraw anyone else's pending request (the UI showed Withdraw on every pending row).
