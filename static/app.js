@@ -160,8 +160,10 @@ async function renderSecurity() {
       try {
         const s = await POST("/api/auth/totp-setup", {});
         $("t-setup-area").innerHTML = `
-          <div class="sub">Scan this with your authenticator app, or enter the key by hand:</div>
-          <div style="background:#fff;padding:12px;border-radius:12px;max-width:220px">${s.qr_svg}</div>
+          ${s.qr_svg
+            ? `<div class="sub">Scan this with your authenticator app, or enter the key by hand:</div>
+               <div style="background:#fff;padding:12px;border-radius:12px;max-width:220px">${s.qr_svg}</div>`
+            : `<div class="sub">QR codes are unavailable on this server — enter the key by hand in your authenticator app instead.</div>`}
           <div class="field" style="max-width:320px"><label>Manual key</label>
             <input value="${esc(s.secret)}" readonly onclick="this.select()"></div>
           <div class="field" style="max-width:200px"><label>Code from the app</label>

@@ -35,6 +35,11 @@ and `can't make it` do not count as attending.
   the code verifies. Codes accept ±1 time step for clock skew.
 - **Recovery codes:** 8 one-time codes shown once at setup (regenerable
   with a current code); each works once and is consumed on use.
+- If the `qrcode` package is missing for the Python running the server,
+  setup still works via the manual key (both authenticator apps accept
+  typed keys); the QR code simply isn't shown. Install with
+  `python3 -m pip install -r requirements.txt` (same interpreter that
+  runs the app) and restart to get QR codes back.
 - Secrets are **encrypted at rest** with a key derived from the app secret;
   recovery-code hashes are stored, never the codes themselves.
 - **Lockout safety valve:** 5 failed codes lock 2FA attempts for 10

@@ -404,8 +404,6 @@ def api_totp_setup():
     u = current_user()
     if not u:
         return err("login required", 401)
-    if qrcode is None:
-        return err("QR code support is not installed", 503)
     full = _totp_full_user(u["id"])
     if full.get("totp_enabled"):
         return err("two-factor authentication is already on;"
@@ -413,13 +411,20 @@ def api_totp_setup():
     secret = totp_new_secret()
     try:
         token = _totp_encrypt(secret)
-    except RuntimeError as e:
-        return err(str(e), 503)
+    except RuntimeError:
+        return err("two-factor setup needs the cryptography package — run:"
+                   " python3 -m pip install -r requirements.txt, then restart"
+                   " the server", 503)
     execute("UPDATE users SET totp_secret=?, totp_enabled=0,"
             " totp_backup_codes=NULL WHERE id=?", (token, u["id"]))
-    svg = qrcode.make(totp_uri(secret, u["name"]),
-                      image_factory=qrcode.image.svg.SvgImage).to_string()
-    return jsonify({"qr_svg": svg.decode(), "secret": secret})
+    # QR codes need the qrcode package; without it enrollment still works
+    # via the manual key, which both authenticator apps accept.
+    svg = None
+    if qrcode is not None:
+        svg = qrcode.make(totp_uri(secret, u["name"]),
+                          image_factory=qrcode.image.svg.SvgImage).to_string()
+        svg = svg.decode()
+    return jsonify({"qr_svg": svg, "secret": secret})
 
 
 @app.route("/api/auth/totp-verify", methods=["POST"])

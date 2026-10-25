@@ -18,6 +18,19 @@ _None right now._
 - **Fix:** the Delete button now renders only for mentors/admins, matching
   the server's existing role gate. (commit 26abb945)
 
+### 2026-10-25 — "QR code support is not installed" on 2FA setup
+- **Reported:** Bruce — "Set up authenticator app" failed with a 503 for
+  both mentor and parent accounts.
+- **Root cause:** the setup endpoint returned 503 whenever the `qrcode`
+  package wasn't importable by the Python running the server — most
+  likely `pip install` landed in a different interpreter than the one
+  running `app.py`, or the server wasn't restarted after installing.
+- **Fix:** setup no longer hard-fails without `qrcode`: it returns the
+  manual key and the UI offers key entry instead of a QR code, so
+  enrollment works either way. A missing `cryptography` package now
+  reports the exact fix (`python3 -m pip install -r requirements.txt`,
+  then restart) instead of a bare error.
+
 ### 2026-10-19 — Students could define carpool rides
 - **Reported:** Bruce — a logged-in student saw the full "post a ride" form (driver name, seats, departure point/time, return plan, notes) in Travel & Logistics; students should only see the sign-up options and pick which car/parent to go with.
 - **Root cause:** `POST /api/carpools` had no role check, and the ride form rendered for every role.
