@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
   email         TEXT UNIQUE,
   phone         TEXT,
   whatsapp      TEXT,
+  avatar        TEXT,              -- data URL (data:image/...;base64,...); NULL = initials
   role          TEXT NOT NULL DEFAULT 'student'
                 CHECK (role IN ('student','parent','mentor','admin')),
   password_hash TEXT,              -- scrypt hash; NULL = no login yet

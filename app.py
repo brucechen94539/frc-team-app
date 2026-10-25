@@ -139,6 +139,8 @@ def _migrate(db):
             db.execute("ALTER TABLE users ADD COLUMN last_name TEXT")
         if "whatsapp" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN whatsapp TEXT")
+        if "avatar" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
         db.execute("CREATE TABLE IF NOT EXISTS meta ("
                    "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         db.execute("""CREATE TABLE IF NOT EXISTS user_members (
@@ -348,6 +350,11 @@ def api_auth_me():
         return jsonify({"user": None, "setup_required": setup_required()})
     user = _public_user(u)
     user["links"] = _user_links_map([u["id"]]).get(u["id"], [])
+    full = q_one("SELECT phone, whatsapp, created_at FROM users"
+                 " WHERE id=?", (u["id"],))
+    user["phone"] = full["phone"]
+    user["whatsapp"] = full["whatsapp"]
+    user["member_since"] = full["created_at"]
     return jsonify({"user": user, "setup_required": setup_required()})
 
 
@@ -420,6 +427,85 @@ def api_auth_password():
     execute("UPDATE users SET password_hash=? WHERE id=?",
             (generate_password_hash(new), u["id"]))
     return jsonify({"ok": True})
+
+
+def _valid_avatar(data):
+    """A data URL the server will store: a small raster image, base64.
+    The frontend resizes to 256px first, so a real upload is tens of KB;
+    the 500KB cap is a backstop against abuse, not a target."""
+    if not isinstance(data, str) or len(data) > 500000:
+        return False
+    for prefix in ("data:image/png;base64,", "data:image/jpeg;base64,",
+                   "data:image/gif;base64,", "data:image/webp;base64,"):
+        if data.startswith(prefix):
+            payload = data[len(prefix):]
+            break
+    else:
+        return False
+    if not payload:
+        return False
+    try:
+        base64.b64decode(payload, validate=True)
+    except Exception:
+        return False
+    return True
+
+
+@app.route("/api/auth/avatar", methods=["GET", "POST", "DELETE"])
+def api_auth_avatar():
+    """Your own avatar. Self-only by construction: the route takes no
+    user id, it always acts on the logged-in account. NULL = no photo,
+    and the UI falls back to name initials."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if request.method == "GET":
+        row = q_one("SELECT avatar FROM users WHERE id=?", (u["id"],))
+        if not row or not row["avatar"]:
+            return err("no avatar", 404)
+        return jsonify({"avatar": row["avatar"]})
+    if request.method == "DELETE":
+        execute("UPDATE users SET avatar=NULL WHERE id=?", (u["id"],))
+        return jsonify({"ok": True})
+    b = request.get_json(force=True, silent=True) or {}
+    if not _valid_avatar(b.get("avatar")):
+        return err("avatar must be a PNG, JPEG, GIF, or WebP image"
+                   " under 500KB", 400)
+    execute("UPDATE users SET avatar=? WHERE id=?", (b["avatar"], u["id"]))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/users/<int:uid>/avatar")
+def api_user_avatar(uid):
+    """Another account's avatar: the owner, or a mentor/admin (who
+    manages accounts). Any other logged-in user gets a 403."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["id"] != uid and u["role"] not in ("mentor", "admin"):
+        return err("forbidden", 403)
+    row = q_one("SELECT avatar FROM users WHERE id=?", (uid,))
+    if not row or not row["avatar"]:
+        return err("no avatar", 404)
+    return jsonify({"avatar": row["avatar"]})
+
+
+@app.route("/api/auth/profile", methods=["POST"])
+def api_auth_profile():
+    """Self-service contact update: phone and WhatsApp only. Name and
+    email are the login identity and stay mentor-managed; anything else
+    in the body is ignored, and absent keys keep their current value."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    b = request.get_json(force=True, silent=True) or {}
+    cur = q_one("SELECT phone, whatsapp FROM users WHERE id=?", (u["id"],))
+    phone = ((b.get("phone") if "phone" in b else cur["phone"]) or "").strip()[:40]
+    whatsapp = ((b.get("whatsapp") if "whatsapp" in b else cur["whatsapp"]) or "").strip()[:40]
+    execute("UPDATE users SET phone=?, whatsapp=? WHERE id=?",
+            (phone, whatsapp, u["id"]))
+    return jsonify(q_one("SELECT id, name, email, phone, whatsapp, role"
+                         " FROM users WHERE id=?", (u["id"],)))
 
 
 # ----------------------------------------------------------------------------
@@ -740,9 +826,11 @@ def api_subteams():
 
 
 def _user_links_map(user_ids=None):
-    """{user_id: [{member_id, kind, member_name}]} for the link table."""
+    """{user_id: [{member_id, kind, member_name, school,
+    assigned_subteam, prefs}]} for the link table."""
     sql = ("SELECT um.user_id, um.member_id, um.kind,"
-           " m.first_name AS m_first, m.last_name AS m_last"
+           " m.first_name AS m_first, m.last_name AS m_last,"
+           " m.school, m.assigned_subteam, m.prefs"
            " FROM user_members um JOIN members m ON m.id = um.member_id")
     args = ()
     if user_ids is not None:
@@ -753,7 +841,10 @@ def _user_links_map(user_ids=None):
         out.setdefault(l["user_id"], []).append({
             "member_id": l["member_id"], "kind": l["kind"],
             "member_name": ((l["m_first"] or "") + " "
-                             + (l["m_last"] or "")).strip()})
+                             + (l["m_last"] or "")).strip(),
+            "school": l["school"],
+            "assigned_subteam": l["assigned_subteam"],
+            "prefs": l["prefs"]})
     return out
 
 

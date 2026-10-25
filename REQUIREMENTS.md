@@ -39,6 +39,39 @@ and `can't make it` do not count as attending.
 - Event **Delete** buttons are shown to mentors/admins only (the server
   already rejected others; the button no longer appears for them at all).
 
+## Profile & avatars
+
+- Every account has a **Profile** view (nav, all roles) with three cards:
+  **Profile** (avatar + name + role + email + member since),
+  **General** (editable phone and WhatsApp; email is read-only since it
+  is the login identity; linked roster entries with kind, school, and
+  subteam — assigned subteam, else ranked preferences), and **Security**
+  (change password with the current password, 2FA status, and a button
+  into the full two-factor setup/reset tab).
+- **Avatars are backend-backed, not browser-local.** Photos live in a
+  `users.avatar` column as a data URL (fresh DBs get the column from
+  `schema.sql`; older DBs gain it from `_migrate`). The frontend resizes
+  to at most 256px JPEG on the device before upload, so a stored photo
+  is tens of KB. Without a photo, the account shows **first/last-name
+  initials** on a deterministic pastel circle (same initials/colors as
+  the assignee chips). The header shows the same avatar next to the
+  name chip, and tapping it opens Profile.
+- **Avatar API (all self-only by construction — the routes take no user
+  id, they act on the logged-in account):** `GET/POST/DELETE
+  /api/auth/avatar`. Uploads must be PNG, JPEG, GIF, or WebP data URLs
+  under 500KB with valid base64, else 400; logged-out requests get 401.
+  `GET /api/users/<uid>/avatar` serves another account's photo to its
+  owner or a mentor/admin, 403 for anyone else, 404 when no photo.
+  `POST /api/auth/profile` updates only phone/WhatsApp (absent keys keep
+  their value; name/email in the body are ignored).
+- **Role checks for this round (retest after any refactor):** own upload
+  200 and round-trips; another student's photo 403, mentor's 200; own
+  delete 200 then 404; contact edit updates phone/WhatsApp but never
+  email; password change with the right current password 200 (new login
+  works, old login 401), wrong current password 403; logged-out upload
+  401; non-image and oversized uploads 400; pre-avatar DB gains the
+  column on boot.
+
 ## Two-factor authentication (TOTP, opt-in)
 
 - Any user can opt in from the **Security** tab: scan the QR code with

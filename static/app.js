@@ -81,6 +81,7 @@ const readPlace = () => {
 };
 let pendingBeds = [];  // bed builder state for the room being composed
 let ME = null;          // logged-in user ({id,name,email,role}) or null
+let ME_AVATAR = null;   // logged-in user's photo data URL, or null for initials
 let SETUP = false;      // first run: no account has a password yet
 const MENTOR = () => !!(ME && (ME.role === "mentor" || ME.role === "admin"));
 
@@ -98,6 +99,48 @@ function applyNav() {
   $("menu-btn").classList.toggle("navhide", !ME);
   closeMenu();
   if (ME) $("user-chip").textContent = ME.name + " \u00b7 " + ME.role;
+  renderHeaderAvatar();
+}
+
+/* ---------------- avatars ---------------- */
+// Photo when the account has one, name initials on a deterministic
+// pastel otherwise (same initials/colors as the assignee chips).
+function avatarHTML(name, cls) {
+  if (ME_AVATAR) return `<span class="avatar ${cls}"><img src="${ME_AVATAR}" alt=""></span>`;
+  return `<span class="avatar ${cls}" style="background:${chipColor(name)};color:#222">${esc(initials(name))}</span>`;
+}
+function renderHeaderAvatar() {
+  const el = $("user-avatar");
+  if (!el) return;
+  el.innerHTML = ME ? avatarHTML(ME.name, "avatar-sm") : "";
+  el.style.display = ME ? "" : "none";
+}
+async function loadAvatar() {
+  ME_AVATAR = null;
+  if (!ME) return;
+  try { ME_AVATAR = (await GET("/api/auth/avatar")).avatar || null; }
+  catch (e) { /* no photo yet — initials */ }
+  renderHeaderAvatar();
+}
+// Resize to at most 256px on the device before upload, so the stored
+// data URL stays tens of KB instead of a multi-MB camera photo.
+function resizeAvatar(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = () => { img.src = reader.result; };
+    reader.onerror = reject;
+    img.onload = () => {
+      const scale = Math.min(1, 256 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * scale);
+      c.height = Math.round(img.height * scale);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      resolve(c.toDataURL("image/jpeg", 0.85));
+    };
+    img.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 /* ---------------- navigation ---------------- */
@@ -108,6 +151,7 @@ function closeMenu() {
 document.querySelectorAll("#nav button").forEach((b) => {
   b.addEventListener("click", () => { showView(b.dataset.view); closeMenu(); });
 });
+$("user-avatar").addEventListener("click", () => showView("profile"));
 $("menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   const open = $("nav").classList.toggle("open");
@@ -129,7 +173,7 @@ function showView(name) {
   $("view-" + name).classList.remove("hidden");
   ({signup: renderSignup, queue: renderQueue, roster: renderRoster,
     events: renderEvents, tracking: renderTracking, tasks: renderTasks, travel: renderTravel,
-    security: renderSecurity, login: renderLogin})[name]();
+    security: renderSecurity, profile: renderProfile, login: renderLogin})[name]();
 }
 
 /* ---------------- login ---------------- */
@@ -169,6 +213,7 @@ async function submitLogin() {
     if (res.need_2fa) { render2FAStep(); return; }
     ME = res.user;
     SETUP = false;
+    await loadAvatar();
     applyNav();
     toast("Welcome, " + ME.name + ".");
     showView("events");
@@ -190,6 +235,7 @@ function render2FAStep() {
     const errBox = $("lg-err"); errBox.textContent = "";
     try {
       ME = (await POST("/api/auth/verify-2fa", {code: $("lg-code").value.trim()})).user;
+      await loadAvatar();
       applyNav();
       toast("Welcome, " + ME.name + ".");
       showView("events");
@@ -199,6 +245,99 @@ function render2FAStep() {
   $("lg-verify").addEventListener("click", go);
   $("lg-code").addEventListener("keydown", (e) => { if (e.key === "Enter") go(); });
   $("lg-code").focus();
+}
+
+/* ---------------- profile ---------------- */
+async function renderProfile() {
+  const v = $("view-profile");
+  let me;
+  try { me = await GET("/api/auth/me"); }
+  catch (e) { v.innerHTML = `<div class="card"><p class="sub">Could not load your profile.</p></div>`; return; }
+  const u = me.user;
+  if (!u) { showView("login"); return; }
+  let totp = null;
+  try { totp = await GET("/api/auth/totp-status"); } catch (e) {}
+  const links = (u.links || []).map((l) => {
+    let subs = l.assigned_subteam || "";
+    if (!subs && l.prefs) {
+      try { subs = (Array.isArray(l.prefs) ? l.prefs : JSON.parse(l.prefs)).join(", "); }
+      catch (e) {}
+    }
+    return `<div class="sub">${esc(l.member_name)} · ${esc(l.kind === "self" ? "you" : "your child")}${l.school ? ` · ${esc(l.school)}` : ""}${subs ? ` · ${esc(subs)}` : ""}</div>`;
+  }).join("") || `<div class="sub">No roster links yet — a mentor can link this account in Team accounts.</div>`;
+  v.innerHTML = `
+  <div class="card"><h2>Profile</h2>
+    <div class="row" style="align-items:center;gap:16px">
+      <span id="pf-avatar">${avatarHTML(u.name, "avatar-lg")}</span>
+      <div>
+        <div style="font-size:20px;font-weight:700">${esc(u.name)}</div>
+        <div class="sub">${esc(u.role)} · ${esc(u.email)}</div>
+        ${u.member_since ? `<div class="sub">Member since ${esc(u.member_since.slice(0, 10))}</div>` : ""}
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label class="btn ghost" style="cursor:pointer">Upload photo
+        <input id="pf-file" type="file" accept="image/*" hidden></label>
+      ${ME_AVATAR ? `<button class="btn ghost" id="pf-remove">Remove photo</button>` : ""}
+    </div>
+    <p class="sub">Photos are resized to 256px on your device before upload and stored with your account. Without a photo, your initials show instead.</p>
+  </div>
+  <div class="card"><h3>General</h3>
+    <div class="grid3">
+      <div class="field"><label>Phone</label><input id="pf-phone" value="${esc(u.phone || "")}"></div>
+      <div class="field"><label>WhatsApp</label><input id="pf-wa" value="${esc(u.whatsapp || "")}"></div>
+      <div class="field"><label>Email (login — ask a mentor to change it)</label><input value="${esc(u.email)}" disabled></div>
+    </div>
+    <button class="btn" id="pf-save">Save contact info</button>
+    <h3 style="margin-top:16px">Team &amp; school</h3>
+    ${links}
+  </div>
+  <div class="card"><h3>Security</h3>
+    <div class="field" style="max-width:320px"><label>Current password</label><input id="pf-cur" type="password" autocomplete="current-password"></div>
+    <div class="field" style="max-width:320px"><label>New password (8+ characters)</label><input id="pf-new" type="password" autocomplete="new-password"></div>
+    <div class="field" style="max-width:320px"><label>Confirm new password</label><input id="pf-new2" type="password" autocomplete="new-password"></div>
+    <button class="btn" id="pf-pw">Change password</button>
+    <div style="margin-top:16px">
+      <p><span class="pill ${totp && totp.enabled ? "green" : ""}">Two-factor: ${totp && totp.enabled ? "ON" : "OFF"}</span>
+      ${totp && totp.enabled ? `<span class="sub">${totp.backup_codes_remaining} recovery codes left.</span>` : ""}</p>
+      <button class="btn ghost" id="pf-2fa">Manage two-factor authentication</button>
+    </div>
+  </div>`;
+  $("pf-file").addEventListener("change", async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (!f.type.startsWith("image/")) { toast("Please pick an image file."); return; }
+    try {
+      const url = await resizeAvatar(f);
+      await POST("/api/auth/avatar", {avatar: url});
+      ME_AVATAR = url; renderHeaderAvatar(); renderProfile();
+      toast("Photo updated.");
+    } catch (err) { toast("Error: " + err.message); }
+  });
+  const rm = $("pf-remove");
+  if (rm) rm.addEventListener("click", async () => {
+    try {
+      await DEL("/api/auth/avatar");
+      ME_AVATAR = null; renderHeaderAvatar(); renderProfile();
+      toast("Photo removed — showing initials.");
+    } catch (err) { toast("Error: " + err.message); }
+  });
+  $("pf-save").addEventListener("click", async () => {
+    try {
+      await POST("/api/auth/profile", {phone: $("pf-phone").value, whatsapp: $("pf-wa").value});
+      toast("Contact info saved.");
+    } catch (err) { toast("Error: " + err.message); }
+  });
+  $("pf-pw").addEventListener("click", async () => {
+    const cur = $("pf-cur").value, nw = $("pf-new").value, nw2 = $("pf-new2").value;
+    if (nw !== nw2) { toast("New passwords don't match."); return; }
+    if (nw.length < 8) { toast("New password must be 8+ characters."); return; }
+    try {
+      await POST("/api/auth/password", {current: cur, new: nw});
+      $("pf-cur").value = $("pf-new").value = $("pf-new2").value = "";
+      toast("Password changed.");
+    } catch (err) { toast("Error: " + err.message); }
+  });
+  $("pf-2fa").addEventListener("click", () => showView("security"));
 }
 
 async function renderSecurity() {
@@ -280,6 +419,7 @@ async function doLogout() {
   await POST("/api/auth/logout").catch(() => {});
   try { localStorage.removeItem("frc-place"); } catch (e) {}
   ME = null;
+  ME_AVATAR = null;
   const me = await GET("/api/auth/me").catch(() => ({setup_required: false}));
   SETUP = !!me.setup_required;
   applyNav();
@@ -1540,6 +1680,7 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents) {
   try { me = await GET("/api/auth/me"); } catch (e) { /* auth unreachable */ }
   ME = me.user;
   SETUP = !!me.setup_required;
+  if (ME) await loadAvatar();
   $("logout-btn").addEventListener("click", doLogout);
   const themeBtn = $("theme-btn");
   const applyTheme = (t) => {
