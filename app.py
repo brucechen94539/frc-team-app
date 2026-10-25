@@ -1,4 +1,4 @@
-"""FRC Team Sign-Up — lightweight self-hosted app.
+"""Team 9470 CTRL-AL-DELETE FRC Team Portal — lightweight self-hosted app.
 
 Stack: Flask + stdlib sqlite3. Accounts live in the users table with
 scrypt-hashed passwords; login state is a signed session cookie (see README).

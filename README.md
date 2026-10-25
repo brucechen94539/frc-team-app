@@ -1,4 +1,4 @@
-# FRC Team Sign-Up — lightweight self-hosted app
+# Team 9470 CTRL-AL-DELETE FRC Team Portal — lightweight self-hosted app
 
 A small Flask + SQLite web app for an FRC robotics team: team sign-ups with
 mentor approval, event RSVPs, attendance/hours tracking, a task board, carpools,

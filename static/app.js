@@ -1,4 +1,4 @@
-/* FRC Team Sign-Up — vanilla JS frontend talking to the Flask REST API. */
+/* Team 9470 CTRL-AL-DELETE FRC Team Portal — vanilla JS frontend talking to the Flask REST API. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -88,13 +88,15 @@ function renderLogin() {
     ${SETUP ? '<div class="field"><label>Name</label><input id="lg-name"></div>' : ""}
     <div class="field"><label>Email</label><input id="lg-email" type="email" autocomplete="username"></div>
     <div class="field"><label>Password</label><input id="lg-pass" type="password" autocomplete="current-password"></div>
-    <button class="btn" id="lg-go">${SETUP ? "Create account" : "Log in"}</button>
-    ${SETUP ? "" : '<p class="sub" style="margin-top:16px">New to the team? <a href="#" id="lg-signup">Submit a sign-up application</a> — no account needed.</p>'}
+    <div class="row">
+      <button class="btn" id="lg-go">${SETUP ? "Create account" : "Log in"}</button>
+      ${SETUP ? "" : '<button class="btn ghost" id="lg-gosignup">Sign Up</button>'}
+    </div>
   </div></div>`;
   $("lg-go").addEventListener("click", submitLogin);
   $("lg-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") submitLogin(); });
-  const link = $("lg-signup");
-  if (link) link.addEventListener("click", (e) => { e.preventDefault(); showView("signup"); });
+  const su = $("lg-gosignup");
+  if (su) su.addEventListener("click", () => showView("signup"));
 }
 
 async function submitLogin() {
@@ -271,6 +273,7 @@ async function renderSignup() {
   v.innerHTML = `
   <div class="card"><h2>Team Sign-Up</h2>
   <p class="sub">Applications go to the Mentor Queue for approval. Fields marked * are required.</p>
+  <p class="sub">Already have an account? <a href="#" id="su-login">Log in</a></p>
   <div class="err" id="su-err"></div>
   <h3>Student</h3>
   <div class="grid2">
@@ -329,6 +332,7 @@ async function renderSignup() {
       cb.closest(".chatcard").classList.toggle("sel", cb.checked)));
   [0, 1, 2].forEach((i) => $("pref" + i).addEventListener("change", syncPrefs));
   syncPrefs();
+  $("su-login").addEventListener("click", (e) => { e.preventDefault(); showView("login"); });
   $("f-submit").addEventListener("click", submitApplication);
   $("f-fill").addEventListener("click", () => {
     const set = (id, v) => { $(id).value = v; };
