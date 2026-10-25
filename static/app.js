@@ -41,6 +41,17 @@ let queueFilter = "pending";
 let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
 let trackEventId = null, travelEventId = null;
+let currentView = "events";
+/* Sticky session: remember the tab + event so a reload returns the user to
+   exactly where they were working. Cleared on logout. */
+const savePlace = () => {
+  if (!ME) return;
+  try { localStorage.setItem("frc-place", JSON.stringify(
+    {view: currentView, track: trackEventId, travel: travelEventId})); } catch (e) {}
+};
+const readPlace = () => {
+  try { return JSON.parse(localStorage.getItem("frc-place") || "null"); } catch (e) { return null; }
+};
 let pendingBeds = [];  // bed builder state for the room being composed
 let ME = null;          // logged-in user ({id,name,email,role}) or null
 let SETUP = false;      // first run: no account has a password yet
@@ -83,6 +94,8 @@ document.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
 function showView(name) {
   if (!ME && name !== "signup" && name !== "login") name = "login";
+  currentView = name;
+  savePlace();
   document.querySelectorAll("#nav button").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === name));
   document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
@@ -238,6 +251,7 @@ async function renderSecurity() {
 
 async function doLogout() {
   await POST("/api/auth/logout").catch(() => {});
+  try { localStorage.removeItem("frc-place"); } catch (e) {}
   ME = null;
   const me = await GET("/api/auth/me").catch(() => ({setup_required: false}));
   SETUP = !!me.setup_required;
@@ -756,7 +770,7 @@ async function renderTracking() {
   const v = $("view-tracking");
   await loadPeople();
   const events = await GET("/api/events");
-  if (!trackEventId && events.length) trackEventId = events[0].id;
+  if (!events.some((e) => e.id === trackEventId)) trackEventId = events.length ? events[0].id : null;
   const ev = events.find((e) => e.id === trackEventId);
   const att = ev ? await GET(`/api/events/${ev.id}/rsvps`) : {rsvps: []};
   const checked = ev ? await GET(`/api/events/${ev.id}/checkins`) : [];
@@ -838,7 +852,7 @@ async function renderTracking() {
       <div class="bar"><div style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></div></div></div>`).join("")}
   </div>`;
   v.querySelectorAll("[data-tev]").forEach((b) => b.addEventListener("click", () => {
-    trackEventId = parseInt(b.dataset.tev, 10); renderTracking();
+    trackEventId = parseInt(b.dataset.tev, 10); savePlace(); renderTracking();
   }));
   v.querySelectorAll("[data-ci]").forEach((b) => b.addEventListener("click", async () => {
     const hours = parseFloat($("t-hrs").value) || 0;
@@ -876,7 +890,7 @@ async function renderTravel() {
   const v = $("view-travel");
   await loadPeople();
   const events = await GET("/api/events");
-  if (!travelEventId && events.length) travelEventId = events[0].id;
+  if (!events.some((e) => e.id === travelEventId)) travelEventId = events.length ? events[0].id : null;
   if (!events.length) {
     $("view-travel").innerHTML =
       '<div class="card"><h2>Travel &amp; Logistics</h2><p class="sub">Create an event first.</p></div>';
@@ -939,8 +953,20 @@ async function renderTravel() {
       `<span class="pill">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="release">✕</a></span>`).join("") || '<span class="sub">none yet</span>'}</div>
     ${c.waitlist.length ? `<div>Waitlist: ${c.waitlist.map((x) =>
       `<span class="pill amber">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : ""}
-    <div class="row" style="margin-top:6px"><select id="cps-${c.id}">${attOpts}</select>
-      <button class="btn small" data-claim="${c.id}">Claim seat</button></div>
+    ${(() => {
+      const onRide = new Set();
+      [...c.claims, ...c.waitlist].forEach((x) => {
+        onRide.add(`${x.member_id}:${x.person_kind}`);
+        onRide.add(`${normName(x.person_name)}:${x.person_kind}`);
+      });
+      const cpsOpts = attPeople.filter((p) =>
+        !onRide.has(`${p.member_id}:${p.kind}`)
+        && !onRide.has(`${normName(p.name.replace(/ \((student|parent)\)$/, ""))}:${p.kind}`)).map(optJSON).join("");
+      return cpsOpts
+        ? `<div class="row" style="margin-top:6px"><select id="cps-${c.id}">${cpsOpts}</select>
+      <button class="btn small" data-claim="${c.id}">Claim seat</button></div>`
+        : `<div class="sub" style="margin-top:6px">Everyone attending is already on this ride.</div>`;
+    })()}
     </div>`).join("") || '<p class="sub">No carpools posted for this event yet.</p>'}
   </div></div>
 
@@ -981,7 +1007,7 @@ async function renderTravel() {
     <button class="btn small mo" id="h-add">Save hotel block</button>`}
   </div>`;
   v.querySelectorAll("[data-ev]").forEach((b) => b.addEventListener("click", () => {
-    travelEventId = parseInt(b.dataset.ev, 10); pendingBeds = []; renderTravel();
+    travelEventId = parseInt(b.dataset.ev, 10); savePlace(); pendingBeds = []; renderTravel();
   }));
   const hb = $("h-add");
   if (hb) hb.addEventListener("click", async () => {
@@ -1261,7 +1287,13 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents) {
   applyTheme(document.documentElement.getAttribute("data-theme") || "dark");
   applyNav();
   if (ME) {
-    showView("events");
+    const place = readPlace();
+    if (place) {
+      if (place.travel) travelEventId = place.travel;
+      if (place.track) trackEventId = place.track;
+    }
+    const btn = place && document.querySelector(`#nav button[data-view="${place.view}"]`);
+    showView(btn && !btn.classList.contains("navhide") ? place.view : "events");
     refreshBadges();
   } else {
     showView("login");

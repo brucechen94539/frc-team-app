@@ -9,6 +9,19 @@ _None right now._
 
 ## Fixed
 
+### Carpool: same person in Riders and Waitlist at once (2026-10-24)
+- **Symptom:** Sam Okafor appeared under both Riders and Waitlist on the
+  same car (screenshot: Daniel Kim's car, 0 of 4 seats open).
+- **Root cause:** `POST /api/carpools/<cid>/claims` never checked for an
+  existing row — claiming twice created a second row, which landed in the
+  waitlist once the car was full (or a second claimed seat while seats
+  were open). Promotion also picked the first waitlisted row blindly.
+- **Fix:** the claim endpoint rejects a second row for the same person on
+  the same carpool (409, under lock); promotion skips waitlisted people
+  who already hold a claimed seat; server boot collapses pre-existing
+  duplicates (earliest claimed kept, else earliest waitlisted); and the
+  seat picker no longer offers people already on the ride or waitlist.
+
 ### Rooming requests: anyone could withdraw anyone's pending request, and a student could pick themself as roommate (2026-10-24)
 - **Symptom:** the rooming form let any signed-in user file for any student and list the requester as their own roommate, and the pending-request delete had no ownership check — any user could withdraw anyone else's pending request (the UI showed Withdraw on every pending row).
 - **Root cause:** `POST /api/hotels/<hid>/requests` had no role check at all, and `DELETE /api/rooming-requests/<qid>` only gated the placed state; pending deletes were open to all.

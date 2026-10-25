@@ -85,6 +85,29 @@ def init_db():
         print("Seeded sample data.")
 
 
+def _dedupe_carpool_claims(db):
+    """Collapse duplicate carpool rows from before the claim guard: one row
+    per person per carpool. Keeps the earliest claimed row if any, else the
+    earliest waitlisted row."""
+    rows = db.execute(
+        "SELECT * FROM carpool_claims ORDER BY carpool_id, id").fetchall()
+    groups = {}
+    for r in rows:
+        key = (r["carpool_id"],
+               r["member_id"] if r["member_id"] is not None
+               else "name:" + (r["person_name"] or ""),
+               r["person_kind"])
+        groups.setdefault(key, []).append(r)
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        claimed = [r for r in members if r["status"] == "claimed"]
+        keep = claimed[0] if claimed else members[0]
+        for r in members:
+            if r["id"] != keep["id"]:
+                db.execute("DELETE FROM carpool_claims WHERE id=?", (r["id"],))
+
+
 def _migrate(db):
     """Additive migrations for databases created before these columns."""
     room_cols = {r[1] for r in db.execute("PRAGMA table_info(rooms)")}
@@ -108,6 +131,8 @@ def _migrate(db):
                        " NOT NULL DEFAULT 0")
         if "totp_backup_codes" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN totp_backup_codes TEXT")
+        _dedupe_carpool_claims(db)
+        db.commit()
         db.commit()
 
 
@@ -1103,13 +1128,33 @@ def api_carpool_claim(cid):
     if not is_attending(c["event_id"], b.get("member_id"), b.get("person_kind")):
         return err("only people attending this event can claim a seat"
                    " — RSVP as going first")
-    taken = q_one("SELECT COUNT(*) n FROM carpool_claims"
-                  " WHERE carpool_id=? AND status='claimed'", (cid,))["n"]
-    status = "claimed" if taken < c["seats"] else "waitlisted"
-    clid = execute(
-        "INSERT INTO carpool_claims (carpool_id, member_id, person_kind,"
-        " person_name, status) VALUES (?,?,?,?,?)",
-        (cid, b.get("member_id"), b.get("person_kind"), b["person_name"], status))
+    with _lock:
+        db = get_db()
+        # One row per person per carpool: a second claim used to land in
+        # the waitlist while the person already held a seat (or vice versa).
+        if b.get("member_id"):
+            dup = db.execute(
+                "SELECT id FROM carpool_claims WHERE carpool_id=? AND"
+                " member_id=? AND person_kind=?",
+                (cid, b["member_id"], b.get("person_kind"))).fetchone()
+        else:
+            dup = db.execute(
+                "SELECT id FROM carpool_claims WHERE carpool_id=? AND"
+                " member_id IS NULL AND person_name=? AND person_kind=?",
+                (cid, b["person_name"], b.get("person_kind"))).fetchone()
+        if dup:
+            return err("already on this ride — claimed or waitlisted", 409)
+        taken = db.execute(
+            "SELECT COUNT(*) n FROM carpool_claims"
+            " WHERE carpool_id=? AND status='claimed'", (cid,)).fetchone()["n"]
+        status = "claimed" if taken < c["seats"] else "waitlisted"
+        cur = db.execute(
+            "INSERT INTO carpool_claims (carpool_id, member_id, person_kind,"
+            " person_name, status) VALUES (?,?,?,?,?)",
+            (cid, b.get("member_id"), b.get("person_kind"), b["person_name"],
+             status))
+        db.commit()
+        clid = cur.lastrowid
     return jsonify(q_one("SELECT * FROM carpool_claims WHERE id=?", (clid,))), 201
 
 
@@ -1123,13 +1168,25 @@ def api_carpool_claim_delete(clid):
         db.execute("DELETE FROM carpool_claims WHERE id=?", (clid,))
         promoted = None
         if cl["status"] == "claimed":
-            nxt = db.execute(
-                "SELECT * FROM carpool_claims WHERE carpool_id=? AND status='waitlisted'"
-                " ORDER BY created_at, id LIMIT 1", (cl["carpool_id"],)).fetchone()
-            if nxt:
+            claimed_ids = {(r["member_id"], r["person_kind"]) for r in db.execute(
+                "SELECT member_id, person_kind FROM carpool_claims"
+                " WHERE carpool_id=? AND status='claimed'",
+                (cl["carpool_id"],))}
+            claimed_names = {(r["person_name"], r["person_kind"]) for r in db.execute(
+                "SELECT person_name, person_kind FROM carpool_claims"
+                " WHERE carpool_id=? AND status='claimed'",
+                (cl["carpool_id"],))}
+            for nxt in db.execute(
+                    "SELECT * FROM carpool_claims WHERE carpool_id=? AND"
+                    " status='waitlisted' ORDER BY created_at, id",
+                    (cl["carpool_id"],)):
+                if ((nxt["member_id"], nxt["person_kind"]) in claimed_ids
+                        or (nxt["person_name"], nxt["person_kind"]) in claimed_names):
+                    continue  # stale duplicate: never promote into a second seat
                 db.execute("UPDATE carpool_claims SET status='claimed' WHERE id=?",
                            (nxt["id"],))
                 promoted = dict(nxt)
+                break
         db.commit()
     return jsonify({"deleted": clid, "promoted": promoted})
 

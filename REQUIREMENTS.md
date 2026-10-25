@@ -107,6 +107,11 @@ well as in the UI.
 - Drivers may optionally add vehicle details — **license plate, color,
   make, model** — shown on the ride card as a hover tooltip so riders can
   spot the car.
+- **One row per person per carpool:** a person already claimed or
+  waitlisted on a ride cannot claim it again (409). Releasing a seat
+  promotes the first waitlisted person who doesn't already hold a seat.
+  Databases with pre-existing duplicates are collapsed on server boot
+  (earliest claimed row kept, else earliest waitlisted row).
 
 ### Tools & equipment
 
@@ -163,3 +168,10 @@ well as in the UI.
 - Self-hosted Flask + SQLite app; no external services required.
 - One database file (`data.db` by default, `DB` env var overrides);
   schema migrations for new columns run automatically at startup.
+
+### Sticky session
+
+- Reloading the page returns the user to the tab and event they were on
+  (e.g. Travel & Logistics on the Sacramento event), saved in the
+  browser's local storage. A saved event that no longer exists falls
+  back to the first event; logging out clears the saved place.
