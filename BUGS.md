@@ -9,6 +9,32 @@ _None right now._
 
 ## Fixed
 
+### Build session still said lunch is provided, on an existing database (2026-10-25)
+- **Symptom:** the Build Session card still read "lunch provided for
+  full-day crew" even after the wording round, on Bruce's own database.
+- **Root cause:** the wording round fixed only the seed note, and seed
+  data only lands in fresh databases. Existing events keep whatever
+  notes were stored when they were created, and there is no UI to edit
+  an event's notes.
+- **Fix:** `_migrate` now rewrites that exact phrase to "no lunch
+  provided — bring your own" in any stored event note, on every boot.
+  Idempotent (the match disappears after the rewrite) and scoped to
+  the exact phrase — other notes, including other lunch mentions, are
+  untouched. Verified on a test database with all three cases.
+  (commit TBD)
+
+### Operation toast had wrong contrast (2026-10-25)
+- **Symptom:** the bottom operation bubble was hard to read.
+- **Root cause:** the toast background was hardcoded to dark slate
+  (`#182032`) while its text followed the theme variable: in light
+  mode that is dark text on a dark bubble (measured ~1.2:1, nearly
+  invisible), and in dark mode the bubble blended into the dark cards
+  behind it.
+- **Fix:** theme-aware toast background (`--toastbg`: lighter slate in
+  dark mode, white in light mode). Measured after the fix: 12.3:1 in
+  dark mode, 16.4:1 in light mode, and the bubble now stands out from
+  the cards behind it. (commit TBD)
+
 ### Blank page, no login: stale cached page + new script killed all JS (2026-10-25)
 - **Symptom:** header rendered but the main area was empty — no login
   form, no working button. The page title still showed the pre-rename

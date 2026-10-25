@@ -145,6 +145,15 @@ def _migrate(db):
             db.execute("ALTER TABLE users ADD COLUMN whatsapp TEXT")
         if "avatar" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
+        # 2026-10-25: build/workshop sessions do not provide lunch.
+        # The wording round fixed the seed note, but existing databases
+        # already hold the old text on their events, and there is no UI
+        # to edit an event's notes — so rewrite it where it still says
+        # so. Idempotent: after the rewrite the LIKE no longer matches.
+        db.execute("UPDATE events SET notes = REPLACE(notes,"
+                   " 'lunch provided for full-day crew',"
+                   " 'no lunch provided — bring your own')"
+                   " WHERE notes LIKE '%lunch provided for full-day crew%'")
         db.execute("CREATE TABLE IF NOT EXISTS meta ("
                    "key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         db.execute("""CREATE TABLE IF NOT EXISTS user_members (
