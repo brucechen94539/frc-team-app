@@ -1,4 +1,4 @@
-/* Team 9470 CTRL-AL-DELETE FRC Team Portal — vanilla JS frontend talking to the Flask REST API. */
+/* Team 9470 Ctrl-Alt-Defeat FRC Team Portal — vanilla JS frontend talking to the Flask REST API. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -758,7 +758,7 @@ async function renderEvents() {
   });
   const cards = [];
   for (const e of list) cards.push(await eventCard(e));
-  const types = ["meeting", "build", "competition", "outreach"];
+  const types = ["meeting", "build", "competition", "outreach", "club"];
   v.innerHTML = `
   <div class="card"><h2>Events &amp; RSVPs</h2>
   <p class="sub">Mentors create events. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote.</p>
@@ -776,7 +776,9 @@ async function renderEvents() {
   </div>
   <div class="field mo"><label>Notes</label><textarea id="e-notes"></textarea></div>
   <div class="row mo"><button class="btn" id="e-create">Create event</button>
-    <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button></div>
+    <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button>
+    <button class="btn ghost" id="e-workshop" type="button">Use workshop address</button></div>
+  <p class="sub mo hidden" id="e-clubnote">Club meets Mondays 4:00–5:05 PM and is only for BASIS Independent Fremont students.</p>
   </div>
   <div class="card"><div class="row">
     ${["all", ...types].map((t) =>
@@ -794,7 +796,25 @@ async function renderEvents() {
   const _ef = $("e-fill"); if (_ef) _ef.addEventListener("click", () => {
     $("e-title").value = "Build Session — Intake Prototype"; $("e-type").value = "build";
     $("e-date").value = "2026-11-02"; $("e-time").value = "10:00 AM";
-    $("e-loc").value = "School robotics lab, Room 12"; $("e-cap").value = "12";
+    $("e-loc").value = "4285 Santa Monica Terrace, Fremont, CA 94539"; $("e-cap").value = "12";
+  });
+  const _ew = $("e-workshop"); if (_ew) _ew.addEventListener("click", () => {
+    $("e-loc").value = "4285 Santa Monica Terrace, Fremont, CA 94539";
+  });
+  // Club defaults: Mondays 4:00 PM, only when the mentor hasn't typed
+  // anything yet; the note reminds them of the BIF-only rule.
+  const _et = $("e-type"); if (_et) _et.addEventListener("change", () => {
+    const note = $("e-clubnote");
+    const isClub = _et.value === "club";
+    if (note) note.classList.toggle("hidden", !isClub);
+    if (!isClub) return;
+    if (!$("e-time").value) $("e-time").value = "4:00 PM";
+    if (!$("e-date").value) {
+      const d = new Date();
+      d.setDate(d.getDate() + ((8 - d.getDay()) % 7));
+      const pad = (n) => String(n).padStart(2, "0");
+      $("e-date").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
   });
   const setRsvpList = (id, open) => {
     const el = $("rl-" + id);
@@ -854,15 +874,21 @@ async function eventCard(e) {
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.label || p.name)}</option>`).join("");
   // Closed events hide the picker — except for mentors, whose override
   // is how a late RSVP gets filed (the server enforces the same rule).
-  const pickerRow = (closed && !MENTOR()) ? "" : pickerOpts.length
-    ? `<div class="row">
+  // Club events hide the picker for non-BIF accounts (ME.bif comes from
+  // /api/auth/me; undefined right after login means the server is the
+  // only gate, which still rejects with a clear message).
+  const clubBlocked = e.type === "club" && !MENTOR() && ME && ME.bif === false;
+  let pickerRow;
+  if (clubBlocked) pickerRow = `<p class="sub">Club events are only for BASIS Independent Fremont students.</p>`;
+  else if (closed && !MENTOR()) pickerRow = "";
+  else if (pickerOpts.length) pickerRow = `<div class="row">
       <select id="rp-${e.id}">${opts}</select>
       <button class="btn small" data-rsvp="${e.id}" data-want="going">RSVP Going</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe">Maybe</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial">Partial (multi-day)</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant">Can't make it</button>
-    </div>${closed ? `<p class="sub">Deadline passed — mentor override: you can still RSVP for others.</p>` : ""}`
-    : `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
+    </div>${closed ? `<p class="sub">Deadline passed — mentor override: you can still RSVP for others.</p>` : ""}`;
+  else pickerRow = `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
   const scope = selfScope();
   const row = (r) => {
     const pill = r.status === "going" ? "green" : r.status === "waitlisted" ? "amber"
@@ -886,6 +912,7 @@ async function eventCard(e) {
       · ${hc.maybe} maybe · ${hc.partial} partial
       · ${hc.waitlisted} waitlisted · ${hc.cant} can't make it</div>
     ${e.notes ? `<div class="sub">${esc(e.notes)}</div>` : ""}
+    ${e.type === "club" ? `<div class="sub">Club — BASIS Independent Fremont students only · Mondays 4:00–5:05 PM.</div>` : ""}
     ${pickerRow}
     ${d.rsvps.length ? `<div class="row" style="margin-top:6px"><button class="btn small ghost" data-expand="${e.id}" data-count="${d.rsvps.length}">${openRsvpLists.has(e.id) ? "Collapse list" : `Expand list (${d.rsvps.length})`}</button></div>` : ""}
     <div id="rl-${e.id}" style="margin-top:6px" class="${openRsvpLists.has(e.id) ? "" : "hidden"}">${d.rsvps.map(row).join("") || '<span class="sub">No RSVPs yet.</span>'}</div>

@@ -89,6 +89,24 @@ and `can't make it` do not count as attending.
 ## Events & RSVPs
 
 - Mentors/admins create events (title, type, date/time, location, capacity).
+  Event types: meeting, build, competition, outreach, **club**.
+- **Club** is a weekly event for **BASIS Independent Fremont (BIF) students
+  only**, meeting **Mondays 4:00–5:05 PM** (1 session hour). Picking the Club
+  type pre-fills 4:00 PM and the next Monday when those fields are empty,
+  and every Club card carries a "BIF students only · Mondays 4:00–5:05 PM"
+  note. The server enforces the school rule: a non-mentor RSVP for a
+  member whose school is not BASIS Independent Fremont is rejected with a
+  403; non-BIF accounts see no RSVP picker on Club events, just the rule.
+  Mentors/admins keep their override (e.g. to file while a member's school
+  record is fixed). A BIF student is identified by the linked roster
+  member's school field, and `/api/auth/me` reports the account's `bif`
+  flag (true if any linked member attends BIF).
+- **Workshop location: 4285 Santa Monica Terrace, Fremont, CA 94539.**
+  Build sessions meet there; the event form has a "Use workshop address"
+  button that fills it into the location field, and the example-event
+  filler uses it too.
+- **Build and workshop sessions do not provide lunch** — bring your own.
+  (The seed build session's note says so.)
 - **Students and parents** can RSVP **for themselves only** — the picker
   shows just their own entry (a parent with several children gets one
   entry per child, labeled by child). **Only mentors/admins can RSVP for

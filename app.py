@@ -1,4 +1,4 @@
-"""Team 9470 CTRL-AL-DELETE FRC Team Portal — lightweight self-hosted app.
+"""Team 9470 Ctrl-Alt-Defeat FRC Team Portal — lightweight self-hosted app.
 
 Stack: Flask + stdlib sqlite3. Accounts live in the users table with
 scrypt-hashed passwords; login state is a signed session cookie (see README).
@@ -324,8 +324,21 @@ def _auth_gate():
     return None
 
 
+def _user_is_bif(uid):
+    """True if any roster member linked to this account attends BASIS
+    Independent Fremont — the school Club events are for."""
+    for r in q_all("SELECT m.school FROM user_members um"
+                   " JOIN members m ON m.id = um.member_id"
+                   " WHERE um.user_id=?", (uid,)):
+        if "basisindependentfremont" in _norm_name(r.get("school")):
+            return True
+    return False
+
+
 def _public_user(u):
-    return {k: u[k] for k in ("id", "name", "email", "role")}
+    d = {k: u[k] for k in ("id", "name", "email", "role")}
+    d["bif"] = _user_is_bif(u["id"])
+    return d
 
 
 @app.route("/api/auth/me")
@@ -995,7 +1008,8 @@ def api_events():
     b = request.get_json(force=True)
     if not b.get("title"):
         return err("title is required")
-    defaults = {"meeting": 2, "build": 4, "competition": 8, "outreach": 3}
+    defaults = {"meeting": 2, "build": 4, "competition": 8, "outreach": 3,
+                "club": 1}
     eid = execute(
         """INSERT INTO events (title, type, date, time, location, capacity,
            deadline, session_hours, notes, sample)
@@ -1054,6 +1068,15 @@ def api_rsvps(eid):
         if not ok:
             return err("you can only RSVP for yourself"
                        " — mentors can RSVP for others", 403)
+    # Club events are only for BASIS Independent Fremont students: the
+    # member being RSVP'd must attend BIF. Mentors/admins keep their
+    # override (e.g. to file while a member's school record is fixed).
+    if ev["type"] == "club" and u["role"] not in ("mentor", "admin"):
+        m = q_one("SELECT school FROM members WHERE id=?",
+                  (b.get("member_id"),))
+        if not m or "basisindependentfremont" not in _norm_name(m.get("school")):
+            return err("Club events are only for BASIS Independent"
+                       " Fremont students", 403)
     want = b.get("status", "going")
     # Deadline is enforced on the server, not just by hiding the buttons:
     # the UI rule (deadline < today, UTC) applies here too, and only
