@@ -14,16 +14,19 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
 <body>
 <header class="topbar">
   <h1><span class="logo-frc">Team 9470</span> CTRL-AL-DELETE FRC Team Portal</h1>
-  <button id="theme-btn" class="btn small ghost" title="Switch color scheme">☀ Light</button>
+  <div id="top-actions">
+    <button id="theme-btn" class="btn small ghost" title="Switch color scheme">☀ Light</button>
+    <button id="menu-btn" class="btn small ghost navhide" title="Menu" aria-haspopup="true" aria-expanded="false">☰</button>
+    <nav id="nav">
+      <button data-view="queue">Mentor Queue <span id="nav-pending" class="badge hidden"></span></button>
+      <button data-view="roster">Roster</button>
+      <button data-view="events">Events &amp; RSVPs</button>
+      <button data-view="tracking">Tracking</button>
+      <button data-view="travel">Travel &amp; Logistics <span id="nav-rooms" class="badge hidden"></span></button>
+      <button data-view="security">Security</button>
+    </nav>
+  </div>
   <p class="tagline">Team HQ — sign-ups · events · tracking</p>
-  <nav id="nav">
-    <button data-view="queue">Mentor Queue <span id="nav-pending" class="badge hidden"></span></button>
-    <button data-view="roster">Roster</button>
-    <button data-view="events">Events &amp; RSVPs</button>
-    <button data-view="tracking">Tracking</button>
-    <button data-view="travel">Travel &amp; Logistics <span id="nav-rooms" class="badge hidden"></span></button>
-    <button data-view="security">Security</button>
-  </nav>
   <div id="account-box" class="navhide">
     <span id="user-chip" class="pill"></span>
     <button id="logout-btn" class="btn small ghost">Log out</button>

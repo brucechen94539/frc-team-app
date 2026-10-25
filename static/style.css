@@ -259,3 +259,17 @@ pre.welcome{background:var(--fieldbg);border:1px dashed var(--accent);border-rad
 /* RSVP status pills */
 .pill.blue{background:rgba(56,130,246,.16);color:#7db3ff;border:1px solid rgba(56,130,246,.35)}
 .pill.purple{background:rgba(168,85,247,.16);color:#d0a6ff;border:1px solid rgba(168,85,247,.35)}
+
+/* ---------- hamburger menu ---------- */
+#top-actions{position:absolute;top:18px;right:20px;display:flex;gap:8px;align-items:center}
+#top-actions #theme-btn{position:static}
+#nav{
+  display:none;
+  position:absolute;top:calc(100% + 8px);right:0;z-index:50;
+  flex-direction:column;flex-wrap:nowrap;gap:4px;
+  background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:8px;min-width:220px;
+  box-shadow:0 12px 32px rgba(0,0,0,.45);
+}
+#nav.open{display:flex}
+#nav button{width:100%;text-align:left}

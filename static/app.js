@@ -56,13 +56,30 @@ function applyNav() {
     b.classList.toggle("navhide", !show);
   });
   $("account-box").classList.toggle("navhide", !ME);
+  $("menu-btn").classList.toggle("navhide", !ME);
+  closeMenu();
   if (ME) $("user-chip").textContent = ME.name + " \u00b7 " + ME.role;
 }
 
 /* ---------------- navigation ---------------- */
+function closeMenu() {
+  $("nav").classList.remove("open");
+  $("menu-btn").setAttribute("aria-expanded", "false");
+}
 document.querySelectorAll("#nav button").forEach((b) => {
-  b.addEventListener("click", () => showView(b.dataset.view));
+  b.addEventListener("click", () => { showView(b.dataset.view); closeMenu(); });
 });
+$("menu-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const open = $("nav").classList.toggle("open");
+  $("menu-btn").setAttribute("aria-expanded", open ? "true" : "false");
+});
+document.addEventListener("click", (e) => {
+  if (!$("nav").classList.contains("open")) return;
+  if (e.target.closest("#nav") || e.target.closest("#menu-btn")) return;
+  closeMenu();
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
 function showView(name) {
   if (!ME && name !== "signup" && name !== "login") name = "login";
   document.querySelectorAll("#nav button").forEach((b) =>
