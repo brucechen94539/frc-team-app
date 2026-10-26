@@ -179,6 +179,17 @@ def _migrate(db):
         db.execute("""CREATE TABLE IF NOT EXISTS team_vans (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '')""")
+        db.execute("""CREATE TABLE IF NOT EXISTS link_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            requester_name TEXT NOT NULL,
+            requester_email TEXT NOT NULL DEFAULT '',
+            requester_phone TEXT NOT NULL DEFAULT '',
+            requester_kind TEXT NOT NULL
+                CHECK (requester_kind IN ('parent','student')),
+            member_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','approved','declined')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
         # Backfill: split display names into first/last, filling only
         # columns still NULL so a later manual edit is never overwritten.
         for r in db.execute(
@@ -211,9 +222,9 @@ def _migrate(db):
         # One-time backfill, tracked by a marker row — NOT by the link
         # table's existence, because init_db creates the table from
         # schema.sql before _migrate runs, so existence can never signal
-        # "first boot". The marker is what lets a mentor's manual unlink
-        # survive later restarts. Later accounts link at creation, and
-        # members link at approval.
+        # "first boot". The marker is what keeps the backfill from
+        # re-running on later restarts. Later accounts link at creation,
+        # and members link at approval.
         backfilled = db.execute(
             "SELECT value FROM meta WHERE key='iam_links_backfilled'"
             ).fetchone() is not None
@@ -301,7 +312,8 @@ def err(msg, code=400):
 # the subteam list the form needs, and the /api/auth/* endpoints.
 # ----------------------------------------------------------------------------
 PUBLIC_API = {("GET", "/api/subteams"), ("POST", "/api/members"),
-              ("GET", "/api/members/duplicate-check")}
+              ("GET", "/api/members/duplicate-check"),
+              ("GET", "/api/roster-names"), ("POST", "/api/link-requests")}
 MENTOR_ROLES = ("mentor", "admin")
 
 
@@ -1026,12 +1038,14 @@ def api_members():
             members = q_all("SELECT * FROM members ORDER BY id")
         return jsonify(members)
     b = request.get_json(force=True)
-    for f in ("first_name", "last_name", "parent_name"):
+    # Name-only sign-ups (new-student branch) send just a name plus the
+    # signer's contact: first/last name is all the intake requires. The
+    # old full application required a parent name and four agreements;
+    # the radio-driven sign-up flow replaced it, so those are optional.
+    for f in ("first_name", "last_name"):
         if not b.get(f):
             return err(f"{f} is required")
     ag = b.get("agreements") or {}
-    if not all(ag.get(k) for k in ("conduct", "safety", "photo", "dues")):
-        return err("all four agreements must be accepted")
     mid = execute(
         f"""INSERT INTO members (status, sample, {MEMBER_COLS})
             VALUES ('pending', 0, {','.join('?' * 22)})""",
@@ -1098,6 +1112,130 @@ def api_members_duplicate_check():
             out.append({"name": f"{m['first_name']} {m['last_name']}",
                         "school": m["school"], "status": m["status"]})
     return jsonify(out)
+
+
+@app.route("/api/roster-names")
+def api_roster_names():
+    """Names-only approved roster, for the public sign-up picker: a
+    visitor picks an existing student without seeing any contact
+    details (same names-only rule as the duplicate check)."""
+    return jsonify([{"id": m["id"],
+                     "name": f"{m['first_name']} {m['last_name']}".strip()}
+                    for m in q_all(
+                        "SELECT id, first_name, last_name FROM members"
+                        " WHERE status='approved' ORDER BY last_name,"
+                        " first_name")])
+
+
+def _link_request_row(rid):
+    r = q_one("SELECT lr.*, m.first_name AS m_first, m.last_name AS m_last"
+              " FROM link_requests lr JOIN members m ON m.id = lr.member_id"
+              " WHERE lr.id=?", (rid,))
+    if r:
+        r["member_name"] = f"{r.pop('m_first')} {r.pop('m_last')}".strip()
+    return r
+
+
+@app.route("/api/link-requests", methods=["GET", "POST"])
+def api_link_requests():
+    if request.method == "GET":
+        denied = _mentor_denied()
+        if denied:
+            return denied
+        if request.args.get("status") == "all":
+            rows = q_all("SELECT lr.*, m.first_name AS m_first,"
+                         " m.last_name AS m_last FROM link_requests lr"
+                         " JOIN members m ON m.id = lr.member_id"
+                         " ORDER BY lr.id")
+        else:
+            rows = q_all("SELECT lr.*, m.first_name AS m_first,"
+                         " m.last_name AS m_last FROM link_requests lr"
+                         " JOIN members m ON m.id = lr.member_id"
+                         " WHERE lr.status='pending' ORDER BY lr.id")
+        for r in rows:
+            r["member_name"] = f"{r.pop('m_first')} {r.pop('m_last')}".strip()
+        return jsonify(rows)
+    b = request.get_json(force=True, silent=True) or {}
+    name = (b.get("requester_name") or "").strip()
+    kind = b.get("requester_kind")
+    if not name or kind not in ("parent", "student"):
+        return err("requester_name and kind (parent|student) required")
+    try:
+        mid = int(b.get("member_id"))
+    except (ValueError, TypeError):
+        return err("member_id required")
+    if not q_one("SELECT id FROM members WHERE id=? AND status='approved'",
+                 (mid,)):
+        return err("that student is not on the roster", 400)
+    # A second click (or a second visit) files no duplicate: a pending
+    # request for the same person + student is the same request.
+    dup = q_one("SELECT id FROM link_requests WHERE member_id=?"
+                " AND status='pending' AND lower(requester_name)=lower(?)",
+                (mid, name))
+    if dup:
+        row = _link_request_row(dup["id"])
+        row["duplicate"] = True
+        return jsonify(row)
+    rid = execute("INSERT INTO link_requests (requester_name,"
+                  " requester_email, requester_phone, requester_kind,"
+                  " member_id) VALUES (?,?,?,?,?)",
+                  (name, (b.get("requester_email") or "").strip(),
+                   (b.get("requester_phone") or "").strip(), kind, mid))
+    row = _link_request_row(rid)
+    row["duplicate"] = False
+    return jsonify(row), 201
+
+
+@app.route("/api/link-requests/<int:rid>/approve", methods=["POST"])
+@require_role("mentor", "admin")
+def api_link_request_approve(rid):
+    """Approve a link request: if the requester already has an account
+    (matched by email), link it now. A parent requester also fills the
+    member's blank parent contact fields, so a later account creation
+    auto-links by name even without an existing account."""
+    r = q_one("SELECT * FROM link_requests WHERE id=?", (rid,))
+    if not r:
+        return err("link request not found", 404)
+    if r["status"] != "pending":
+        return err("link request already decided")
+    linked_user = False
+    if r["requester_email"]:
+        u = q_one("SELECT id FROM users WHERE lower(email)=lower(?)",
+                  (r["requester_email"],))
+        if u:
+            execute("INSERT OR IGNORE INTO user_members"
+                    " (user_id, member_id, kind) VALUES (?,?,?)",
+                    (u["id"], r["member_id"], r["requester_kind"]))
+            linked_user = True
+    if r["requester_kind"] == "parent":
+        m = q_one("SELECT parent_name, parent_email, parent_phone"
+                  " FROM members WHERE id=?", (r["member_id"],))
+        if m:
+            if not m["parent_name"] and r["requester_name"]:
+                execute("UPDATE members SET parent_name=? WHERE id=?",
+                        (r["requester_name"], r["member_id"]))
+            if not m["parent_email"] and r["requester_email"]:
+                execute("UPDATE members SET parent_email=? WHERE id=?",
+                        (r["requester_email"], r["member_id"]))
+            if not m["parent_phone"] and r["requester_phone"]:
+                execute("UPDATE members SET parent_phone=? WHERE id=?",
+                        (r["requester_phone"], r["member_id"]))
+    execute("UPDATE link_requests SET status='approved' WHERE id=?", (rid,))
+    row = _link_request_row(rid)
+    row["linked_user"] = linked_user
+    return jsonify(row)
+
+
+@app.route("/api/link-requests/<int:rid>/decline", methods=["POST"])
+@require_role("mentor", "admin")
+def api_link_request_decline(rid):
+    r = q_one("SELECT * FROM link_requests WHERE id=?", (rid,))
+    if not r:
+        return err("link request not found", 404)
+    if r["status"] != "pending":
+        return err("link request already decided")
+    execute("UPDATE link_requests SET status='declined' WHERE id=?", (rid,))
+    return jsonify(_link_request_row(rid))
 
 
 @app.route("/api/members/bulk-approve", methods=["POST"])

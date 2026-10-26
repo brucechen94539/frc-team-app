@@ -9,6 +9,23 @@ _None right now._
 
 ## Fixed
 
+### Logged-out sign-up submit yanked the visitor to the login page (2026-10-26)
+- **Symptom:** after submitting a sign-up (link request or name-only
+  application) as a logged-out visitor, the page jumped to login
+  instead of staying on the sign-up form.
+- **Root cause:** both submit handlers call `refreshBadges()`, which
+  fetched `/api/events` unconditionally. Logged out, that returns 401,
+  and the shared `api()` helper redirects to login on any non-auth 401
+  — even though badge fetching is best-effort and badges only exist on
+  nav buttons that logged-in users see. The old full-application form
+  had the same latent bug (it also called `refreshBadges()`).
+- **Fix:** `refreshBadges()` returns early when there is no logged-in
+  user (`!ME`). Logged-in behavior is unchanged (badges still refresh
+  after login and after queue actions). Verified in the browser: a
+  logged-out link request and name-only submit both stay on the
+  sign-up form.
+  (commit: this round's push)
+
 ### Build session still said lunch is provided, on an existing database (2026-10-25)
 - **Symptom:** the Build Session card still read "lunch provided for
   full-day crew" even after the wording round, on Bruce's own database.

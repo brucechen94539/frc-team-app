@@ -399,7 +399,7 @@ async function renderProfile() {
       catch (e) {}
     }
     return `<div class="sub">${esc(l.member_name)} · ${esc(l.kind === "self" ? "you" : "your child")}${l.school ? ` · ${esc(l.school)}` : ""}${subs ? ` · ${esc(subs)}` : ""}</div>`;
-  }).join("") || `<div class="sub">No roster links yet — a mentor can link this account in Team accounts.</div>`;
+  }).join("") || `<div class="sub">No roster links yet — links form automatically when a mentor approves your sign-up or creates your account.</div>`;
   // Same first-word/rest split the server backfill uses, for accounts
   // whose name parts are still null (e.g. the setup account).
   const nameParts = (u.name || "").trim().split(/\s+/);
@@ -599,6 +599,11 @@ async function doLogout() {
 }
 
 async function refreshBadges() {
+  // Badges live on nav buttons that only logged-in users see. Without
+  // this guard, a logged-out call (e.g. after a public sign-up submit)
+  // hits a login-gated route, gets a 401, and api() redirects the
+  // visitor off the sign-up page to login.
+  if (!ME) return;
   try {
     if (MENTOR()) {
       const pending = await GET("/api/members?status=pending");
@@ -624,160 +629,110 @@ async function refreshBadges() {
 }
 
 /* ---------------- sign-up form ---------------- */
-function prefSelect(i) {
-  const opts = ['<option value="">— pick —</option>'] +
-    SUBTEAMS.map((s) => `<option>${esc(s.name)}</option>`).join("");
-  return `<div class="field"><label>Preference ${i + 1}</label>
-    <select id="pref${i}">${opts}</select></div>`;
-}
-
-/* Gray out subteams already picked in another preference slot, so the
-   same subteam can't be ranked twice. Recomputed from scratch on change,
-   which also re-enables a subteam when a slot is changed or cleared. */
-function syncPrefs() {
-  const picks = [0, 1, 2].map((i) => $("pref" + i).value);
-  [0, 1, 2].forEach((i) => {
-    const sel = $("pref" + i);
-    [...sel.options].forEach((o) => {
-      o.disabled = !!o.value && o.value !== sel.value && picks.includes(o.value);
-    });
-  });
-}
-
 async function renderSignup() {
   const v = $("view-signup");
   v.innerHTML = `
   <div class="card"><h2>Team Sign-Up</h2>
-  <p class="sub">Applications go to the Mentor Queue for approval. Fields marked * are required.</p>
   <p class="sub">Already have an account? <a href="#" id="su-login">Log in</a></p>
   <div class="err" id="su-err"></div>
-  <h3>Student</h3>
+  <div class="field"><label>I am signing up as</label><div class="row">
+    <label class="checkline"><input type="radio" name="su-role" value="parent" checked> Parent / Guardian</label>
+    <label class="checkline"><input type="radio" name="su-role" value="student"> Student</label>
+  </div></div>
+  <div class="field"><label>Is the student already on the team?</label><div class="row">
+    <label class="checkline"><input type="radio" name="su-student" value="existing"> Yes — pick them below</label>
+    <label class="checkline"><input type="radio" name="su-student" value="new" checked> No — new to the team</label>
+  </div></div>
+  <h3>Your contact info</h3>
   <div class="grid2">
-    <div class="field"><label>First name *</label><input id="f-first"></div>
-    <div class="field"><label>Last name *</label><input id="f-last"></div>
-    <div class="field"><label>School</label><input id="f-school"></div>
-    <div class="field"><label>Grade</label><input id="f-grade" placeholder="9"></div>
-    <div class="field"><label>Experience</label><select id="f-exp">
-      <option>Rookie</option><option>Returning</option><option>Veteran</option></select></div>
-    <div class="field"><label>Student email</label><input id="f-semail" type="email"></div>
-    <div class="field"><label>Student phone</label><input id="f-sphone"></div>
+    <div class="field"><label>Your full name *</label><input id="su-name"></div>
+    <div class="field"><label>Your email</label><input id="su-email" type="email"></div>
+    <div class="field"><label>Your phone</label><input id="su-phone"></div>
   </div>
-  <h3>Parent / Guardian</h3>
-  <div class="grid2">
-    <div class="field"><label>Name *</label><input id="f-pname"></div>
-    <div class="field"><label>Relationship</label><input id="f-rel" placeholder="Mother / Father / Guardian"></div>
-    <div class="field"><label>Email</label><input id="f-pemail" type="email"></div>
-    <div class="field"><label>Phone</label><input id="f-pphone"></div>
-    <div class="field"><label>WhatsApp number <span class="hint">(if different from phone)</span></label>
-      <input id="f-wa" placeholder="+1 (510) 555-0100"></div>
-    <div class="field"><label>&nbsp;</label><label class="checkline">
-      <input type="checkbox" id="f-waok"> Send me team updates on WhatsApp</label></div>
+  <div id="su-existing" style="display:none">
+    <h3>Pick the student</h3>
+    <div class="field"><label>Existing student *</label><select id="su-member"><option value="">Loading students…</option></select></div>
+    <p class="sub">This sends a link request to the mentor queue. A mentor approves it, and the account is then linked to that student.</p>
+    <div class="row" style="margin-top:12px"><button class="btn" id="su-confirm">Confirm link request</button></div>
   </div>
-  <h3>Emergency contact &amp; medical</h3>
-  <div class="grid2">
-    <div class="field"><label>Emergency contact name</label><input id="f-emname"></div>
-    <div class="field"><label>Emergency contact phone</label><input id="f-emphone"></div>
-  </div>
-  <div class="field"><label>Medical notes</label>
-    <textarea id="f-medical" placeholder="Allergies, inhaler, etc."></textarea></div>
-  <h3>Subteam preferences (ranked top 3)</h3>
-  <div class="grid3">${prefSelect(0)}${prefSelect(1)}${prefSelect(2)}</div>
-  <h3>Subteam Discovery Chats</h3>
-  <p class="sub">No-commitment exploration — pick chats to learn what each subteam does.
-    Separate from your ranked preferences above.</p>
-  <div class="chatgrid" id="f-chats"></div>
-  <div class="field" style="margin-top:8px"><label>Discovery sessions</label>
-    <select id="f-dsess"><option>Invite me</option><option>Chats only</option>
-    <option>Already decided</option></select></div>
-  <h3>Notes</h3>
-  <div class="field"><textarea id="f-notes" placeholder="Anything the mentors should know?"></textarea></div>
-  <h3>Agreements *</h3>
-  <label class="checkline"><input type="checkbox" id="ag-conduct"> I agree to the team code of conduct.</label>
-  <label class="checkline"><input type="checkbox" id="ag-safety"> I agree to follow all shop safety rules.</label>
-  <label class="checkline"><input type="checkbox" id="ag-photo"> I consent to photos/video at team events.</label>
-  <label class="checkline"><input type="checkbox" id="ag-dues"> I acknowledge team dues/fees.</label>
-  <div class="row" style="margin-top:12px">
-    <button class="btn" id="f-submit">Submit application</button>
-    <button class="btn ghost" id="f-fill" type="button">Fill with example details</button>
+  <div id="su-new">
+    <h3>New student</h3>
+    <div class="field"><label>Student's full name *</label><input id="su-student-name" placeholder="First Last"></div>
+    <p class="sub">Just the name for now — this goes to the mentor queue, and a mentor completes the details and the linkage.</p>
+    <div class="row" style="margin-top:12px"><button class="btn" id="su-submit">Submit to mentor queue</button></div>
   </div></div>`;
-  $("f-chats").innerHTML = SUBTEAMS.map((s) => `
-    <label class="chatcard"><input type="checkbox" value="${esc(s.name)}">
-    <b>${esc(s.name)}</b><br><span class="sub">${esc(s.blurb)}</span></label>`).join("");
-  document.querySelectorAll("#f-chats input").forEach((cb) =>
-    cb.addEventListener("change", () =>
-      cb.closest(".chatcard").classList.toggle("sel", cb.checked)));
-  [0, 1, 2].forEach((i) => $("pref" + i).addEventListener("change", syncPrefs));
-  syncPrefs();
+  const syncBranch = () => {
+    const ex = document.querySelector('input[name="su-student"]:checked').value === "existing";
+    $("su-existing").style.display = ex ? "" : "none";
+    $("su-new").style.display = ex ? "none" : "";
+  };
+  document.querySelectorAll('input[name="su-student"]').forEach((r) =>
+    r.addEventListener("change", syncBranch));
+  syncBranch();
+  try {
+    const names = await GET("/api/roster-names");
+    $("su-member").innerHTML = names.length
+      ? `<option value="">Pick a student…</option>` +
+        names.map((n) => `<option value="${n.id}">${esc(n.name)}</option>`).join("")
+      : `<option value="">No students on the roster yet</option>`;
+  } catch (e) { $("su-member").innerHTML = `<option value="">Could not load students</option>`; }
   $("su-login").addEventListener("click", (e) => { e.preventDefault(); showView("login"); });
-  $("f-submit").addEventListener("click", submitApplication);
-  $("f-fill").addEventListener("click", () => {
-    const set = (id, v) => { $(id).value = v; };
-    set("f-first", "Riley"); set("f-last", "Nguyen");
-    set("f-school", "BASIS Independent Fremont"); set("f-grade", "9");
-    $("f-exp").value = "Rookie";
-    set("f-semail", "riley.nguyen@example.com");
-    set("f-pname", "Minh Nguyen"); set("f-rel", "Father");
-    set("f-pemail", "minh.nguyen@example.com"); set("f-pphone", "(510) 555-0174");
-    set("f-wa", "+1 (510) 555-0174"); $("f-waok").checked = true;
-    set("f-emname", "Minh Nguyen"); set("f-emphone", "(510) 555-0174");
-    $("pref0").value = "Programming"; $("pref1").value = "Media"; $("pref2").value = "Outreach";
-    syncPrefs();
-    document.querySelectorAll("#f-chats input").forEach((cb) => {
-      cb.checked = ["Programming", "Media", "Outreach"].includes(cb.value);
-      cb.closest(".chatcard").classList.toggle("sel", cb.checked);
-    });
-    ["ag-conduct", "ag-safety", "ag-photo", "ag-dues"].forEach((id) => { $(id).checked = true; });
-  });
+  $("su-confirm").addEventListener("click", submitLinkRequest);
+  $("su-submit").addEventListener("click", submitNameOnly);
 }
 
-async function submitApplication() {
-  const val = (id) => $(id).value.trim();
+async function submitLinkRequest() {
   const errBox = $("su-err");
   errBox.textContent = "";
-  const ag = {conduct: $("ag-conduct").checked, safety: $("ag-safety").checked,
-              photo: $("ag-photo").checked, dues: $("ag-dues").checked};
-  if (!val("f-first") || !val("f-last") || !val("f-pname"))
-    return void (errBox.textContent = "Student first/last name and parent name are required.");
-  if (!Object.values(ag).every(Boolean))
-    return void (errBox.textContent = "All four agreements must be accepted.");
-  // Duplicate warning, not a block: if this name already exists on the
-  // roster, show it once and let a second click submit anyway (a check
-  // failure never blocks sign-up). The warned name is remembered so
-  // editing the name re-arms the check.
-  const who = val("f-first") + " " + val("f-last");
-  if (dupWarnedFor !== who) {
-    try {
-      const dups = await GET(`/api/members/duplicate-check?first_name=${encodeURIComponent(val("f-first"))}&last_name=${encodeURIComponent(val("f-last"))}`);
-      if (dups.length) {
-        errBox.innerHTML = `This looks like an existing member: ${dups.map((d) => `${esc(d.name)} (${esc(d.school || "no school")} · ${d.status})`).join(", ")}. If this is a different person, click Submit again.`;
-        dupWarnedFor = who;
-        return;
-      }
-    } catch (e) { /* ignore: a failed check must not block sign-up */ }
-  }
-  const prefs = [...new Set([0, 1, 2].map((i) => $("pref" + i).value).filter(Boolean))];
-  const chats = [...document.querySelectorAll("#f-chats input:checked")].map((c) => c.value);
+  const role = document.querySelector('input[name="su-role"]:checked').value;
+  const name = $("su-name").value.trim();
+  const mid = $("su-member").value;
+  if (!name) return void (errBox.textContent = "Your full name is required.");
+  if (!mid) return void (errBox.textContent = "Pick an existing student.");
   try {
-    const m = await POST("/api/members", {
-      first_name: val("f-first"), last_name: val("f-last"), school: val("f-school"),
-      grade: val("f-grade"), experience: $("f-exp").value,
-      student_email: val("f-semail"), student_phone: val("f-sphone"),
-      parent_name: val("f-pname"), relationship: val("f-rel"),
-      parent_email: val("f-pemail"), parent_phone: val("f-pphone"),
-      parent_whatsapp: val("f-wa"), whatsapp_opt_in: $("f-waok").checked,
-      em_name: val("f-emname"), em_phone: val("f-emphone"), medical: val("f-medical"),
-      prefs, discovery_chats: chats, discovery_sessions: $("f-dsess").value,
-      notes: val("f-notes"), agreements: ag,
-    });
+    const r = await POST("/api/link-requests", {
+      requester_name: name, requester_email: $("su-email").value.trim(),
+      requester_phone: $("su-phone").value.trim(), requester_kind: role,
+      member_id: +mid});
+    toast(r.duplicate ? "That link request is already waiting for a mentor."
+                       : "Link request sent — waiting for a mentor to approve it.");
+    renderSignup();
+    refreshBadges();
+  } catch (e) { errBox.textContent = e.message; }
+}
+
+const NAME_ONLY_NOTE = "Name-only sign-up — mentor to complete details and linkage.";
+
+async function submitNameOnly() {
+  const errBox = $("su-err");
+  errBox.textContent = "";
+  const role = document.querySelector('input[name="su-role"]:checked').value;
+  const full = $("su-student-name").value.trim();
+  const sp = full.indexOf(" ");
+  if (sp < 0 || !full.slice(sp + 1).trim())
+    return void (errBox.textContent = "The student's full name (first and last) is required.");
+  const first = full.slice(0, sp), last = full.slice(sp + 1).trim();
+  const contact = {name: $("su-name").value.trim(),
+                   email: $("su-email").value.trim(),
+                   phone: $("su-phone").value.trim()};
+  const body = {first_name: first, last_name: last, notes: NAME_ONLY_NOTE};
+  if (role === "parent") {
+    body.parent_name = contact.name; body.parent_email = contact.email;
+    body.parent_phone = contact.phone;
+  } else {
+    body.student_email = contact.email; body.student_phone = contact.phone;
+  }
+  try {
+    const m = await POST("/api/members", body);
     toast(`Application ${m.code} submitted — pending mentor review.`);
     renderSignup();
     refreshBadges();
   } catch (e) { errBox.textContent = e.message; }
 }
 
+
 /* ---------------- mentor queue ---------------- */
 const STATUS_PILL = {pending: "amber", approved: "green", waitlisted: "gray", declined: "red"};
-let dupWarnedFor = "";
 
 async function renderQueue() {
   const v = $("view-queue");
@@ -803,6 +758,10 @@ async function renderQueue() {
     <span class="sub" id="q-sel-count"></span>
   </div></div>` : ""}
   <div id="q-list">${members.map(queueCard).join("") || '<div class="card">Nothing here.</div>'}</div>
+  <div class="card"><h3>Link requests</h3>
+    <p class="sub">Sign-ups for existing students — approve to link the requester to that student, decline to drop the request.</p>
+    <div id="lr-list"><span class="sub">Loading…</span></div>
+  </div>
   <div class="card"><h3>Team accounts</h3>
     <p class="sub">Logins for mentors, parents and students \u2014 separate from sign-up applications. Only mentors/admins see this.</p>
     <div id="ac-list"><span class="sub">Loading\u2026</span></div>
@@ -865,6 +824,35 @@ async function renderQueue() {
   v.querySelectorAll("[data-act]").forEach((b) =>
     b.addEventListener("click", () => queueAction(b)));
   renderAccounts();
+  renderLinkRequests();
+}
+
+async function renderLinkRequests() {
+  const el = $("lr-list");
+  if (!el) return;
+  let reqs = [];
+  try { reqs = await GET("/api/link-requests"); }
+  catch (e) { el.innerHTML = '<span class="sub">Could not load link requests.</span>'; return; }
+  el.innerHTML = reqs.map((r) => `<div class="row" style="margin:4px 0;flex-wrap:wrap">
+    <span><b>${esc(r.requester_name)}</b> (${esc(r.requester_kind)}) → <b>${esc(r.member_name)}</b></span>
+    <span class="sub">${esc(r.requester_email)} ${esc(r.requester_phone)}</span>
+    <span style="flex:1"></span>
+    <button class="btn small" data-lr-approve="${r.id}">Approve</button>
+    <button class="btn small ghost" data-lr-decline="${r.id}">Decline</button>
+  </div>`).join("") || '<span class="sub">No pending link requests.</span>';
+  el.querySelectorAll("[data-lr-approve]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        const r = await POST(`/api/link-requests/${b.dataset.lrApprove}/approve`, {});
+        toast(`Link approved${r.linked_user ? " — account linked." : " — recorded for a future account."}`);
+        renderLinkRequests(); renderAccounts();
+      } catch (e) { toast("Error: " + e.message); }
+    }));
+  el.querySelectorAll("[data-lr-decline]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try { await POST(`/api/link-requests/${b.dataset.lrDecline}/decline`, {}); toast("Link request declined."); renderLinkRequests(); }
+      catch (e) { toast("Error: " + e.message); }
+    }));
 }
 
 async function renderAccounts() {
@@ -947,6 +935,7 @@ function queueCard(m) {
     <div class="row"><b>${esc(m.first_name)} ${esc(m.last_name)}</b>
       <span class="pill ${STATUS_PILL[m.status]}">${m.status}</span>
       ${m.sample ? '<span class="pill gray">sample</span>' : ""}
+      ${m.notes && m.notes.includes("Name-only sign-up") ? '<span class="pill amber">name-only</span>' : ""}
       <span class="sub">${esc(m.code || "")} · submitted ${esc(m.submitted_at.slice(0, 10))}</span>
     </div>
     <div class="sub">${esc(m.school || "")} · Grade ${esc(m.grade || "")} · ${esc(m.experience || "")}
@@ -1125,7 +1114,8 @@ function selfScope() {
   if (!ME) return {student: null, parents: []};
   // Identity links from /api/auth/me are authoritative. Name matching
   // is only a fallback for accounts with no links yet (a name the
-  // backfill couldn't match — a mentor fixes it in Team accounts).
+  // backfill couldn't match; links form automatically at signup
+  // approval or account creation).
   if (ME.links && ME.links.length) {
     const self = ME.links.find((l) => l.kind === "self");
     return {student: self ? self.member_id : null,

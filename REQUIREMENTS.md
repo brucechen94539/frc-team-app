@@ -147,24 +147,35 @@ and `can't make it` do not count as attending.
 
 ## Team sign-ups
 
-- Public application form: student info, parent/guardian info including a
-  **WhatsApp number + opt-in** for WhatsApp updates, agreements.
-- Students rank their **top-3 subteam preferences** out of 8 subteams; the
-  same subteam cannot be picked twice.
+- The sign-up form starts with two choices: **I am signing up as**
+  (Parent / Student) and **is the student already on the team?**
+  (Existing / New). Your contact info (name, email, phone) is shared
+  across both branches.
+- **Existing student:** a dropdown lists the approved roster
+  (`GET /api/roster-names`, public, names only — no contact details),
+  and Confirm files a **link request** (`POST /api/link-requests`,
+  public) that waits in the Mentor Queue. A mentor approves or declines
+  it from the Link requests card. Approving links the requester to the
+  student at once if they already have an account (matched by email);
+  a parent requester also fills the member's blank parent contact
+  fields, so a later account creation auto-links by name. A pending
+  request for the same person + student is the same request (no
+  duplicates from double-clicks). Listing and deciding link requests
+  is mentor/admin-only (`GET /api/link-requests`,
+  `POST /api/link-requests/<id>/approve|decline`).
+- **New student:** only the student's full name is collected. That
+  files a name-only application in the Mentor Queue (marked
+  "name-only", with a note saying the mentor completes it); the mentor
+  does the final linkage — filling in details and approving the
+  student onto the roster, after which account auto-linking works by
+  name as usual. Intake requires only first + last name
+  (`POST /api/members` no longer requires a parent name or agreements).
 - Every application goes to the **mentor approval queue**; a mentor approves,
   waitlists, or declines each one. Approved students join the roster.
   **Bulk approve** covers the import case: on the pending filter, mentors
   tick members (or Select all) and approve them in one call
   (`POST /api/members/bulk-approve`); only still-pending members change,
   and each approval runs the same account auto-link as a single approval.
-- The sign-up form warns on a likely duplicate instead of silently filing
-  a second application: if the name matches an existing member, the form
-  shows that member (name, school, status) and submits on a second click.
-  The check (`GET /api/members/duplicate-check`) is names-only — no
-  contact details leave the server — and a failed check never blocks
-  sign-up.
-- New students are offered optional **Subteam Discovery Chats** with subteam
-  captains.
 
 ## CSV export & import (roster and events)
 

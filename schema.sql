@@ -205,3 +205,18 @@ CREATE TABLE IF NOT EXISTS team_vans (
   name  TEXT NOT NULL,
   notes TEXT NOT NULL DEFAULT ''
 );
+
+-- Link requests: a sign-up for an EXISTING student. The signer has no
+-- account yet, so Confirm files a request here instead of linking at
+-- once; a mentor approves (or declines) it from the Mentor Queue.
+CREATE TABLE IF NOT EXISTS link_requests (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  requester_name  TEXT NOT NULL,
+  requester_email TEXT NOT NULL DEFAULT '',
+  requester_phone TEXT NOT NULL DEFAULT '',
+  requester_kind  TEXT NOT NULL CHECK (requester_kind IN ('parent','student')),
+  member_id       INTEGER NOT NULL,
+  status          TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (status IN ('pending','approved','declined')),
+  created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
