@@ -313,8 +313,6 @@ async function renderProfile() {
   catch (e) { v.innerHTML = `<div class="card"><p class="sub">Could not load your profile.</p></div>`; return; }
   const u = me.user;
   if (!u) { showView("login"); return; }
-  let totp = null;
-  try { totp = await GET("/api/auth/totp-status"); } catch (e) {}
   const links = (u.links || []).map((l) => {
     let subs = l.assigned_subteam || "";
     if (!subs && l.prefs) {
@@ -360,18 +358,6 @@ async function renderProfile() {
     <button class="btn" id="pf-save">Save</button>
     <h3 style="margin-top:16px">Team &amp; school</h3>
     ${links}
-  </div>
-  <div class="card"><h3>Security</h3>
-    <div class="field" style="max-width:320px"><label>Current password</label><input id="pf-cur" type="password" autocomplete="current-password"></div>
-    <div class="field" style="max-width:320px"><label>New password (8+ characters)</label><input id="pf-new" type="password" autocomplete="new-password"></div>
-    <div class="field" style="max-width:320px"><label>Confirm new password</label><input id="pf-new2" type="password" autocomplete="new-password"></div>
-    ${totp && totp.enabled ? `<div class="field" style="max-width:320px"><label>Authenticator code (required to change password)</label><input id="pf-code" inputmode="numeric" autocomplete="one-time-code"></div>` : ""}
-    <button class="btn" id="pf-pw">Change password</button>
-    <div style="margin-top:16px">
-      <p><span class="pill ${totp && totp.enabled ? "green" : ""}">Two-factor: ${totp && totp.enabled ? "ON" : "OFF"}</span>
-      ${totp && totp.enabled ? `<span class="sub">${totp.backup_codes_remaining} recovery codes left.</span>` : ""}</p>
-      <button class="btn ghost" id="pf-2fa">Manage two-factor authentication</button>
-    </div>
   </div>`;
   $("pf-file").addEventListener("change", async (e) => {
     const f = e.target.files[0]; if (!f) return;
@@ -405,21 +391,37 @@ async function renderProfile() {
       toast("Profile saved.");
     } catch (err) { toast("Error: " + err.message); }
   });
-  $("pf-pw").addEventListener("click", async () => {
-    const cur = $("pf-cur").value, nw = $("pf-new").value, nw2 = $("pf-new2").value;
+}
+
+/* Password change lives on the Security tab, not the Profile page:
+   same payload as before (current/new, plus code when 2FA is on). */
+function securityPasswordCard(enabled) {
+  return `
+  <div class="card"><h2>Password</h2>
+    <div class="field" style="max-width:320px"><label>Current password</label><input id="sc-cur" type="password" autocomplete="current-password"></div>
+    <div class="field" style="max-width:320px"><label>New password (8+ characters)</label><input id="sc-new" type="password" autocomplete="new-password"></div>
+    <div class="field" style="max-width:320px"><label>Confirm new password</label><input id="sc-new2" type="password" autocomplete="new-password"></div>
+    ${enabled ? `<div class="field" style="max-width:320px"><label>Authenticator code (required to change password)</label><input id="sc-code" inputmode="numeric" autocomplete="one-time-code"></div>` : ""}
+    <button class="btn" id="sc-pw">Change password</button>
+  </div>`;
+}
+function bindSecurityPassword() {
+  const btn = $("sc-pw");
+  if (!btn) return;
+  btn.addEventListener("click", async () => {
+    const cur = $("sc-cur").value, nw = $("sc-new").value, nw2 = $("sc-new2").value;
     if (nw !== nw2) { toast("New passwords don't match."); return; }
     if (nw.length < 8) { toast("New password must be 8+ characters."); return; }
     const body = {current: cur, new: nw};
-    const codeEl = $("pf-code");
+    const codeEl = $("sc-code");
     if (codeEl) body.code = codeEl.value;
     try {
       await POST("/api/auth/password", body);
-      $("pf-cur").value = $("pf-new").value = $("pf-new2").value = "";
+      $("sc-cur").value = $("sc-new").value = $("sc-new2").value = "";
       if (codeEl) codeEl.value = "";
       toast("Password changed.");
     } catch (err) { toast("Error: " + err.message); }
   });
-  $("pf-2fa").addEventListener("click", () => showView("security"));
 }
 
 async function renderSecurity() {
@@ -436,7 +438,9 @@ async function renderSecurity() {
       they are the only way back in if you lose your phone.</p>
       <button class="btn" id="t-setup">Set up authenticator app</button>
       <div id="t-setup-area" style="margin-top:12px"></div>
-    </div>`;
+    </div>
+    ${securityPasswordCard(false)}`;
+    bindSecurityPassword();
     $("t-setup").addEventListener("click", async () => {
       try {
         const s = await POST("/api/auth/totp-setup", {});
@@ -480,7 +484,9 @@ async function renderSecurity() {
       <button class="btn ghost" id="t-regen">Regenerate recovery codes</button>
     </div>
     <div id="t-out" style="margin-top:12px"></div>
-  </div>`;
+  </div>
+  ${securityPasswordCard(true)}`;
+  bindSecurityPassword();
   $("t-disable").addEventListener("click", async () => {
     try {
       await POST("/api/auth/totp-disable", {code: $("t-code").value.trim()});

@@ -42,16 +42,14 @@ and `can't make it` do not count as attending.
 ## Profile & avatars
 
 - Every account has a **Profile** view (via the avatar menu's General
-  link, all roles; no menu entry) with three cards:
-  **Profile** (avatar + name + role + email + member since),
+  link, all roles; no menu entry) with two cards:
+  **Profile** (avatar + name + role + email + member since) and
   **General** (editable first/last name, phone, and WhatsApp; a student
   also edits school and grade on their own roster record; email is
   read-only since it is the login identity; linked roster entries with
   kind, school, and subteam — assigned subteam, else ranked
-  preferences), and **Security**
-  (change password with the current password plus, when 2FA is on, a
-  current authenticator code or unused recovery code; 2FA status; and a
-  button into the full two-factor setup/reset tab).
+  preferences). Password change and two-factor management live on the
+  **Security** tab, not on the Profile page.
 - **Avatars are backend-backed, not browser-local.** Photos live in a
   `users.avatar` column as a data URL (fresh DBs get the column from
   `schema.sql`; older DBs gain it from `_migrate`). The frontend resizes
@@ -96,7 +94,8 @@ and `can't make it` do not count as attending.
 - Any user can opt in from the **Security** tab: scan the QR code with
   **Google Authenticator or Apple Passwords** (both use the standard TOTP
   protocol, so one implementation serves both) or enter the key by hand,
-  then confirm with a code from the app.
+  then confirm with a code from the app. The Security tab also holds
+  **password change** (current password, new password, confirm).
 - Login becomes two steps for users with 2FA on: password first, then the
   6-digit code (or a recovery code). The session stays half-open until
   the code verifies. Codes accept ±1 time step for clock skew.
