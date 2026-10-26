@@ -363,11 +363,14 @@ def api_auth_me():
         return jsonify({"user": None, "setup_required": setup_required()})
     user = _public_user(u)
     user["links"] = _user_links_map([u["id"]]).get(u["id"], [])
-    full = q_one("SELECT phone, whatsapp, created_at FROM users"
-                 " WHERE id=?", (u["id"],))
+    full = q_one("SELECT phone, whatsapp, created_at, first_name,"
+                 " last_name, totp_enabled FROM users WHERE id=?", (u["id"],))
     user["phone"] = full["phone"]
     user["whatsapp"] = full["whatsapp"]
     user["member_since"] = full["created_at"]
+    user["first_name"] = full["first_name"]
+    user["last_name"] = full["last_name"]
+    user["totp_enabled"] = bool(full["totp_enabled"])
     return jsonify({"user": user, "setup_required": setup_required()})
 
 
@@ -437,6 +440,26 @@ def api_auth_password():
     new = b.get("new") or ""
     if len(new) < 8:
         return err("new password must be 8+ characters")
+    # Hardening: when 2FA is on, changing the password needs the second
+    # factor too — otherwise a stolen password alone would let an
+    # attacker lock the owner out. Same throttle, window, and recovery
+    # fallback as login; the gate runs after the length check so a
+    # recovery code is never spent on a request that would fail anyway.
+    if full.get("totp_enabled"):
+        if _totp_throttled(u["id"]):
+            return err("too many failed codes — try again in 10 minutes", 429)
+        code = (b.get("code") or "").strip()
+        if not code:
+            return err("two-factor code required", 403)
+        secret = _totp_decrypt(full["totp_secret"]) if full.get("totp_secret") else None
+        ok = bool(secret) and totp_check(secret, code)
+        if not ok:
+            digest = _hash_code(code.replace(" ", "").replace("-", "").upper())
+            ok = _consume_recovery_code(u["id"], digest)
+        if not ok:
+            _totp_fail(u["id"])
+            return err("that code did not match", 403)
+        _totp_clear(u["id"])
     execute("UPDATE users SET password_hash=? WHERE id=?",
             (generate_password_hash(new), u["id"]))
     return jsonify({"ok": True})
@@ -505,20 +528,39 @@ def api_user_avatar(uid):
 
 @app.route("/api/auth/profile", methods=["POST"])
 def api_auth_profile():
-    """Self-service contact update: phone and WhatsApp only. Name and
-    email are the login identity and stay mentor-managed; anything else
-    in the body is ignored, and absent keys keep their current value."""
+    """Self-service profile update: phone, WhatsApp, first/last name,
+    and — for your own roster record — school and grade. Email stays
+    mentor-managed; absent keys keep their current value, and anything
+    else in the body is ignored. School/grade only land when the
+    account has a roster link of kind 'self' (in practice a student);
+    without one they are ignored, not an error."""
     u = current_user()
     if not u:
         return err("login required", 401)
     b = request.get_json(force=True, silent=True) or {}
-    cur = q_one("SELECT phone, whatsapp FROM users WHERE id=?", (u["id"],))
+    cur = q_one("SELECT name, phone, whatsapp, first_name, last_name"
+                " FROM users WHERE id=?", (u["id"],))
     phone = ((b.get("phone") if "phone" in b else cur["phone"]) or "").strip()[:40]
     whatsapp = ((b.get("whatsapp") if "whatsapp" in b else cur["whatsapp"]) or "").strip()[:40]
-    execute("UPDATE users SET phone=?, whatsapp=? WHERE id=?",
-            (phone, whatsapp, u["id"]))
-    return jsonify(q_one("SELECT id, name, email, phone, whatsapp, role"
-                         " FROM users WHERE id=?", (u["id"],)))
+    first = ((b.get("first_name") if "first_name" in b else cur["first_name"]) or "").strip()[:60]
+    last = ((b.get("last_name") if "last_name" in b else cur["last_name"]) or "").strip()[:60]
+    name = (first + " " + last).strip() or cur["name"]
+    execute("UPDATE users SET phone=?, whatsapp=?, first_name=?,"
+            " last_name=?, name=? WHERE id=?",
+            (phone, whatsapp, first, last, name, u["id"]))
+    if "school" in b or "grade" in b:
+        link = q_one("SELECT member_id FROM user_members"
+                     " WHERE user_id=? AND kind='self'", (u["id"],))
+        if link:
+            mcur = q_one("SELECT school, grade FROM members WHERE id=?",
+                         (link["member_id"],))
+            school = ((b.get("school") if "school" in b else mcur["school"]) or "").strip()[:120]
+            grade = ((b.get("grade") if "grade" in b else mcur["grade"]) or "").strip()[:20]
+            execute("UPDATE members SET school=?, grade=? WHERE id=?",
+                    (school, grade, link["member_id"]))
+    return jsonify(q_one("SELECT id, name, first_name, last_name, email,"
+                         " phone, whatsapp, role FROM users WHERE id=?",
+                         (u["id"],)))
 
 
 # ----------------------------------------------------------------------------
@@ -839,11 +881,11 @@ def api_subteams():
 
 
 def _user_links_map(user_ids=None):
-    """{user_id: [{member_id, kind, member_name, school,
+    """{user_id: [{member_id, kind, member_name, school, grade,
     assigned_subteam, prefs}]} for the link table."""
     sql = ("SELECT um.user_id, um.member_id, um.kind,"
            " m.first_name AS m_first, m.last_name AS m_last,"
-           " m.school, m.assigned_subteam, m.prefs"
+           " m.school, m.grade, m.assigned_subteam, m.prefs"
            " FROM user_members um JOIN members m ON m.id = um.member_id")
     args = ()
     if user_ids is not None:
@@ -855,7 +897,7 @@ def _user_links_map(user_ids=None):
             "member_id": l["member_id"], "kind": l["kind"],
             "member_name": ((l["m_first"] or "") + " "
                              + (l["m_last"] or "")).strip(),
-            "school": l["school"],
+            "school": l["school"], "grade": l["grade"],
             "assigned_subteam": l["assigned_subteam"],
             "prefs": l["prefs"]})
     return out

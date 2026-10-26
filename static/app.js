@@ -149,23 +149,139 @@ function closeMenu() {
   $("nav").classList.remove("open");
   $("menu-btn").setAttribute("aria-expanded", "false");
 }
+
+/* Avatar overlay: the account's quick surface. General (name, contact,
+   and — for a student — school and grade), Security (2FA status,
+   password change, and a way into the full Security tab), and Logout
+   with a YES/NO confirm instead of an instant exit. The header avatar
+   is the only entry point; the full Profile view stays one tap away
+   inside it. */
+function closeAvatarMenu() {
+  const am = $("avatar-menu");
+  if (am) am.classList.add("hidden");
+}
+function toggleAvatarMenu() {
+  const am = $("avatar-menu");
+  if (!am) { showView("profile"); return; }  // old saved page: fall back
+  if (!ME) return;
+  if (!am.classList.contains("hidden")) { closeAvatarMenu(); return; }
+  closeMenu();
+  renderAvatarMenu(false);
+  am.classList.remove("hidden");
+}
+async function renderAvatarMenu(confirmLogout) {
+  const am = $("avatar-menu");
+  if (!am || !ME) return;
+  // ME after a login carries only id/name/email/role (the login
+  // response), so refresh it here — the overlay needs links, contact
+  // fields, and name parts, all of which /me provides.
+  try { ME = (await GET("/api/auth/me")).user; renderHeaderAvatar(); } catch (e) {}
+  if (!ME) { closeAvatarMenu(); return; }
+  let totp = null;
+  try { totp = await GET("/api/auth/totp-status"); } catch (e) {}
+  const selfLink = (ME.links || []).find((l) => l.kind === "self");
+  const student = ME.role === "student" && selfLink;
+  // Accounts created before the first/last backfill (e.g. the setup
+  // account on a fresh boot) can carry null parts; fall back to the
+  // same first-word/rest split the server backfill uses.
+  const nameParts = (ME.name || "").trim().split(/\s+/);
+  const firstName = ME.first_name ?? nameParts[0] ?? "";
+  const lastName = ME.last_name ?? nameParts.slice(1).join(" ") ?? "";
+  am.innerHTML = `
+  <div class="row" style="align-items:center;gap:10px">
+    ${avatarHTML(ME.name, "avatar-sm")}
+    <div><div style="font-weight:700">${esc(ME.name)}</div>
+    <div class="sub">${esc(ME.role)} · ${esc(ME.email)}</div></div>
+  </div>
+  <h4>General</h4>
+  <div class="field"><label>First name</label><input id="am-first" value="${esc(firstName)}"></div>
+  <div class="field"><label>Last name</label><input id="am-last" value="${esc(lastName)}"></div>
+  <div class="field"><label>Phone</label><input id="am-phone" value="${esc(ME.phone || "")}"></div>
+  <div class="field"><label>WhatsApp</label><input id="am-wa" value="${esc(ME.whatsapp || "")}"></div>
+  ${student ? `
+  <div class="field"><label>School</label><input id="am-school" value="${esc(selfLink.school || "")}"></div>
+  <div class="field"><label>Grade</label><input id="am-grade" value="${esc(selfLink.grade || "")}"></div>` : ""}
+  <div class="err" id="am-err"></div>
+  <div class="menu-foot">
+    <button class="btn" id="am-save">Save</button>
+    <button class="btn ghost" id="am-full">View full profile</button>
+  </div>
+  <h4>Security</h4>
+  <p><span class="pill ${totp && totp.enabled ? "green" : ""}">Two-factor: ${totp && totp.enabled ? "ON" : "OFF"}</span>
+  ${totp && totp.enabled ? `<span class="sub">${totp.backup_codes_remaining} recovery codes left.</span>` : ""}</p>
+  <div class="field"><label>Current password</label><input id="am-cur" type="password" autocomplete="current-password"></div>
+  <div class="field"><label>New password (8+ characters)</label><input id="am-new" type="password" autocomplete="new-password"></div>
+  <div class="field"><label>Confirm new password</label><input id="am-new2" type="password" autocomplete="new-password"></div>
+  ${totp && totp.enabled ? `<div class="field"><label>Authenticator code (required to change password)</label><input id="am-code" inputmode="numeric" autocomplete="one-time-code"></div>` : ""}
+  <div class="err" id="am-pwerr"></div>
+  <div class="menu-foot">
+    <button class="btn" id="am-pw">Change password</button>
+    <button class="btn ghost" id="am-2fa">Manage two-factor authentication</button>
+  </div>
+  <h4>Log out</h4>
+  ${confirmLogout ? `
+  <p>Log out?</p>
+  <div class="menu-foot">
+    <button class="btn" id="am-yes">YES</button>
+    <button class="btn ghost" id="am-no">NO</button>
+  </div>` : `
+  <button class="btn ghost" id="am-logout">Log out</button>`}`;
+  $("am-save").addEventListener("click", async () => {
+    const body = {first_name: $("am-first").value, last_name: $("am-last").value,
+      phone: $("am-phone").value, whatsapp: $("am-wa").value};
+    if (student) { body.school = $("am-school").value; body.grade = $("am-grade").value; }
+    try {
+      await POST("/api/auth/profile", body);
+      ME = (await GET("/api/auth/me")).user;
+      renderHeaderAvatar();
+      renderAvatarMenu(false);
+      toast("Profile saved.");
+    } catch (err) { $("am-err").textContent = "Error: " + err.message; }
+  });
+  $("am-full").addEventListener("click", () => showView("profile"));
+  $("am-pw").addEventListener("click", async () => {
+    const cur = $("am-cur").value, nw = $("am-new").value, nw2 = $("am-new2").value;
+    if (nw !== nw2) { $("am-pwerr").textContent = "New passwords don't match."; return; }
+    if (nw.length < 8) { $("am-pwerr").textContent = "New password must be 8+ characters."; return; }
+    const body = {current: cur, new: nw};
+    const codeEl = $("am-code");
+    if (codeEl) body.code = codeEl.value;
+    try {
+      await POST("/api/auth/password", body);
+      $("am-cur").value = $("am-new").value = $("am-new2").value = "";
+      if (codeEl) codeEl.value = "";
+      toast("Password changed.");
+    } catch (err) { $("am-pwerr").textContent = "Error: " + err.message; }
+  });
+  $("am-2fa").addEventListener("click", () => showView("security"));
+  if (confirmLogout) {
+    $("am-yes").addEventListener("click", () => doLogout());
+    $("am-no").addEventListener("click", () => renderAvatarMenu(false));
+  } else {
+    $("am-logout").addEventListener("click", () => renderAvatarMenu(true));
+  }
+}
 document.querySelectorAll("#nav button").forEach((b) => {
   b.addEventListener("click", () => { showView(b.dataset.view); closeMenu(); });
 });
 const _ua = $("user-avatar");
-if (_ua) _ua.addEventListener("click", () => showView("profile"));
+if (_ua) _ua.addEventListener("click", (e) => { e.stopPropagation(); toggleAvatarMenu(); });
 $("menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
+  closeAvatarMenu();
   const open = $("nav").classList.toggle("open");
   $("menu-btn").setAttribute("aria-expanded", open ? "true" : "false");
 });
 document.addEventListener("click", (e) => {
-  if (!$("nav").classList.contains("open")) return;
-  if (e.target.closest("#nav") || e.target.closest("#menu-btn")) return;
-  closeMenu();
+  if ($("nav").classList.contains("open") &&
+      !e.target.closest("#nav") && !e.target.closest("#menu-btn")) closeMenu();
+  const am = $("avatar-menu");
+  if (am && !am.classList.contains("hidden") &&
+      !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeMenu(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); } });
 function showView(name) {
+  closeAvatarMenu();
   if (!ME && name !== "signup" && name !== "login") name = "login";
   currentView = name;
   savePlace();
@@ -301,6 +417,7 @@ async function renderProfile() {
     <div class="field" style="max-width:320px"><label>Current password</label><input id="pf-cur" type="password" autocomplete="current-password"></div>
     <div class="field" style="max-width:320px"><label>New password (8+ characters)</label><input id="pf-new" type="password" autocomplete="new-password"></div>
     <div class="field" style="max-width:320px"><label>Confirm new password</label><input id="pf-new2" type="password" autocomplete="new-password"></div>
+    ${totp && totp.enabled ? `<div class="field" style="max-width:320px"><label>Authenticator code (required to change password)</label><input id="pf-code" inputmode="numeric" autocomplete="one-time-code"></div>` : ""}
     <button class="btn" id="pf-pw">Change password</button>
     <div style="margin-top:16px">
       <p><span class="pill ${totp && totp.enabled ? "green" : ""}">Two-factor: ${totp && totp.enabled ? "ON" : "OFF"}</span>
@@ -336,9 +453,13 @@ async function renderProfile() {
     const cur = $("pf-cur").value, nw = $("pf-new").value, nw2 = $("pf-new2").value;
     if (nw !== nw2) { toast("New passwords don't match."); return; }
     if (nw.length < 8) { toast("New password must be 8+ characters."); return; }
+    const body = {current: cur, new: nw};
+    const codeEl = $("pf-code");
+    if (codeEl) body.code = codeEl.value;
     try {
-      await POST("/api/auth/password", {current: cur, new: nw});
+      await POST("/api/auth/password", body);
       $("pf-cur").value = $("pf-new").value = $("pf-new2").value = "";
+      if (codeEl) codeEl.value = "";
       toast("Password changed.");
     } catch (err) { toast("Error: " + err.message); }
   });
@@ -1686,7 +1807,6 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents) {
   ME = me.user;
   SETUP = !!me.setup_required;
   if (ME) await loadAvatar();
-  $("logout-btn").addEventListener("click", doLogout);
   const themeBtn = $("theme-btn");
   const applyTheme = (t) => {
     document.documentElement.setAttribute("data-theme", t);

@@ -41,14 +41,15 @@ and `can't make it` do not count as attending.
 
 ## Profile & avatars
 
-- Every account has a **Profile** view (via the header avatar, all
-  roles; no menu entry) with three cards:
+- Every account has a **Profile** view (via the avatar overlay's View
+  full profile, all roles; no menu entry) with three cards:
   **Profile** (avatar + name + role + email + member since),
   **General** (editable phone and WhatsApp; email is read-only since it
   is the login identity; linked roster entries with kind, school, and
   subteam — assigned subteam, else ranked preferences), and **Security**
-  (change password with the current password, 2FA status, and a button
-  into the full two-factor setup/reset tab).
+  (change password with the current password plus, when 2FA is on, a
+  current authenticator code or unused recovery code; 2FA status; and a
+  button into the full two-factor setup/reset tab).
 - **Avatars are backend-backed, not browser-local.** Photos live in a
   `users.avatar` column as a data URL (fresh DBs get the column from
   `schema.sql`; older DBs gain it from `_migrate`). The frontend resizes
@@ -57,22 +58,35 @@ and `can't make it` do not count as attending.
   initials** on a deterministic pastel circle (same initials/colors as
   the assignee chips). The header shows only the avatar, at the upper
   right (no name pill; hovering the avatar shows name and role), and
-  tapping it opens Profile.
+  tapping it opens the **avatar overlay**: **General** (first/last
+  name, phone, WhatsApp; a student also gets school and grade for
+  their own roster record), **Security** (2FA status, password change,
+  button into the full Security tab), and **Logout** with a YES/NO
+  confirm — never an instant exit. There is no header logout button;
+  logout lives only in the overlay. The full Profile view is one tap
+  inside the overlay (View full profile).
 - **Avatar API (all self-only by construction — the routes take no user
   id, they act on the logged-in account):** `GET/POST/DELETE
   /api/auth/avatar`. Uploads must be PNG, JPEG, GIF, or WebP data URLs
   under 500KB with valid base64, else 400; logged-out requests get 401.
   `GET /api/users/<uid>/avatar` serves another account's photo to its
   owner or a mentor/admin, 403 for anyone else, 404 when no photo.
-  `POST /api/auth/profile` updates only phone/WhatsApp (absent keys keep
-  their value; name/email in the body are ignored).
+  `POST /api/auth/profile` updates phone, WhatsApp, first/last name
+  (the display name is recomputed from them), and — for the caller's
+  own roster record — school and grade (ignored when the account has
+  no self link); absent keys keep their value; email in the body is
+  ignored.
 - **Role checks for this round (retest after any refactor):** own upload
   200 and round-trips; another student's photo 403, mentor's 200; own
   delete 200 then 404; contact edit updates phone/WhatsApp but never
-  email; password change with the right current password 200 (new login
-  works, old login 401), wrong current password 403; logged-out upload
-  401; non-image and oversized uploads 400; pre-avatar DB gains the
-  column on boot.
+  email; first/last edit updates the display name; a student's
+  school/grade edit updates only their own roster record, and
+  school/grade without a self link are ignored; password change with
+  the right current password 200 (new login works, old login 401),
+  wrong current password 403; with 2FA on, missing code 403, wrong code
+  403, right code 200, recovery code 200 and spent on use; logged-out
+  upload 401; non-image and oversized uploads 400; pre-avatar DB gains
+  the column on boot.
 
 ## Two-factor authentication (TOTP, opt-in)
 
@@ -83,6 +97,13 @@ and `can't make it` do not count as attending.
 - Login becomes two steps for users with 2FA on: password first, then the
   6-digit code (or a recovery code). The session stays half-open until
   the code verifies. Codes accept ±1 time step for clock skew.
+- **Password change also requires the second factor when 2FA is on:**
+  the current password plus a current authenticator code (or an unused
+  recovery code, consumed on use) — a stolen password alone cannot lock
+  the owner out. Same 5-failure 10-minute throttle as login, checked
+  after the new-password length rule so a recovery code is never spent
+  on a request that would fail anyway. Without 2FA, password change
+  works exactly as before (no code needed).
 - Scanning the QR code alone does **not** turn 2FA on — it stays off,
   and login remains password-only, until the confirm code is verified
   with Verify & enable. Clicking setup again generates a fresh secret,

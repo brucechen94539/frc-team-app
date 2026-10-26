@@ -285,3 +285,14 @@ pre.welcome{background:var(--fieldbg);border:1px dashed var(--accent);border-rad
 .avatar img{width:100%;height:100%;object-fit:cover;display:block}
 .avatar-sm{width:30px;height:30px;font-size:13px;cursor:pointer}
 .avatar-lg{width:96px;height:96px;font-size:34px}
+
+/* Avatar overlay: quick profile, security, and logout. Anchored to the
+   top-right button row like the menu dropdown. */
+.avatar-menu{position:absolute;top:calc(100% + 8px);right:0;z-index:60;
+  width:340px;max-width:92vw;max-height:calc(100vh - 90px);overflow-y:auto;
+  background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:14px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.avatar-menu h4{margin:16px 0 8px;font-size:12px;text-transform:uppercase;
+  letter-spacing:.12em;color:var(--muted)}
+.avatar-menu h4:first-of-type{margin-top:12px}
+.avatar-menu .menu-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
