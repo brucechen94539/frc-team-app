@@ -9,10 +9,12 @@ Env:  DB=<path>   SQLite file (default: data.db next to this file)
       PORT=<port>  default 5000
 """
 import base64
+import csv
 import datetime
 import functools
 import hashlib
 import hmac
+import io
 import json
 import os
 import secrets
@@ -1138,6 +1140,434 @@ def api_roster_csv():
     return app.response_class(buf.getvalue(), mimetype="text/csv",
                               headers={"Content-Disposition":
                                        "attachment; filename=roster.csv"})
+
+
+@app.route("/api/events.csv")
+@require_role("mentor", "admin")
+def api_events_csv():
+    """Events export: the same columns the events import accepts, so an
+    event list round-trips through a spreadsheet."""
+    events = q_all("SELECT * FROM events ORDER BY date, id")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Code", "Title", "Type", "Date", "Time", "Location",
+                "Capacity", "Deadline", "Session hours", "Notes"])
+    for e in events:
+        w.writerow([e["code"], e["title"], e["type"], e["date"], e["time"],
+                    e["location"],
+                    "" if e["capacity"] is None else e["capacity"],
+                    e["deadline"], e["session_hours"], e["notes"]])
+    return app.response_class(buf.getvalue(), mimetype="text/csv",
+                              headers={"Content-Disposition":
+                                       "attachment; filename=events.csv"})
+
+
+# ----------------------------------------------------------------------------
+# CSV import (mentor/admin) — the counterpart to CSV export, so a roster
+# or event list built in a spreadsheet (or exported from last year) can
+# be loaded without retyping it in the UI.
+#
+# Flow: upload a file -> preview parses and validates every row WITHOUT
+# writing anything -> the mentor confirms -> confirm re-validates and
+# applies. Rows match existing records by Code: a matching code updates
+# that record, a new or blank code creates one. New members start
+# pending (they land in the Mentor Queue); new events are live at once,
+# like mentor-created ones. On update, only columns present in the file
+# overwrite, and a blank cell in a present column clears that field —
+# except session_hours, where blank keeps the old value. Rows with
+# errors are reported and skipped, never half-written. Previewed rows
+# are echoed back by the client for confirm, so confirm never trusts
+# an id from the client: it re-resolves every row by code.
+# ----------------------------------------------------------------------------
+_CSV_MAX_BYTES = 1024 * 1024
+_CSV_MAX_ROWS = 2000
+_EVENT_TYPES = ("meeting", "build", "competition", "outreach", "club")
+_EVENT_HOUR_DEFAULTS = {"meeting": 2, "build": 4, "competition": 8,
+                        "outreach": 3, "club": 1}
+
+
+def _csv_read(file_storage):
+    """(normalized headers, [(line, {header: value})]) for an upload.
+    Raises ValueError on an unreadable, oversized, or headerless file.
+    Blank lines are skipped; values are stripped."""
+    raw = file_storage.read(_CSV_MAX_BYTES + 1)
+    if len(raw) > _CSV_MAX_BYTES:
+        raise ValueError("file is too large (1MB max)")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise ValueError("file must be UTF-8 CSV")
+    reader = csv.DictReader(io.StringIO(text))
+    if not reader.fieldnames:
+        raise ValueError("no header row found")
+    headers = []
+    for h in reader.fieldnames:
+        h = (h or "").strip().lower()
+        if h and h not in headers:
+            headers.append(h)
+    if not headers:
+        raise ValueError("no header row found")
+    rows = []
+    for line_no, raw_row in enumerate(reader, start=2):
+        if raw_row is None:
+            continue
+        vals = {}
+        for k, v in raw_row.items():
+            if k is None:
+                continue
+            vals[k.strip().lower()] = (v or "").strip() if isinstance(v, str) else ""
+        if not any(vals.values()):
+            continue
+        rows.append((line_no, vals))
+        if len(rows) > _CSV_MAX_ROWS:
+            raise ValueError("too many rows (2000 max)")
+    return headers, rows
+
+
+def _yes_no(vals, col):
+    raw = (vals.get(col) or "").strip().lower()
+    if raw in ("yes", "true", "1", "y"):
+        return 1, None
+    if raw in ("no", "false", "0", "n", ""):
+        return 0, None
+    return None, f"{col} must be yes or no"
+
+
+def _date_or_none(vals, col, errors):
+    raw = (vals.get(col) or "").strip()
+    if not raw:
+        return None
+    try:
+        datetime.datetime.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        errors.append(f"{col} must be YYYY-MM-DD")
+        return None
+    return raw
+
+
+def _validate_roster_row(vals, seen_codes, subteam_names):
+    """(normalized data, [errors], present DB columns) for one row."""
+    errors = []
+    first = (vals.get("first name") or "").strip()
+    last = (vals.get("last name") or "").strip()
+    student = vals.get("student") or ""
+    if not first and not last and student:
+        parts = student.split(None, 1)
+        first = parts[0] if parts else ""
+        last = parts[1] if len(parts) > 1 else ""
+    if not first:
+        errors.append("first name is required")
+    if not last:
+        errors.append("last name is required")
+    code = (vals.get("code") or "").strip()
+    if code:
+        if code in seen_codes:
+            errors.append(f"duplicate code {code} in file")
+        seen_codes.add(code)
+    for col in ("student email", "parent email"):
+        em = (vals.get(col) or "").strip()
+        if em and "@" not in em:
+            errors.append(f"{col} is not an email")
+    sub = (vals.get("subteam") or "").strip()
+    if sub and sub not in subteam_names:
+        errors.append(f"unknown subteam {sub}")
+    opt_in, opt_err = _yes_no(vals, "whatsapp updates")
+    if opt_err:
+        errors.append(opt_err)
+    chats = [c.strip() for c in (vals.get("discovery chats") or "").split(",")]
+    chats = [c for c in chats if c]
+    data = {"code": code, "first_name": first, "last_name": last,
+            "school": (vals.get("school") or "").strip(),
+            "grade": (vals.get("grade") or "").strip(),
+            "assigned_subteam": sub or None,
+            "student_email": (vals.get("student email") or "").strip(),
+            "student_phone": (vals.get("student phone") or "").strip(),
+            "parent_name": (vals.get("parent") or "").strip(),
+            "parent_email": (vals.get("parent email") or "").strip(),
+            "parent_phone": (vals.get("parent phone") or "").strip(),
+            "parent_whatsapp": (vals.get("parent whatsapp") or "").strip(),
+            "whatsapp_opt_in": opt_in if opt_in is not None else 0,
+            "discovery_chats": chats}
+    present = set()
+    if "first name" in vals or "student" in vals:
+        present.add("first_name")
+    if "last name" in vals or "student" in vals:
+        present.add("last_name")
+    for header, col in (("school", "school"), ("grade", "grade"),
+                        ("subteam", "assigned_subteam"),
+                        ("student email", "student_email"),
+                        ("student phone", "student_phone"),
+                        ("parent", "parent_name"),
+                        ("parent email", "parent_email"),
+                        ("parent phone", "parent_phone"),
+                        ("parent whatsapp", "parent_whatsapp"),
+                        ("whatsapp updates", "whatsapp_opt_in"),
+                        ("discovery chats", "discovery_chats")):
+        if header in vals:
+            present.add(col)
+    action = "create"
+    if code and q_one("SELECT id FROM members WHERE code=?", (code,)):
+        action = "update"
+    return data, errors, present, action
+
+
+def _apply_roster_row(data, present):
+    existing = None
+    if data["code"]:
+        existing = q_one("SELECT * FROM members WHERE code=?", (data["code"],))
+    if existing:
+        sets, args = [], []
+        for col in ("first_name", "last_name", "school", "grade",
+                    "assigned_subteam", "student_email", "student_phone",
+                    "parent_name", "parent_email", "parent_phone",
+                    "parent_whatsapp", "whatsapp_opt_in"):
+            if col in present:
+                sets.append(f"{col}=?")
+                args.append(data[col])
+        if "discovery_chats" in present:
+            sets.append("discovery_chats=?")
+            args.append(json.dumps(data["discovery_chats"]))
+        if sets:
+            execute(f"UPDATE members SET {', '.join(sets)} WHERE id=?",
+                    (*args, existing["id"]))
+        return "updated"
+    mid = execute(
+        """INSERT INTO members (status, sample, first_name, last_name,
+           school, grade, assigned_subteam, student_email, student_phone,
+           parent_name, parent_email, parent_phone, parent_whatsapp,
+           whatsapp_opt_in, discovery_chats)
+           VALUES ('pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (data["first_name"], data["last_name"], data["school"],
+         data["grade"], data["assigned_subteam"], data["student_email"],
+         data["student_phone"], data["parent_name"], data["parent_email"],
+         data["parent_phone"], data["parent_whatsapp"],
+         data["whatsapp_opt_in"], json.dumps(data["discovery_chats"])))
+    execute("UPDATE members SET code=? WHERE id=?",
+            (data["code"] or f"FRC-{100 + mid}", mid))
+    return "created"
+
+
+def _validate_event_row(vals, seen_codes):
+    errors = []
+    title = (vals.get("title") or "").strip()
+    if not title:
+        errors.append("title is required")
+    typ = (vals.get("type") or "meeting").strip().lower()
+    if typ not in _EVENT_TYPES:
+        errors.append(f"unknown type {typ}")
+    date = _date_or_none(vals, "date", errors)
+    deadline = _date_or_none(vals, "deadline", errors)
+    time_raw = (vals.get("time") or "").strip()
+    import re as _re
+    if time_raw and not _re.match(r"^\d{1,2}:\d{2}(\s*[APap][Mm])?$", time_raw):
+        errors.append("time must look like 6:00 PM or 18:00")
+    cap_raw = (vals.get("capacity") or "").strip()
+    capacity = None
+    if cap_raw:
+        try:
+            capacity = int(cap_raw)
+            if capacity < 0:
+                raise ValueError
+        except ValueError:
+            errors.append("capacity must be a whole number 0 or higher")
+            capacity = None
+    hours_raw = (vals.get("session hours") or "").strip()
+    hours = None
+    if hours_raw:
+        try:
+            hours = float(hours_raw)
+            if hours < 0:
+                raise ValueError
+        except ValueError:
+            errors.append("session hours must be a number 0 or higher")
+            hours = None
+    code = (vals.get("code") or "").strip()
+    if code:
+        if code in seen_codes:
+            errors.append(f"duplicate code {code} in file")
+        seen_codes.add(code)
+    data = {"code": code, "title": title, "type": typ, "date": date,
+            "time": time_raw or None,
+            "location": (vals.get("location") or "").strip(),
+            "capacity": capacity, "deadline": deadline,
+            "session_hours": hours,
+            "notes": (vals.get("notes") or "").strip()}
+    present = set()
+    for header, col in (("title", "title"), ("type", "type"),
+                        ("date", "date"), ("time", "time"),
+                        ("location", "location"), ("capacity", "capacity"),
+                        ("deadline", "deadline"),
+                        ("session hours", "session_hours"),
+                        ("notes", "notes")):
+        if header in vals:
+            present.add(col)
+    action = "create"
+    if code and q_one("SELECT id FROM events WHERE code=?", (code,)):
+        action = "update"
+    return data, errors, present, action
+
+
+def _apply_event_row(data, present):
+    existing = None
+    if data["code"]:
+        existing = q_one("SELECT * FROM events WHERE code=?", (data["code"],))
+    if existing:
+        sets, args = [], []
+        for col in ("title", "type", "date", "time", "location",
+                    "capacity", "deadline", "notes"):
+            if col in present:
+                sets.append(f"{col}=?")
+                args.append(data[col])
+        if "session_hours" in present and data["session_hours"] is not None:
+            sets.append("session_hours=?")
+            args.append(data["session_hours"])
+        if sets:
+            execute(f"UPDATE events SET {', '.join(sets)} WHERE id=?",
+                    (*args, existing["id"]))
+        return "updated"
+    hours = data["session_hours"]
+    if hours is None:
+        hours = _EVENT_HOUR_DEFAULTS.get(data["type"], 2)
+    eid = execute(
+        """INSERT INTO events (title, type, date, time, location, capacity,
+           deadline, session_hours, notes, sample)
+           VALUES (?,?,?,?,?,?,?,?,?,0)""",
+        (data["title"], data["type"], data["date"], data["time"],
+         data["location"], data["capacity"], data["deadline"], hours,
+         data["notes"]))
+    execute("UPDATE events SET code=? WHERE id=?",
+            (data["code"] or f"EVT-{200 + eid}", eid))
+    return "created"
+
+
+def _csv_preview(kind):
+    """Shared preview step: parse + validate, write nothing."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return err("no file uploaded", 400)
+    try:
+        headers, rows = _csv_read(f)
+    except ValueError as e:
+        return err(str(e), 400)
+    known = {"roster": {"code", "student", "first name", "last name",
+                        "school", "grade", "subteam", "student email",
+                        "student phone", "parent", "parent email",
+                        "parent phone", "parent whatsapp",
+                        "whatsapp updates", "discovery chats"},
+             "events": {"code", "title", "type", "date", "time",
+                        "location", "capacity", "deadline",
+                        "session hours", "notes"}}[kind]
+    if not (set(headers) & known):
+        return err("no recognized columns — is this the right file?"
+                   " Export CSV gives you the template.", 400)
+    if kind == "roster":
+        from seed import SUBTEAM_BLURBS
+        subteams = set(SUBTEAM_BLURBS)
+    seen = set()
+    out = []
+    for line_no, vals in rows:
+        if kind == "roster":
+            data, errors, present, action = _validate_roster_row(
+                vals, seen, subteams)
+        else:
+            data, errors, present, action = _validate_event_row(vals, seen)
+        out.append({"line": line_no, "action": action, "errors": errors,
+                    "data": data, "present": sorted(present)})
+    summary = {"total": len(out),
+               "valid": sum(1 for r in out if not r["errors"]),
+               "create": sum(1 for r in out if not r["errors"] and r["action"] == "create"),
+               "update": sum(1 for r in out if not r["errors"] and r["action"] == "update"),
+               "error_rows": sum(1 for r in out if r["errors"])}
+    return jsonify({"kind": kind, "headers": headers, "rows": out,
+                    "summary": summary})
+
+
+def _csv_confirm(kind):
+    """Shared confirm step: re-validate the previewed rows and apply
+    the valid ones, reporting per-row results."""
+    b = request.get_json(force=True, silent=True) or {}
+    incoming = b.get("rows") or []
+    if not isinstance(incoming, list) or not incoming:
+        return err("no rows to import", 400)
+    if len(incoming) > _CSV_MAX_ROWS:
+        return err("too many rows (2000 max)", 400)
+    if kind == "roster":
+        from seed import SUBTEAM_BLURBS
+        subteams = set(SUBTEAM_BLURBS)
+    seen = set()
+    created = updated = 0
+    skipped = []
+    for i, row in enumerate(incoming):
+        data = row.get("data") or {}
+        present = set(row.get("present") or [])
+        # Re-validate from the echoed data, not from preview's verdict:
+        # rebuild a vals dict the validators understand.
+        if kind == "roster":
+            vals = {"code": data.get("code") or "",
+                    "first name": data.get("first_name") or "",
+                    "last name": data.get("last_name") or "",
+                    "school": data.get("school") or "",
+                    "grade": data.get("grade") or "",
+                    "subteam": data.get("assigned_subteam") or "",
+                    "student email": data.get("student_email") or "",
+                    "student phone": data.get("student_phone") or "",
+                    "parent": data.get("parent_name") or "",
+                    "parent email": data.get("parent_email") or "",
+                    "parent phone": data.get("parent_phone") or "",
+                    "parent whatsapp": data.get("parent_whatsapp") or "",
+                    "whatsapp updates": "yes" if data.get("whatsapp_opt_in") else "no",
+                    "discovery chats": ", ".join(data.get("discovery_chats") or [])}
+            norm, errors, _, _ = _validate_roster_row(vals, seen, subteams)
+        else:
+            vals = {"code": data.get("code") or "",
+                    "title": data.get("title") or "",
+                    "type": data.get("type") or "",
+                    "date": data.get("date") or "",
+                    "time": data.get("time") or "",
+                    "location": data.get("location") or "",
+                    "capacity": "" if data.get("capacity") is None else str(data["capacity"]),
+                    "deadline": data.get("deadline") or "",
+                    "session hours": "" if data.get("session_hours") is None else str(data["session_hours"]),
+                    "notes": data.get("notes") or ""}
+            norm, errors, _, _ = _validate_event_row(vals, seen)
+        if errors:
+            skipped.append({"line": row.get("line", i + 2), "errors": errors})
+            continue
+        # Apply the normalized row, but only for columns the original
+        # file actually contained.
+        if kind == "roster":
+            result = _apply_roster_row(norm, present)
+        else:
+            result = _apply_event_row(norm, present)
+        if result == "created":
+            created += 1
+        else:
+            updated += 1
+    return jsonify({"created": created, "updated": updated, "skipped": skipped})
+
+
+@app.route("/api/roster/import/preview", methods=["POST"])
+@require_role("mentor", "admin")
+def api_roster_import_preview():
+    return _csv_preview("roster")
+
+
+@app.route("/api/roster/import/confirm", methods=["POST"])
+@require_role("mentor", "admin")
+def api_roster_import_confirm():
+    return _csv_confirm("roster")
+
+
+@app.route("/api/events/import/preview", methods=["POST"])
+@require_role("mentor", "admin")
+def api_events_import_preview():
+    return _csv_preview("events")
+
+
+@app.route("/api/events/import/confirm", methods=["POST"])
+@require_role("mentor", "admin")
+def api_events_import_confirm():
+    return _csv_confirm("events")
 
 
 # ----------------------------------------------------------------------------

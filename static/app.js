@@ -872,6 +872,65 @@ async function queueAction(b) {
 }
 
 /* ---------------- roster ---------------- */
+/* Shared CSV import panel: file -> preview (no writes) -> confirm.
+   kind is "roster" or "events". The panel renders the file picker,
+   the preview table with per-row problems, the confirm button, and
+   the result report. Previewed rows are echoed back for confirm. */
+function bindCsvImport(panel, kind) {
+  if (!panel) return;
+  const up = kind;
+  panel.innerHTML = `
+  <div class="row" style="margin-top:10px">
+    <input type="file" id="csv-file-${kind}" accept=".csv,text/csv">
+    <button class="btn small" id="csv-prev-${kind}">Preview</button>
+  </div>
+  <p class="sub">Upload a CSV in the export format (Export CSV gives you the template). Rows match by Code: a matching code updates, a new or blank code creates. New members start pending in the Mentor Queue. Nothing is written until you confirm.</p>
+  <div id="csv-preview-${kind}"></div>
+  <div id="csv-result-${kind}"></div>`;
+  let previewed = null;
+  panel.querySelector(`#csv-prev-${kind}`).addEventListener("click", async () => {
+    const file = panel.querySelector(`#csv-file-${kind}`).files[0];
+    if (!file) { toast("Choose a CSV file first."); return; }
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res = await fetch(`/api/${up}/import/preview`, {method: "POST", body: fd});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Preview failed");
+      previewed = data;
+      const s = data.summary;
+      const shown = data.rows.slice(0, 200);
+      const bad = data.rows.filter((r) => r.errors.length);
+      panel.querySelector(`#csv-preview-${kind}`).innerHTML = `
+      <p><b>Preview:</b> ${s.total} rows — ${s.create} to create, ${s.update} to update, ${s.error_rows} with errors${data.rows.length > 200 ? " (showing first 200)" : ""}.</p>
+      ${bad.length ? `<div class="err">${bad.map((r) => `Row ${r.line}: ${esc(r.errors.join("; "))}`).join("<br>")}</div>` : ""}
+      <table><tr><th>Row</th><th>Action</th><th>Name / Title</th><th>Problems</th></tr>
+      ${shown.map((r) => `<tr><td>${r.line}</td><td>${r.action}</td><td>${esc(kind === "roster" ? `${r.data.first_name} ${r.data.last_name}`.trim() : r.data.title)}</td><td>${r.errors.length ? esc(r.errors.join("; ")) : "—"}</td></tr>`).join("")}</table>
+      ${s.valid ? `<div class="row" style="margin-top:10px"><button class="btn" id="csv-confirm-${kind}">Import ${s.valid} row${s.valid === 1 ? "" : "s"}</button></div>` : `<p class="sub">Nothing valid to import — fix the errors and preview again.</p>`}`;
+      const cb = panel.querySelector(`#csv-confirm-${kind}`);
+      if (cb) cb.addEventListener("click", async () => {
+        try {
+          const rows = previewed.rows.filter((r) => !r.errors.length);
+          const res2 = await fetch(`/api/${up}/import/confirm`, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({rows})});
+          const out = await res2.json();
+          if (!res2.ok) throw new Error(out.error || "Import failed");
+          const resultHtml = `
+          <p><b>Imported:</b> ${out.created} created, ${out.updated} updated, ${out.skipped.length} skipped.</p>
+          ${out.skipped.length ? `<div class="err">${out.skipped.map((s2) => `Row ${s2.line}: ${esc(s2.errors.join("; "))}`).join("<br>")}</div>` : ""}`;
+          // Re-render first (it rebuilds the panel), then show the
+          // result in the fresh panel so it survives the re-render.
+          if (kind === "roster") await renderRoster(); else await renderEvents();
+          const np = $(kind === "roster" ? "r-import-panel" : "e-import-panel");
+          if (np) {
+            np.classList.remove("hidden");
+            np.querySelector(`#csv-result-${kind}`).innerHTML = resultHtml;
+          }
+        } catch (err) { toast("Error: " + err.message); }
+      });
+    } catch (err) { toast("Error: " + err.message); }
+  });
+}
+
 async function renderRoster() {
   const v = $("view-roster");
   rosterCache = await GET("/api/roster");
@@ -890,7 +949,9 @@ async function renderRoster() {
       ${subs.map((s) => `<option ${rosterSubteam === s ? "selected" : ""}>${esc(s)}</option>`).join("")}
     </select>
     <a class="btn ghost small" href="/api/roster.csv">Export CSV</a>
-  </div></div>
+    <button class="btn ghost small" id="r-import">Import CSV</button>
+  </div>
+  <div id="r-import-panel" class="hidden"></div></div>
   <div class="card"><table><tr><th>Code</th><th>Student</th><th>School</th><th>Subteam</th>
     <th>Parent</th><th>WhatsApp</th><th>Discovery</th></tr>
     ${rows.map((m) => `<tr><td>${esc(m.code)}</td>
@@ -902,6 +963,8 @@ async function renderRoster() {
   </table></div>`;
   $("r-q").addEventListener("input", (e) => { rosterSearch = e.target.value; renderRoster(); });
   $("r-sub").addEventListener("change", (e) => { rosterSubteam = e.target.value; renderRoster(); });
+  $("r-import").addEventListener("click", () => $("r-import-panel").classList.toggle("hidden"));
+  bindCsvImport($("r-import-panel"), "roster");
   const q = $("r-q"); q.focus(); q.setSelectionRange(q.value.length, q.value.length);
 }
 
@@ -1001,6 +1064,11 @@ async function renderEvents() {
     <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button>
     <button class="btn ghost" id="e-workshop" type="button">Use workshop address</button></div>
   <p class="sub mo hidden" id="e-clubnote">Club meets Mondays 4:00–5:05 PM and is only for BASIS Independent Fremont students.</p>
+  <div class="row mo">
+    <a class="btn ghost small" href="/api/events.csv">Export CSV</a>
+    <button class="btn ghost small" id="e-import">Import CSV</button>
+  </div>
+  <div id="e-import-panel" class="mo hidden"></div>
   </div>
   <div class="card"><div class="row">
     ${["all", ...types].map((t) =>
@@ -1013,6 +1081,9 @@ async function renderEvents() {
   v.querySelectorAll("[data-et]").forEach((b) =>
     b.addEventListener("click", () => { eventFilter = b.dataset.et; renderEvents(); }));
   $("e-q").addEventListener("input", (e) => { eventSearch = e.target.value; renderEvents(); });
+  const eImp = $("e-import");
+  if (eImp) eImp.addEventListener("click", () => $("e-import-panel").classList.toggle("hidden"));
+  bindCsvImport($("e-import-panel"), "events");
   if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
   const _ec = $("e-create"); if (_ec) _ec.addEventListener("click", createEvent);
   const _ef = $("e-fill"); if (_ef) _ef.addEventListener("click", () => {

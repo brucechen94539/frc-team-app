@@ -145,6 +145,37 @@ and `can't make it` do not count as attending.
 - New students are offered optional **Subteam Discovery Chats** with subteam
   captains.
 
+## CSV export & import (roster and events)
+
+- Mentors/admins can **export** the roster (`GET /api/roster.csv`,
+  approved members) and events (`GET /api/events.csv`) as CSV, and
+  **import** CSVs back in from the Roster and Events views — so a list
+  built in a spreadsheet, or last year's export, loads without retyping
+  it in the UI. Export gives you the template.
+- Import is always **preview, then confirm**: the preview parses and
+  validates every row and writes nothing; confirm re-validates and
+  applies. Rows with errors are listed and skipped, never half-written.
+  Files are UTF-8 CSV, 1MB / 2000 rows max; a file with no recognized
+  columns is rejected outright.
+- Rows match existing records by **Code**: a matching code updates that
+  record, a new or blank code creates one (auto code `FRC-`/`EVT-`
+  numbering, as usual). New members start **pending** in the Mentor
+  Queue; new events are live at once, like mentor-created ones. On
+  update, only columns present in the file overwrite, and a blank cell
+  in a present column clears that field — except session hours, where
+  blank keeps the old value.
+- Roster import requires first + last name (a combined Student column
+  is split the same way the server backfill splits names); subteam must
+  be one of the 8, emails must contain `@`, WhatsApp updates is
+  yes/no, discovery chats are comma-separated. Event import requires a
+  title; type must be meeting/build/competition/outreach/club; dates
+  and deadlines are YYYY-MM-DD; time looks like `6:00 PM` or `18:00`;
+  capacity is a whole number (blank = unlimited); blank session hours
+  on a new event take the per-type default.
+- Import is mentor/admin-only on the server (logged-out 401, other
+  roles 403) and the Import buttons are mentor-only in the UI, matching
+  the export buttons.
+
 ## Events & RSVPs
 
 - Mentors/admins create events (title, type, date/time, location, capacity).
