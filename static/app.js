@@ -166,100 +166,30 @@ function toggleAvatarMenu() {
   if (!ME) return;
   if (!am.classList.contains("hidden")) { closeAvatarMenu(); return; }
   closeMenu();
-  renderAvatarMenu(false);
+  renderAvatarMenu();
   am.classList.remove("hidden");
 }
-async function renderAvatarMenu(confirmLogout) {
+/* Avatar menu: just links. General and Security navigate to their
+   pages; Log Out collapses this menu and opens a separate confirm
+   popup instead of exiting on the spot. */
+function renderAvatarMenu() {
   const am = $("avatar-menu");
   if (!am || !ME) return;
-  // ME after a login carries only id/name/email/role (the login
-  // response), so refresh it here — the overlay needs links, contact
-  // fields, and name parts, all of which /me provides.
-  try { ME = (await GET("/api/auth/me")).user; renderHeaderAvatar(); } catch (e) {}
-  if (!ME) { closeAvatarMenu(); return; }
-  let totp = null;
-  try { totp = await GET("/api/auth/totp-status"); } catch (e) {}
-  const selfLink = (ME.links || []).find((l) => l.kind === "self");
-  const student = ME.role === "student" && selfLink;
-  // Accounts created before the first/last backfill (e.g. the setup
-  // account on a fresh boot) can carry null parts; fall back to the
-  // same first-word/rest split the server backfill uses.
-  const nameParts = (ME.name || "").trim().split(/\s+/);
-  const firstName = ME.first_name ?? nameParts[0] ?? "";
-  const lastName = ME.last_name ?? nameParts.slice(1).join(" ") ?? "";
   am.innerHTML = `
-  <div class="row" style="align-items:center;gap:10px">
-    ${avatarHTML(ME.name, "avatar-sm")}
-    <div><div style="font-weight:700">${esc(ME.name)}</div>
-    <div class="sub">${esc(ME.role)} · ${esc(ME.email)}</div></div>
-  </div>
-  <h4>General</h4>
-  <div class="field"><label>First name</label><input id="am-first" value="${esc(firstName)}"></div>
-  <div class="field"><label>Last name</label><input id="am-last" value="${esc(lastName)}"></div>
-  <div class="field"><label>Phone</label><input id="am-phone" value="${esc(ME.phone || "")}"></div>
-  <div class="field"><label>WhatsApp</label><input id="am-wa" value="${esc(ME.whatsapp || "")}"></div>
-  ${student ? `
-  <div class="field"><label>School</label><input id="am-school" value="${esc(selfLink.school || "")}"></div>
-  <div class="field"><label>Grade</label><input id="am-grade" value="${esc(selfLink.grade || "")}"></div>` : ""}
-  <div class="err" id="am-err"></div>
-  <div class="menu-foot">
-    <button class="btn" id="am-save">Save</button>
-    <button class="btn ghost" id="am-full">View full profile</button>
-  </div>
-  <h4>Security</h4>
-  <p><span class="pill ${totp && totp.enabled ? "green" : ""}">Two-factor: ${totp && totp.enabled ? "ON" : "OFF"}</span>
-  ${totp && totp.enabled ? `<span class="sub">${totp.backup_codes_remaining} recovery codes left.</span>` : ""}</p>
-  <div class="field"><label>Current password</label><input id="am-cur" type="password" autocomplete="current-password"></div>
-  <div class="field"><label>New password (8+ characters)</label><input id="am-new" type="password" autocomplete="new-password"></div>
-  <div class="field"><label>Confirm new password</label><input id="am-new2" type="password" autocomplete="new-password"></div>
-  ${totp && totp.enabled ? `<div class="field"><label>Authenticator code (required to change password)</label><input id="am-code" inputmode="numeric" autocomplete="one-time-code"></div>` : ""}
-  <div class="err" id="am-pwerr"></div>
-  <div class="menu-foot">
-    <button class="btn" id="am-pw">Change password</button>
-    <button class="btn ghost" id="am-2fa">Manage two-factor authentication</button>
-  </div>
-  <h4>Log out</h4>
-  ${confirmLogout ? `
-  <p>Log out?</p>
-  <div class="menu-foot">
-    <button class="btn" id="am-yes">YES</button>
-    <button class="btn ghost" id="am-no">NO</button>
-  </div>` : `
-  <button class="btn ghost" id="am-logout">Log out</button>`}`;
-  $("am-save").addEventListener("click", async () => {
-    const body = {first_name: $("am-first").value, last_name: $("am-last").value,
-      phone: $("am-phone").value, whatsapp: $("am-wa").value};
-    if (student) { body.school = $("am-school").value; body.grade = $("am-grade").value; }
-    try {
-      await POST("/api/auth/profile", body);
-      ME = (await GET("/api/auth/me")).user;
-      renderHeaderAvatar();
-      renderAvatarMenu(false);
-      toast("Profile saved.");
-    } catch (err) { $("am-err").textContent = "Error: " + err.message; }
-  });
-  $("am-full").addEventListener("click", () => showView("profile"));
-  $("am-pw").addEventListener("click", async () => {
-    const cur = $("am-cur").value, nw = $("am-new").value, nw2 = $("am-new2").value;
-    if (nw !== nw2) { $("am-pwerr").textContent = "New passwords don't match."; return; }
-    if (nw.length < 8) { $("am-pwerr").textContent = "New password must be 8+ characters."; return; }
-    const body = {current: cur, new: nw};
-    const codeEl = $("am-code");
-    if (codeEl) body.code = codeEl.value;
-    try {
-      await POST("/api/auth/password", body);
-      $("am-cur").value = $("am-new").value = $("am-new2").value = "";
-      if (codeEl) codeEl.value = "";
-      toast("Password changed.");
-    } catch (err) { $("am-pwerr").textContent = "Error: " + err.message; }
-  });
-  $("am-2fa").addEventListener("click", () => showView("security"));
-  if (confirmLogout) {
-    $("am-yes").addEventListener("click", () => doLogout());
-    $("am-no").addEventListener("click", () => renderAvatarMenu(false));
-  } else {
-    $("am-logout").addEventListener("click", () => renderAvatarMenu(true));
-  }
+  <button class="menu-link" id="am-general">General</button>
+  <button class="menu-link" id="am-security">Security</button>
+  <button class="menu-link" id="am-logout">Log Out</button>`;
+  $("am-general").addEventListener("click", () => showView("profile"));
+  $("am-security").addEventListener("click", () => showView("security"));
+  $("am-logout").addEventListener("click", () => { closeAvatarMenu(); openLogoutModal(); });
+}
+function openLogoutModal() {
+  const m = $("logout-modal");
+  if (m) m.classList.add("open");
+}
+function closeLogoutModal() {
+  const m = $("logout-modal");
+  if (m) m.classList.remove("open");
 }
 document.querySelectorAll("#nav button").forEach((b) => {
   b.addEventListener("click", () => { showView(b.dataset.view); closeMenu(); });
@@ -279,9 +209,16 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); } });
+const _loYes = $("lo-yes");
+if (_loYes) _loYes.addEventListener("click", () => doLogout());
+const _loNo = $("lo-no");
+if (_loNo) _loNo.addEventListener("click", closeLogoutModal);
+const _loModal = $("logout-modal");
+if (_loModal) _loModal.addEventListener("click", (e) => { if (e.target === _loModal) closeLogoutModal(); });
 function showView(name) {
   closeAvatarMenu();
+  closeLogoutModal();
   if (!ME && name !== "signup" && name !== "login") name = "login";
   currentView = name;
   savePlace();
@@ -386,6 +323,13 @@ async function renderProfile() {
     }
     return `<div class="sub">${esc(l.member_name)} · ${esc(l.kind === "self" ? "you" : "your child")}${l.school ? ` · ${esc(l.school)}` : ""}${subs ? ` · ${esc(subs)}` : ""}</div>`;
   }).join("") || `<div class="sub">No roster links yet — a mentor can link this account in Team accounts.</div>`;
+  // Same first-word/rest split the server backfill uses, for accounts
+  // whose name parts are still null (e.g. the setup account).
+  const nameParts = (u.name || "").trim().split(/\s+/);
+  const firstName = u.first_name ?? nameParts[0] ?? "";
+  const lastName = u.last_name ?? nameParts.slice(1).join(" ") ?? "";
+  const selfLink = (u.links || []).find((l) => l.kind === "self");
+  const student = u.role === "student" && selfLink;
   v.innerHTML = `
   <div class="card"><h2>Profile</h2>
     <div class="row" style="align-items:center;gap:16px">
@@ -405,11 +349,15 @@ async function renderProfile() {
   </div>
   <div class="card"><h3>General</h3>
     <div class="grid3">
+      <div class="field"><label>First name</label><input id="pf-first" value="${esc(firstName)}"></div>
+      <div class="field"><label>Last name</label><input id="pf-last" value="${esc(lastName)}"></div>
       <div class="field"><label>Phone</label><input id="pf-phone" value="${esc(u.phone || "")}"></div>
       <div class="field"><label>WhatsApp</label><input id="pf-wa" value="${esc(u.whatsapp || "")}"></div>
+      ${student ? `<div class="field"><label>School</label><input id="pf-school" value="${esc(selfLink.school || "")}"></div>
+      <div class="field"><label>Grade</label><input id="pf-grade" value="${esc(selfLink.grade || "")}"></div>` : ""}
       <div class="field"><label>Email (login — ask a mentor to change it)</label><input value="${esc(u.email)}" disabled></div>
     </div>
-    <button class="btn" id="pf-save">Save contact info</button>
+    <button class="btn" id="pf-save">Save</button>
     <h3 style="margin-top:16px">Team &amp; school</h3>
     ${links}
   </div>
@@ -444,9 +392,17 @@ async function renderProfile() {
     } catch (err) { toast("Error: " + err.message); }
   });
   $("pf-save").addEventListener("click", async () => {
+    const body = {first_name: $("pf-first").value, last_name: $("pf-last").value,
+      phone: $("pf-phone").value, whatsapp: $("pf-wa").value};
+    const schoolEl = $("pf-school"), gradeEl = $("pf-grade");
+    if (schoolEl) body.school = schoolEl.value;
+    if (gradeEl) body.grade = gradeEl.value;
     try {
-      await POST("/api/auth/profile", {phone: $("pf-phone").value, whatsapp: $("pf-wa").value});
-      toast("Contact info saved.");
+      await POST("/api/auth/profile", body);
+      ME = (await GET("/api/auth/me")).user;
+      renderHeaderAvatar();
+      renderProfile();
+      toast("Profile saved.");
     } catch (err) { toast("Error: " + err.message); }
   });
   $("pf-pw").addEventListener("click", async () => {

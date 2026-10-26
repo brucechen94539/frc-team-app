@@ -286,13 +286,23 @@ pre.welcome{background:var(--fieldbg);border:1px dashed var(--accent);border-rad
 .avatar-sm{width:30px;height:30px;font-size:13px;cursor:pointer}
 .avatar-lg{width:96px;height:96px;font-size:34px}
 
-/* Avatar overlay: quick profile, security, and logout. Anchored to the
-   top-right button row like the menu dropdown. */
+/* Avatar menu: just links now (General, Security, Log Out). Anchored
+   to the top-right button row like the menu dropdown. */
 .avatar-menu{position:absolute;top:calc(100% + 8px);right:0;z-index:60;
-  width:340px;max-width:92vw;max-height:calc(100vh - 90px);overflow-y:auto;
-  background:var(--card);border:1px solid var(--line);
-  border-radius:14px;padding:14px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
-.avatar-menu h4{margin:16px 0 8px;font-size:12px;text-transform:uppercase;
-  letter-spacing:.12em;color:var(--muted)}
-.avatar-menu h4:first-of-type{margin-top:12px}
-.avatar-menu .menu-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+  width:230px;max-width:92vw;background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:10px;box-shadow:0 12px 32px rgba(0,0,0,.45)}
+.avatar-menu .menu-link{display:block;width:100%;text-align:left;
+  background:var(--card2);color:var(--label);border:1px solid var(--line);
+  border-radius:10px;padding:10px 14px;cursor:pointer;font-size:14px;
+  font-weight:700;margin-bottom:8px}
+.avatar-menu .menu-link:last-child{margin-bottom:0}
+.avatar-menu .menu-link:hover{border-color:var(--accent);color:var(--ink)}
+.menu-foot{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+
+/* Logout confirm popup: a separate modal, not part of the avatar menu. */
+.modal-backdrop{position:fixed;inset:0;z-index:100;display:none;
+  align-items:center;justify-content:center;background:rgba(0,0,0,.55)}
+.modal-backdrop.open{display:flex}
+.modal-card{background:var(--card);border:1px solid var(--line);
+  border-radius:14px;padding:20px;min-width:260px;
+  box-shadow:0 12px 32px rgba(0,0,0,.45)}

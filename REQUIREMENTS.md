@@ -41,12 +41,14 @@ and `can't make it` do not count as attending.
 
 ## Profile & avatars
 
-- Every account has a **Profile** view (via the avatar overlay's View
-  full profile, all roles; no menu entry) with three cards:
+- Every account has a **Profile** view (via the avatar menu's General
+  link, all roles; no menu entry) with three cards:
   **Profile** (avatar + name + role + email + member since),
-  **General** (editable phone and WhatsApp; email is read-only since it
-  is the login identity; linked roster entries with kind, school, and
-  subteam — assigned subteam, else ranked preferences), and **Security**
+  **General** (editable first/last name, phone, and WhatsApp; a student
+  also edits school and grade on their own roster record; email is
+  read-only since it is the login identity; linked roster entries with
+  kind, school, and subteam — assigned subteam, else ranked
+  preferences), and **Security**
   (change password with the current password plus, when 2FA is on, a
   current authenticator code or unused recovery code; 2FA status; and a
   button into the full two-factor setup/reset tab).
@@ -58,13 +60,14 @@ and `can't make it` do not count as attending.
   initials** on a deterministic pastel circle (same initials/colors as
   the assignee chips). The header shows only the avatar, at the upper
   right (no name pill; hovering the avatar shows name and role), and
-  tapping it opens the **avatar overlay**: **General** (first/last
-  name, phone, WhatsApp; a student also gets school and grade for
-  their own roster record), **Security** (2FA status, password change,
-  button into the full Security tab), and **Logout** with a YES/NO
-  confirm — never an instant exit. There is no header logout button;
-  logout lives only in the overlay. The full Profile view is one tap
-  inside the overlay (View full profile).
+  tapping it opens a small menu of just three links: **General** goes
+  to the Profile view (whose General card edits first/last name,
+  phone, WhatsApp — and, for a student, school and grade on their own
+  roster record), **Security** goes to the Security tab, and
+  **Log Out** collapses the menu and opens a separate popup asking
+  "Logout?" with YES/NO — never an instant exit. There is no header
+  logout button; logout lives only behind that popup. The menu holds
+  no forms; it only links onward.
 - **Avatar API (all self-only by construction — the routes take no user
   id, they act on the logged-in account):** `GET/POST/DELETE
   /api/auth/avatar`. Uploads must be PNG, JPEG, GIF, or WebP data URLs

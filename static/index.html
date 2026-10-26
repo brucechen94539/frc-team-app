@@ -29,6 +29,15 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
       <span id="user-avatar" title="Profile"></span>
     </div>
     <div id="avatar-menu" class="avatar-menu hidden"></div>
+    <div id="logout-modal" class="modal-backdrop">
+      <div class="modal-card">
+        <p style="font-size:17px;font-weight:700;margin:0 0 14px">Logout?</p>
+        <div class="menu-foot">
+          <button class="btn" id="lo-yes">YES</button>
+          <button class="btn ghost" id="lo-no">NO</button>
+        </div>
+      </div>
+    </div>
   </div>
   <p class="tagline">Team HQ — sign-ups · events · tracking · tasks</p>
 </header>
