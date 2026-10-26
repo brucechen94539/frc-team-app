@@ -41,7 +41,8 @@ and `can't make it` do not count as attending.
 
 ## Profile & avatars
 
-- Every account has a **Profile** view (nav, all roles) with three cards:
+- Every account has a **Profile** view (via the header avatar, all
+  roles; no menu entry) with three cards:
   **Profile** (avatar + name + role + email + member since),
   **General** (editable phone and WhatsApp; email is read-only since it
   is the login identity; linked roster entries with kind, school, and

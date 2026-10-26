@@ -1706,7 +1706,11 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents) {
       if (place.track) trackEventId = place.track;
     }
     const btn = place && document.querySelector(`#nav button[data-view="${place.view}"]`);
-    showView(btn && !btn.classList.contains("navhide") ? place.view : "events");
+    // Profile and Security live outside the menu now (avatar and the
+    // Profile card's button), but a reloaded tab should still return
+    // to them instead of falling back to Events.
+    const offMenu = place && (place.view === "profile" || place.view === "security");
+    showView(btn && !btn.classList.contains("navhide") ? place.view : (offMenu ? place.view : "events"));
     refreshBadges();
   } else {
     showView("login");
