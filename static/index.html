@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Team 9470 CTRL-AL-DELETE FRC Team Portal</title>
+<title>Team 9470 Ctrl-Alt-Defeat FRC Team Portal</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23ff5c1a' d='M13 2 4.5 13.5H11L9.5 22 19 9.5h-6.5z'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/static/style.css" />
 <script>/* set the saved color scheme before first paint (no flash) */
@@ -13,7 +13,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
 </head>
 <body>
 <header class="topbar">
-  <h1><span class="logo-frc">Team 9470</span> CTRL-AL-DELETE FRC Team Portal</h1>
+  <h1><span class="logo-frc">Team 9470</span> Ctrl-Alt-Defeat FRC Team Portal</h1>
   <div id="top-actions">
     <button id="theme-btn" class="btn small ghost" title="Switch color scheme">☀ Light</button>
     <button id="menu-btn" class="btn small ghost navhide" title="Menu" aria-haspopup="true" aria-expanded="false">☰</button>
@@ -25,13 +25,14 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
       <button data-view="tasks">Task Board</button>
       <button data-view="travel">Travel &amp; Logistics <span id="nav-rooms" class="badge hidden"></span></button>
       <button data-view="security">Security</button>
+      <button data-view="profile">Profile</button>
     </nav>
+    <div id="account-box" class="navhide">
+      <button id="logout-btn" class="btn small ghost">Log out</button>
+      <span id="user-avatar" title="Profile"></span>
+    </div>
   </div>
   <p class="tagline">Team HQ — sign-ups · events · tracking · tasks</p>
-  <div id="account-box" class="navhide">
-    <span id="user-chip" class="pill"></span>
-    <button id="logout-btn" class="btn small ghost">Log out</button>
-  </div>
 </header>
 <main id="main">
   <section id="view-signup" class="view"></section>
@@ -43,6 +44,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
   <section id="view-tasks" class="view hidden"></section>
   <section id="view-travel" class="view hidden"></section>
   <section id="view-security" class="view hidden"></section>
+  <section id="view-profile" class="view hidden"></section>
 </main>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="/static/app.js"></script>

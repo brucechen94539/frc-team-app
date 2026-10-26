@@ -102,9 +102,9 @@ EVENTS = [
          notes="Safety forms due. Parents welcome — season calendar, dues, and travel overview in the first 30 minutes."),
     dict(code="EVT-202", title="Build Session — Drivetrain Assembly",
          type="build", date="2026-10-26", time="10:00 AM",
-         location="School robotics lab, Room 12", capacity=12,
+         location="4285 Santa Monica Terrace, Fremont, CA 94539", capacity=12,
          deadline="2026-10-25", session_hours=4,
-         notes="Build, Electrical, and Design / CAD priority. Bring safety glasses; lunch provided for full-day crew."),
+         notes="Build, Electrical, and Design / CAD priority. Bring safety glasses; no lunch provided — bring your own."),
     dict(code="EVT-203", title="Outreach — STEM Night Demo at the Library",
          type="outreach", date="2026-11-06", time="5:30 PM",
          location="Fremont Main Library, Community Room", capacity=15,
@@ -120,6 +120,11 @@ EVENTS = [
          location="UC Davis Pavilion — carpools leave the school lot Thu afternoon",
          capacity=30, deadline="2026-11-12", session_hours=8,
          notes="Remote tournament: three nights in Davis. Carpools, pit tool sign-ups, and hotel room assignments for this event live in the Travel & Logistics tab."),
+    dict(code="EVT-206", title="Club — Weekly Robotics Club",
+         type="club", date="2026-11-09", time="4:00 PM",
+         location="BASIS Independent Fremont", capacity=30,
+         deadline="2026-11-08", session_hours=1,
+         notes="Weekly club meeting for BASIS Independent Fremont students. Mondays 4:00–5:05 PM."),
 ]
 
 # (event_code, member_code, person_kind, status)
