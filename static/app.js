@@ -707,6 +707,7 @@ async function renderSignup() {
     <div class="field"><label>Your full name *</label><input id="su-name"></div>
     <div class="field"><label>Your email *</label><input id="su-email" type="email"></div>
     <div class="field"><label>Your phone</label><input id="su-phone"></div>
+    <div class="field" id="su-wa-wrap"><label>WhatsApp <span class="hint">(optional, parents)</span></label><input id="su-whatsapp"></div>
   </div>
   <h3>Temporary password</h3>
   <p class="sub">Used for your new account when a mentor approves. You'll set your own password at first login — and you can never reuse this one. If you already have an account, it is ignored.</p>
@@ -734,6 +735,17 @@ async function renderSignup() {
   document.querySelectorAll('input[name="su-student"]').forEach((r) =>
     r.addEventListener("change", syncBranch));
   syncBranch();
+  // WhatsApp is a parent field: students never see it, and switching
+  // to Student clears anything typed as a parent so it can't leak
+  // into a student sign-up.
+  const syncSuWa = () => {
+    const par = document.querySelector('input[name="su-role"]:checked').value === "parent";
+    $("su-wa-wrap").style.display = par ? "" : "none";
+    if (!par) $("su-whatsapp").value = "";
+  };
+  document.querySelectorAll('input[name="su-role"]').forEach((r) =>
+    r.addEventListener("change", syncSuWa));
+  syncSuWa();
   try {
     const names = await GET("/api/roster-names");
     $("su-member").innerHTML = names.length
@@ -760,7 +772,8 @@ function suContact() {
   if (!email || !email.includes("@")) { errBox.textContent = "Your email is required for the new account."; return null; }
   if (temp.length < 8) { errBox.textContent = "Temporary password must be 8+ characters."; return null; }
   if (temp !== temp2) { errBox.textContent = "Temporary passwords do not match."; return null; }
-  return {name, email, phone: $("su-phone").value.trim(), temp};
+  return {name, email, phone: $("su-phone").value.trim(), temp,
+          whatsapp: $("su-whatsapp").value.trim()};
 }
 
 async function submitLinkRequest() {
@@ -774,7 +787,8 @@ async function submitLinkRequest() {
     const r = await POST("/api/link-requests", {
       requester_name: c.name, requester_email: c.email,
       requester_phone: c.phone, requester_kind: role,
-      member_id: +mid, temp_password: c.temp});
+      member_id: +mid, temp_password: c.temp,
+      whatsapp: role === "parent" ? c.whatsapp : ""});
     toast(r.duplicate ? "That link request is already waiting for a mentor."
                        : "Link request sent — waiting for a mentor to approve it.");
     renderSignup();
@@ -798,7 +812,7 @@ async function submitNameOnly() {
                 temp_password: c.temp};
   if (role === "parent") {
     body.parent_name = c.name; body.parent_email = c.email;
-    body.parent_phone = c.phone;
+    body.parent_phone = c.phone; body.parent_whatsapp = c.whatsapp;
   } else {
     body.student_email = c.email; body.student_phone = c.phone;
   }
@@ -991,7 +1005,7 @@ async function renderAccounts() {
   };
   el.innerHTML = `<div style="overflow-x:auto"><table class="acct">
     <thead><tr><th>First name</th><th>Last name</th><th>Username</th><th>Email</th>
-    <th>Phone #</th><th>Member type</th><th>School</th><th>Grade</th><th>Team</th>
+    <th>Phone #</th><th>WhatsApp</th><th>Member type</th><th>School</th><th>Grade</th><th>Team</th>
     <th>Relationship to other member</th><th>Actions</th></tr></thead>
     <tbody>${users.map((u) => {
       const m = memberOf(u);
@@ -1002,6 +1016,7 @@ async function renderAccounts() {
         <td>${esc(u.name || "")}</td>
         <td>${esc(u.email || "")}</td>
         <td>${esc(u.phone || "")}</td>
+        <td class="wa-cell" data-wa="${u.id}" title="Click to edit" style="cursor:pointer">${esc(u.whatsapp || "—")}</td>
         <td><span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.role)}</span>${u.disabled ? ' <span class="pill red">disabled</span>' : ""}</td>
         <td>${esc(m ? (m.school || "") : "")}</td>
         <td>${esc(m ? (m.grade || "") : "")}</td>
@@ -1041,6 +1056,29 @@ async function renderAccounts() {
       const u = users.find((x) => x.id === +b.dataset.del);
       if (u) openDelModal(u.id, u.name);
     }));
+  // WhatsApp is click-to-edit: click a cell to swap it for an input
+  // with Save (Enter saves too, Escape cancels back to the table).
+  el.querySelectorAll("[data-wa]").forEach((cell) =>
+    cell.addEventListener("click", () => {
+      if (cell.querySelector("input")) return;
+      const uid = +cell.dataset.wa;
+      const cur = users.find((x) => x.id === uid)?.whatsapp || "";
+      cell.innerHTML = `<input class="wa-in" value="${esc(cur)}" style="min-width:120px"> <button class="btn small" data-wa-save>Save</button>`;
+      const inp = cell.querySelector("input");
+      inp.focus(); inp.select();
+      const save = async () => {
+        try {
+          await PATCH(`/api/users/${uid}`, {whatsapp: inp.value.trim()});
+          toast("WhatsApp updated.");
+          renderAccounts();
+        } catch (e) { toast("Error: " + e.message); }
+      };
+      cell.querySelector("[data-wa-save]").addEventListener("click", (e) => { e.stopPropagation(); save(); });
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") save();
+        if (e.key === "Escape") renderAccounts();
+      });
+    }));
   $("ac-add").onclick = async () => {
     try {
       await POST("/api/users", {first_name: $("ac-first").value.trim(),
@@ -1075,7 +1113,7 @@ function queueCard(m) {
     <details><summary>Full application</summary>
       <table>
       <tr><th>Student</th><td>${esc(m.student_email)} ${esc(m.student_phone)}</td></tr>
-      <tr><th>Parent</th><td>${esc(m.parent_name)} (${esc(m.relationship)}) — ${esc(m.parent_email)} ${esc(m.parent_phone)}</td></tr>
+      <tr><th>Parent</th><td>${esc(m.parent_name)} (${esc(m.relationship)}) — ${esc(m.parent_email)} ${esc(m.parent_phone)}${m.parent_whatsapp ? ` · WhatsApp ${esc(m.parent_whatsapp)}` : ""}</td></tr>
       <tr><th>Emergency</th><td>${esc(m.em_name)} ${esc(m.em_phone)} ${esc(m.medical)}</td></tr>
       <tr><th>Ranked prefs</th><td>${esc((m.prefs || []).join(", "))}</td></tr>
       <tr><th>Discovery sessions</th><td>${esc(m.discovery_sessions || "")}</td></tr>

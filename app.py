@@ -165,6 +165,9 @@ def _migrate(db):
         if lr_cols and "temp_password_hash" not in lr_cols:
             db.execute("ALTER TABLE link_requests ADD COLUMN"
                        " temp_password_hash TEXT")
+        if lr_cols and "requester_whatsapp" not in lr_cols:
+            db.execute("ALTER TABLE link_requests ADD COLUMN"
+                       " requester_whatsapp TEXT NOT NULL DEFAULT ''")
         # 2026-10-25: build/workshop sessions do not provide lunch.
         # The wording round fixed the seed note, but existing databases
         # already hold the old text on their events, and there is no UI
@@ -201,6 +204,7 @@ def _migrate(db):
             requester_phone TEXT NOT NULL DEFAULT '',
             requester_kind TEXT NOT NULL
                 CHECK (requester_kind IN ('parent','student')),
+            requester_whatsapp TEXT NOT NULL DEFAULT '',
             member_id INTEGER NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending'
                 CHECK (status IN ('pending','approved','declined')),
@@ -1134,6 +1138,25 @@ def api_user_password(uid):
     return jsonify({"ok": True})
 
 
+@app.route("/api/users/<int:uid>", methods=["PATCH"])
+@require_role("mentor", "admin")
+def api_user_patch(uid):
+    """Mentor edit of an account's contact handle: currently only
+    WhatsApp, which the Team accounts table edits inline. Empty clears
+    it. Nothing else about the account changes here."""
+    if not q_one("SELECT id FROM users WHERE id=?", (uid,)):
+        return err("user not found", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    if "whatsapp" not in b:
+        return err("nothing to update")
+    wa = b.get("whatsapp")
+    if wa is not None and not isinstance(wa, str):
+        return err("whatsapp must be text")
+    wa = (wa or "").strip() or None
+    execute("UPDATE users SET whatsapp=? WHERE id=?", (wa, uid))
+    return jsonify({"ok": True, "whatsapp": wa})
+
+
 @app.route("/api/users/<int:uid>/disable", methods=["POST"])
 @require_role("mentor", "admin")
 def api_user_disable(uid):
@@ -1437,10 +1460,12 @@ def api_link_requests():
         return jsonify(row)
     rid = execute("INSERT INTO link_requests (requester_name,"
                   " requester_email, requester_phone, requester_kind,"
-                  " member_id, temp_password_hash) VALUES (?,?,?,?,?,?)",
+                  " member_id, temp_password_hash, requester_whatsapp)"
+                  " VALUES (?,?,?,?,?,?,?)",
                   (name, (b.get("requester_email") or "").strip(),
                    (b.get("requester_phone") or "").strip(), kind, mid,
-                   generate_password_hash(temp) if temp else None))
+                   generate_password_hash(temp) if temp else None,
+                   (b.get("whatsapp") or "").strip()))
     row = _link_request_row(rid)
     row["duplicate"] = False
     return jsonify(row), 201
@@ -1468,8 +1493,9 @@ def api_link_request_approve(rid):
                     (u["id"], r["member_id"], r["requester_kind"]))
             linked_user = True
     if r["requester_kind"] == "parent":
-        m = q_one("SELECT parent_name, parent_email, parent_phone"
-                  " FROM members WHERE id=?", (r["member_id"],))
+        m = q_one("SELECT parent_name, parent_email, parent_phone,"
+                  " parent_whatsapp FROM members WHERE id=?",
+                  (r["member_id"],))
         if m:
             if not m["parent_name"] and r["requester_name"]:
                 execute("UPDATE members SET parent_name=? WHERE id=?",
@@ -1480,6 +1506,9 @@ def api_link_request_approve(rid):
             if not m["parent_phone"] and r["requester_phone"]:
                 execute("UPDATE members SET parent_phone=? WHERE id=?",
                         (r["requester_phone"], r["member_id"]))
+            if not m["parent_whatsapp"] and r["requester_whatsapp"]:
+                execute("UPDATE members SET parent_whatsapp=? WHERE id=?",
+                        (r["requester_whatsapp"], r["member_id"]))
     # No existing account for that email: create one from the temporary
     # password the signer chose (forced to change at first login). An
     # existing account is linked above and its password is never
@@ -1495,7 +1524,8 @@ def api_link_request_approve(rid):
                                    r["requester_phone"],
                                    r["requester_kind"],
                                    r["temp_password_hash"], r["member_id"],
-                                   link_kind)
+                                   link_kind,
+                                   r["requester_whatsapp"] or None)
         if uid is None:
             existing = q_one("SELECT id FROM users WHERE lower(email)=?",
                              (email,))
@@ -1503,6 +1533,17 @@ def api_link_request_approve(rid):
                 execute("INSERT OR IGNORE INTO user_members"
                         " (user_id, member_id, kind) VALUES (?,?,?)",
                         (existing["id"], r["member_id"], link_kind))
+    # An existing account linked above gets the sign-up WhatsApp too,
+    # but only if its own handle is blank — never overwriting. (A
+    # freshly created account already carries it, so this is a no-op
+    # for that path.)
+    if r["requester_whatsapp"] and r["requester_email"]:
+        existing = q_one("SELECT id FROM users WHERE lower(email)=?",
+                         (r["requester_email"].strip().lower(),))
+        if existing:
+            execute("UPDATE users SET whatsapp=? WHERE id=?"
+                    " AND (whatsapp IS NULL OR whatsapp='')",
+                    (r["requester_whatsapp"], existing["id"]))
     execute("UPDATE link_requests SET status='approved',"
             " temp_password_hash=NULL WHERE id=?", (rid,))
     row = _link_request_row(rid)
@@ -2746,7 +2787,7 @@ def _auto_link_member(mid):
 
 
 def _create_temp_account(name, first, last, email, phone, role, temp_hash,
-                         member_id, kind):
+                         member_id, kind, whatsapp=None):
     """Create a team account from a sign-up temporary password. The
     account must change its password at first login, and the temp
     password is recorded in history so it can never be reused. Returns
@@ -2755,9 +2796,10 @@ def _create_temp_account(name, first, last, email, phone, role, temp_hash,
     overwritten from a sign-up)."""
     try:
         uid = execute("INSERT INTO users (name, first_name, last_name,"
-                      " email, phone, role, password_hash,"
-                      " must_change_password) VALUES (?,?,?,?,?,?,?,1)",
-                      (name, first, last, email, phone, role, temp_hash))
+                      " email, phone, whatsapp, role, password_hash,"
+                      " must_change_password) VALUES (?,?,?,?,?,?,?,?,1)",
+                      (name, first, last, email, phone, whatsapp, role,
+                       temp_hash))
     except sqlite3.IntegrityError:
         return None
     _record_password(uid, temp_hash)
@@ -2800,15 +2842,22 @@ def _auto_create_account_for_member(mid):
     # parent/self — passing 'student' as a link kind would trip the
     # user_members CHECK and INSERT OR IGNORE would silently drop it.
     link_kind = "self" if kind == "student" else "parent"
+    # A parent signer's WhatsApp rides along to the new account, and
+    # fills a blank one on an existing account (never overwriting).
+    wa = m.get("parent_whatsapp") if kind == "parent" else None
     existing = q_one("SELECT id FROM users WHERE lower(email)=?", (email,))
     if existing:
         uid = existing["id"]
         execute("INSERT OR IGNORE INTO user_members"
                 " (user_id, member_id, kind) VALUES (?,?,?)",
                 (uid, mid, link_kind))
+        if wa:
+            execute("UPDATE users SET whatsapp=? WHERE id=?"
+                    " AND (whatsapp IS NULL OR whatsapp='')",
+                    (wa, uid))
     else:
         uid = _create_temp_account(name, first, last, email, phone, kind,
-                                   temp_hash, mid, link_kind)
+                                   temp_hash, mid, link_kind, wa)
         if uid is None:
             # Lost a race with another approval: link the account that won.
             existing = q_one("SELECT id FROM users WHERE lower(email)=?",
@@ -2818,6 +2867,10 @@ def _auto_create_account_for_member(mid):
                 execute("INSERT OR IGNORE INTO user_members"
                         " (user_id, member_id, kind) VALUES (?,?,?)",
                         (uid, mid, link_kind))
+                if wa:
+                    execute("UPDATE users SET whatsapp=? WHERE id=?"
+                            " AND (whatsapp IS NULL OR whatsapp='')",
+                            (wa, uid))
     execute("UPDATE members SET temp_password_hash=NULL WHERE id=?", (mid,))
     return uid
 

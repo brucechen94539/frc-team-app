@@ -27,6 +27,12 @@ and `can't make it` do not count as attending.
   the linked member: the self link first, else the first parent link.
   Each row has Reset password (an overlay form: new password + confirm)
   and Reset 2FA (an overlay Yes/No confirm) buttons.
+- **WhatsApp column:** the accounts table has a WhatsApp column next
+  to Phone #. Clicking a cell swaps it for an input with Save (Enter
+  saves too, Escape cancels); saving patches the account
+  (`PATCH /api/users/<id>`, mentor-only) and the table re-renders.
+  Empty clears the handle. The create-account form already had a
+  WhatsApp field; this makes it editable on existing accounts too.
 - **Temporary passwords and forced reset:** any password set by someone
   else — a sign-up temporary password, a mentor-created account's
   password, or a mentor reset — marks the account `must_change_password`.
@@ -211,7 +217,11 @@ and `can't make it` do not count as attending.
   signers get student accounts — unless an account for that email
   already exists, in which case it is linked and its password is never
   overwritten from a sign-up. The temp hash is cleared once used, so
-  re-approving never creates a second account.
+  re-approving never creates a second account. **Parent WhatsApp:**
+  the parent branch has an optional WhatsApp field; it lands on the
+  member's parent contact (shown in the queue card's Full application),
+  fills a blank parent WhatsApp on link approval, and rides along to
+  the new parent account (or fills a blank one on an existing account).
 - Every application goes to the **mentor approval queue**; a mentor approves,
   waitlists, or declines each one. Approved students join the roster.
   **Bulk approve** covers the import case: on the pending filter, mentors

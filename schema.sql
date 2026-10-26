@@ -218,6 +218,7 @@ CREATE TABLE IF NOT EXISTS link_requests (
   requester_email TEXT NOT NULL DEFAULT '',
   requester_phone TEXT NOT NULL DEFAULT '',
   requester_kind  TEXT NOT NULL CHECK (requester_kind IN ('parent','student')),
+  requester_whatsapp TEXT NOT NULL DEFAULT '',
   member_id       INTEGER NOT NULL,
   status          TEXT NOT NULL DEFAULT 'pending'
                   CHECK (status IN ('pending','approved','declined')),
