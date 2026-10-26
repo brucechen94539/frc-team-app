@@ -24,7 +24,7 @@ _None right now._
   after login and after queue actions). Verified in the browser: a
   logged-out link request and name-only submit both stay on the
   sign-up form.
-  (commit: this round's push)
+  (commit 8f739d6d)
 
 ### Build session still said lunch is provided, on an existing database (2026-10-25)
 - **Symptom:** the Build Session card still read "lunch provided for
