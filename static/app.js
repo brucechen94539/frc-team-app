@@ -725,6 +725,14 @@ async function renderSignup() {
     <h3>New student</h3>
     <div class="field"><label>Student's full name *</label><input id="su-student-name" placeholder="First Last"></div>
     <p class="sub">Just the name for now — this goes to the mentor queue, and a mentor completes the details and the linkage.</p>
+    <div id="su-parent-wrap">
+      <h4>Parent (optional)</h4>
+      <div class="grid2">
+        <div class="field"><label>Pick an existing parent</label><select id="su-parent-pick"><option value="">—</option></select></div>
+        <div class="field"><label>Or enter a parent's name</label><input id="su-parent-name"></div>
+      </div>
+      <p class="sub">If the parent is already on the team, pick them above and their contact comes along. Otherwise type a name and a mentor completes it.</p>
+    </div>
     <div class="row" style="margin-top:12px"><button class="btn" id="su-submit">Submit to mentor queue</button></div>
   </div></div>`;
   const syncBranch = () => {
@@ -737,15 +745,24 @@ async function renderSignup() {
   syncBranch();
   // WhatsApp is a parent field: students never see it, and switching
   // to Student clears anything typed as a parent so it can't leak
-  // into a student sign-up.
+  // into a student sign-up. The Parent block is the mirror: only
+  // student sign-ups see it (it lives inside the New branch, so the
+  // Existing branch never shows it either).
   const syncSuWa = () => {
     const par = document.querySelector('input[name="su-role"]:checked').value === "parent";
     $("su-wa-wrap").style.display = par ? "" : "none";
     if (!par) $("su-whatsapp").value = "";
+    $("su-parent-wrap").style.display = par ? "none" : "";
+    if (par) { $("su-parent-pick").value = ""; $("su-parent-name").value = ""; }
   };
   document.querySelectorAll('input[name="su-role"]').forEach((r) =>
     r.addEventListener("change", syncSuWa));
   syncSuWa();
+  try {
+    const parents = await GET("/api/parent-names");
+    $("su-parent-pick").innerHTML = `<option value="">—</option>` +
+      parents.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}</option>`).join("");
+  } catch (e) { /* picker stays empty; typing a name still works */ }
   try {
     const names = await GET("/api/roster-names");
     $("su-member").innerHTML = names.length
@@ -815,6 +832,11 @@ async function submitNameOnly() {
     body.parent_phone = c.phone; body.parent_whatsapp = c.whatsapp;
   } else {
     body.student_email = c.email; body.student_phone = c.phone;
+    // Pick wins over typing: the picked parent's contact is filled in
+    // server-side from the match.
+    const pick = $("su-parent-pick").value;
+    const typed = $("su-parent-name").value.trim();
+    if (pick || typed) body.parent_name = pick || typed;
   }
   try {
     const m = await POST("/api/members", body);
@@ -996,7 +1018,13 @@ async function renderAccounts() {
   // link (the child).
   const relOf = (u) => (u.links || []).map((l) => {
     if (l.kind === "parent") return `parent of ${l.member_name}`;
-    if (l.kind === "self") return l.parent_name ? `child of ${l.parent_name}` : `self (${l.member_name})`;
+    if (l.kind === "self") {
+      // Linked parent accounts first (the relationship editor's
+      // picks); the member's parent_name string is the fallback.
+      const ps = (l.linked_parents || []).map((p) => p.name);
+      if (ps.length) return `child of ${ps.join(", ")}`;
+      return l.parent_name ? `child of ${l.parent_name}` : `self (${l.member_name})`;
+    }
     return `${l.kind} of ${l.member_name}`;
   });
   const memberOf = (u) => {
@@ -1010,6 +1038,11 @@ async function renderAccounts() {
     <tbody>${users.map((u) => {
       const m = memberOf(u);
       const rel = relOf(u).join(", ");
+      // Editable only where there is a roster side to edit: a parent
+      // picks students, a student with a roster member picks parents.
+      // Mentor/admin rows stay read-only.
+      const relEditable = u.role === "parent" ||
+        (u.role === "student" && (u.links || []).some((l) => l.kind === "self"));
       return `<tr>
         <td>${esc(u.first_name || "")}</td>
         <td>${esc(u.last_name || "")}</td>
@@ -1021,7 +1054,7 @@ async function renderAccounts() {
         <td>${esc(m ? (m.school || "") : "")}</td>
         <td>${esc(m ? (m.grade || "") : "")}</td>
         <td>${esc(m ? (m.assigned_subteam || "") : "")}</td>
-        <td>${rel ? esc(rel) : '<span class="sub">—</span>'}</td>
+        <td ${relEditable ? `class="rel-cell" data-rel="${u.id}" title="Click to edit" style="cursor:pointer"` : ""}>${rel ? esc(rel) : '<span class="sub">—</span>'}</td>
         <td><div class="row" style="flex-wrap:nowrap">
           <button class="btn small ghost" data-pw="${u.id}">Reset password</button>
           <button class="btn small ghost" data-faid="${u.id}">Reset 2FA${u.totp_enabled ? "" : " (off)"}</button>
@@ -1077,6 +1110,56 @@ async function renderAccounts() {
       inp.addEventListener("keydown", (e) => {
         if (e.key === "Enter") save();
         if (e.key === "Escape") renderAccounts();
+      });
+    }));
+  // Relationship editor: tap-to-toggle chips, both ways around the
+  // same parent links. A parent picks roster students; a student
+  // picks parent accounts for their roster member. Saving sets the
+  // exact set (anything unpicked is unlinked), and the other side's
+  // row updates on re-render.
+  el.querySelectorAll("[data-rel]").forEach((cell) =>
+    cell.addEventListener("click", async () => {
+      if (cell.querySelector(".rel-edit") || cell.dataset.relBusy) return;
+      cell.dataset.relBusy = "1";
+      const uid = +cell.dataset.rel;
+      const u = users.find((x) => x.id === uid);
+      if (!u) return;
+      let cands = [], selected = new Set(), emptyMsg = "", saveBody = null;
+      if (u.role === "parent") {
+        try {
+          const roster = await GET("/api/roster");
+          cands = roster.map((m) => ({id: m.id, name: `${m.first_name} ${m.last_name}`.trim()}));
+        } catch (e) { delete cell.dataset.relBusy; toast("Error: " + e.message); return; }
+        selected = new Set((u.links || []).filter((l) => l.kind === "parent").map((l) => l.member_id));
+        emptyMsg = "No students on the roster yet.";
+        saveBody = (ids) => ({member_ids: ids});
+      } else {
+        const self = (u.links || []).find((l) => l.kind === "self");
+        if (!self) { delete cell.dataset.relBusy; toast("That student has no roster member linked yet."); return; }
+        cands = users.filter((x) => x.role === "parent").map((x) => ({id: x.id, name: x.name}));
+        selected = new Set((self.linked_parents || []).map((p) => p.id));
+        emptyMsg = "No parent accounts yet — create one in the form below first.";
+        saveBody = (ids) => ({parent_ids: ids});
+      }
+      cell.innerHTML = `<div class="rel-edit">
+        <div class="row rel-chips" style="flex-wrap:wrap">${cands.length ? cands.map((c) =>
+          `<button type="button" class="bubble${selected.has(c.id) ? " active" : ""}" data-val="${c.id}">${esc(c.name)}</button>`).join("") : `<span class="sub">${emptyMsg}</span>`}</div>
+        <div class="row" style="margin-top:6px"><button class="btn small" data-rel-save>Save</button><button class="btn small ghost" data-rel-cancel>Cancel</button></div>
+      </div>`;
+      const chips = cell.querySelector(".rel-chips");
+      if (chips) chips.addEventListener("click", (e) => {
+        const b = e.target.closest(".bubble");
+        if (b) b.classList.toggle("active");
+      });
+      cell.querySelector("[data-rel-cancel]").addEventListener("click", (e) => { e.stopPropagation(); renderAccounts(); });
+      cell.querySelector("[data-rel-save]").addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const ids = [...cell.querySelectorAll(".bubble.active")].map((b) => +b.dataset.val);
+        try {
+          await POST(`/api/users/${uid}/relationships`, saveBody(ids));
+          toast("Relationship updated.");
+          renderAccounts();
+        } catch (err) { toast("Error: " + err.message); }
       });
     }));
   $("ac-add").onclick = async () => {

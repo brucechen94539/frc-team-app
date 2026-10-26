@@ -33,6 +33,19 @@ and `can't make it` do not count as attending.
   (`PATCH /api/users/<id>`, mentor-only) and the table re-renders.
   Empty clears the handle. The create-account form already had a
   WhatsApp field; this makes it editable on existing accounts too.
+- **Relationship editor:** the Relationship column is click-to-edit
+  for student and parent rows (mentor/admin rows stay read-only).
+  Clicking opens tap-to-toggle chips: a parent picks roster students
+  ("parent of …"), a student picks parent accounts ("child of …"),
+  multiple picks allowed both ways. Saving sets the exact set —
+  anything unpicked is unlinked — via
+  `POST /api/users/<id>/relationships` (mentor-only). Both sides edit
+  the same parent links, so setting "parent of" from a parent's row
+  automatically shows as "child of" on the student's row, and vice
+  versa. A student's "child of" reads from linked parent accounts
+  first, falling back to the member's parent_name string. A student
+  with no roster member linked yet can't be edited until a sign-up
+  approval links one.
 - **Temporary passwords and forced reset:** any password set by someone
   else — a sign-up temporary password, a mentor-created account's
   password, or a mentor reset — marks the account `must_change_password`.
@@ -222,6 +235,17 @@ and `can't make it` do not count as attending.
   member's parent contact (shown in the queue card's Full application),
   fills a blank parent WhatsApp on link approval, and rides along to
   the new parent account (or fills a blank one on an existing account).
+- **Student's parent (optional):** the student New branch has a Parent
+  block: a dropdown of parents already in the pool
+  (`GET /api/parent-names`, public, names-only — parent accounts plus
+  the parent names on approved roster members, deduped) plus a
+  free-text name field. Pick wins over typing. On intake, a named
+  parent already in the pool brings their contact along: the server
+  fills blank parent email/phone from the matching parent account
+  (else an approved member's parent entry), never overwriting what
+  the sign-up provided. On approval, the usual name matching links
+  the parent account to the member. The Existing branch has no Parent
+  block — that member's parent info is already on the record.
 - Every application goes to the **mentor approval queue**; a mentor approves,
   waitlists, or declines each one. Approved students join the roster.
   **Bulk approve** covers the import case: on the pending filter, mentors

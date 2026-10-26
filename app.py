@@ -343,7 +343,8 @@ def err(msg, code=400):
 # ----------------------------------------------------------------------------
 PUBLIC_API = {("GET", "/api/subteams"), ("POST", "/api/members"),
               ("GET", "/api/members/duplicate-check"),
-              ("GET", "/api/roster-names"), ("POST", "/api/link-requests")}
+              ("GET", "/api/roster-names"), ("POST", "/api/link-requests"),
+              ("GET", "/api/parent-names")}
 MENTOR_ROLES = ("mentor", "admin")
 
 
@@ -1041,7 +1042,10 @@ def api_subteams():
 
 def _user_links_map(user_ids=None):
     """{user_id: [{member_id, kind, member_name, school, grade,
-    assigned_subteam, parent_name, prefs}]} for the link table."""
+    assigned_subteam, parent_name, prefs, linked_parents}]} for the link
+    table. linked_parents is the parent accounts linked to that member
+    (kind='parent') — so a student's Relationship can read "child of
+    <parents>" from links, falling back to the parent_name string."""
     sql = ("SELECT um.user_id, um.member_id, um.kind,"
            " m.first_name AS m_first, m.last_name AS m_last,"
            " m.school, m.grade, m.assigned_subteam, m.parent_name,"
@@ -1061,6 +1065,19 @@ def _user_links_map(user_ids=None):
             "assigned_subteam": l["assigned_subteam"],
             "parent_name": l["parent_name"],
             "prefs": l["prefs"]})
+    member_ids = {l["member_id"] for links in out.values() for l in links}
+    parents_by_member = {}
+    if member_ids:
+        for r in q_all("SELECT um.member_id, u.id AS uid, u.name FROM"
+                       " user_members um JOIN users u ON u.id = um.user_id"
+                       " WHERE um.kind='parent' AND um.member_id IN (%s)"
+                       % ",".join("?" * len(member_ids)),
+                       tuple(member_ids)):
+            parents_by_member.setdefault(r["member_id"], []).append(
+                {"id": r["uid"], "name": r["name"]})
+    for links in out.values():
+        for l in links:
+            l["linked_parents"] = parents_by_member.get(l["member_id"], [])
     return out
 
 
@@ -1155,6 +1172,70 @@ def api_user_patch(uid):
     wa = (wa or "").strip() or None
     execute("UPDATE users SET whatsapp=? WHERE id=?", (wa, uid))
     return jsonify({"ok": True, "whatsapp": wa})
+
+
+@app.route("/api/users/<int:uid>/relationships", methods=["POST"])
+@require_role("mentor", "admin")
+def api_user_relationships(uid):
+    """Set a Relationship from the Team accounts table, both ways
+    around the same parent links:
+    - a PARENT account: {member_ids: [...]} sets exactly which roster
+      students they are the parent of (kind='parent' links);
+    - a STUDENT account: {parent_ids: [...]} sets exactly which parent
+      accounts are linked to their roster member (the same rows, seen
+      from the other side — so the student's row reads "child of ..."
+      and each parent's row reads "parent of ..." automatically).
+    Anything not in the list is unlinked. Mentor/admin rows have no
+    roster side to edit and stay read-only."""
+    u = q_one("SELECT id, role FROM users WHERE id=?", (uid,))
+    if not u:
+        return err("user not found", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    if u["role"] == "parent":
+        try:
+            ids = list(dict.fromkeys(int(x) for x in
+                                     (b.get("member_ids") or [])))
+        except (ValueError, TypeError):
+            return err("member_ids must be a list of ids")
+        for mid in ids:
+            m = q_one("SELECT id, status FROM members WHERE id=?", (mid,))
+            if not m:
+                return err(f"member {mid} not found", 404)
+            if m["status"] != "approved":
+                return err("only roster (approved) students can be picked")
+        execute("DELETE FROM user_members WHERE user_id=? AND kind='parent'",
+                (uid,))
+        for mid in ids:
+            execute("INSERT OR IGNORE INTO user_members"
+                    " (user_id, member_id, kind) VALUES (?,?,?)",
+                    (uid, mid, "parent"))
+        return jsonify({"ok": True, "member_ids": ids})
+    if u["role"] == "student":
+        try:
+            ids = list(dict.fromkeys(int(x) for x in
+                                     (b.get("parent_ids") or [])))
+        except (ValueError, TypeError):
+            return err("parent_ids must be a list of ids")
+        for pid in ids:
+            p = q_one("SELECT id, role FROM users WHERE id=?", (pid,))
+            if not p:
+                return err(f"user {pid} not found", 404)
+            if p["role"] != "parent":
+                return err("only parent accounts can be picked")
+        self_link = q_one("SELECT member_id FROM user_members"
+                          " WHERE user_id=? AND kind='self' LIMIT 1", (uid,))
+        if not self_link:
+            return err("that student has no roster member linked yet", 400)
+        mid = self_link["member_id"]
+        execute("DELETE FROM user_members WHERE member_id=?"
+                " AND kind='parent'", (mid,))
+        for pid in ids:
+            execute("INSERT OR IGNORE INTO user_members"
+                    " (user_id, member_id, kind) VALUES (?,?,?)",
+                    (pid, mid, "parent"))
+        return jsonify({"ok": True, "parent_ids": ids})
+    return err("relationships are editable only for student and parent"
+               " accounts", 400)
 
 
 @app.route("/api/users/<int:uid>/disable", methods=["POST"])
@@ -1335,6 +1416,8 @@ def api_members():
     if temp:
         execute("UPDATE members SET temp_password_hash=? WHERE id=?",
                 (generate_password_hash(temp), mid))
+    # A named parent already in the pool brings their contact along.
+    _fill_parent_contact(mid)
     return jsonify(q_one("SELECT * FROM members WHERE id=?", (mid,))), 201
 
 
@@ -1404,6 +1487,24 @@ def api_roster_names():
                         "SELECT id, first_name, last_name FROM members"
                         " WHERE status='approved' ORDER BY last_name,"
                         " first_name")])
+
+
+@app.route("/api/parent-names")
+def api_parent_names():
+    """Public, names-only: parents already in the pool — parent accounts
+    plus the parent names on approved roster members — deduped, so a
+    student sign-up can pick an existing parent instead of retyping
+    one. Contact details stay server-side; the intake fills them from
+    the match (see _fill_parent_contact)."""
+    seen = {}
+    for u in q_all("SELECT name FROM users WHERE role='parent'"):
+        seen.setdefault(_norm_name(u["name"]), u["name"])
+    for m in q_all("SELECT DISTINCT parent_name FROM members"
+                   " WHERE status='approved' AND parent_name IS NOT NULL"
+                   " AND parent_name != ''"):
+        seen.setdefault(_norm_name(m["parent_name"]), m["parent_name"])
+    names = sorted(seen.values(), key=lambda n: n.lower())
+    return jsonify([{"name": n} for n in names])
 
 
 def _link_request_row(rid):
@@ -2773,6 +2874,38 @@ def _auto_link_user(uid):
                 (uid, mid, kind))
 
 
+def _fill_parent_contact(mid):
+    """Fill a member's blank parent email/phone from a parent already
+    in the pool: a parent account with the same name first, else an
+    approved member's parent entry with the same name. Blank fields
+    only — never overwriting what the sign-up itself provided."""
+    m = q_one("SELECT parent_name, parent_email, parent_phone FROM members"
+              " WHERE id=?", (mid,))
+    if not m or not m["parent_name"]:
+        return
+    if m["parent_email"] and m["parent_phone"]:
+        return
+    want = _norm_name(m["parent_name"])
+    src_email, src_phone = None, None
+    for u in q_all("SELECT name, email, phone FROM users"
+                   " WHERE role='parent'"):
+        if _norm_name(u["name"]) == want:
+            src_email, src_phone = u["email"], u["phone"]
+            break
+    if src_email is None and src_phone is None:
+        for r in q_all("SELECT parent_name, parent_email, parent_phone"
+                       " FROM members WHERE status='approved'"
+                       " AND parent_name IS NOT NULL"):
+            if _norm_name(r["parent_name"]) == want:
+                src_email, src_phone = r["parent_email"], r["parent_phone"]
+                break
+    email = m["parent_email"] or src_email
+    phone = m["parent_phone"] or src_phone
+    if email != m["parent_email"] or phone != m["parent_phone"]:
+        execute("UPDATE members SET parent_email=?, parent_phone=?"
+                " WHERE id=?", (email, phone, mid))
+
+
 def _auto_link_member(mid):
     """Link all existing accounts to a (newly approved) member by name."""
     m = q_one("SELECT id, first_name, last_name, parent_name FROM members"
@@ -2824,18 +2957,24 @@ def _auto_create_account_for_member(mid):
     temp_hash = m["temp_password_hash"]
     parent_email = (m.get("parent_email") or "").strip()
     student_email = (m.get("student_email") or "").strip()
-    if parent_email:
+    # Signer side: a student signer's own email wins. A student
+    # application also carries an enriched parent_email (from the
+    # picked parent), so checking the parent side first would mistake
+    # it for a parent-signed application and link the parent's account
+    # instead of creating the student's. Parent-signed applications
+    # never carry a student_email, so this order is deterministic.
+    if student_email:
+        email, kind = student_email.lower(), "student"
+        name = f"{m['first_name']} {m['last_name']}"
+        first, last, phone = m["first_name"], m["last_name"], \
+            m.get("student_phone")
+    elif parent_email:
         email, kind = parent_email.lower(), "parent"
         name = m.get("parent_name") or f"{m['first_name']} {m['last_name']}"
         parts = (m.get("parent_name") or "").split(None, 1)
         first = parts[0] if parts else m["first_name"]
         last = parts[1] if len(parts) > 1 else m["last_name"]
         phone = m.get("parent_phone")
-    elif student_email:
-        email, kind = student_email.lower(), "student"
-        name = f"{m['first_name']} {m['last_name']}"
-        first, last, phone = m["first_name"], m["last_name"], \
-            m.get("student_phone")
     else:
         return None
     # The account role is parent/student, but the LINK kind is
