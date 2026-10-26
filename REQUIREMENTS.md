@@ -54,8 +54,9 @@ and `can't make it` do not count as attending.
   to at most 256px JPEG on the device before upload, so a stored photo
   is tens of KB. Without a photo, the account shows **first/last-name
   initials** on a deterministic pastel circle (same initials/colors as
-  the assignee chips). The header shows the same avatar next to the
-  name chip, and tapping it opens Profile.
+  the assignee chips). The header shows only the avatar, at the upper
+  right (no name pill; hovering the avatar shows name and role), and
+  tapping it opens Profile.
 - **Avatar API (all self-only by construction — the routes take no user
   id, they act on the logged-in account):** `GET/POST/DELETE
   /api/auth/avatar`. Uploads must be PNG, JPEG, GIF, or WebP data URLs

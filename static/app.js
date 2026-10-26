@@ -98,7 +98,6 @@ function applyNav() {
   $("account-box").classList.toggle("navhide", !ME);
   $("menu-btn").classList.toggle("navhide", !ME);
   closeMenu();
-  if (ME) $("user-chip").textContent = ME.name + " \u00b7 " + ME.role;
   renderHeaderAvatar();
 }
 
@@ -114,6 +113,8 @@ function renderHeaderAvatar() {
   if (!el) return;
   el.innerHTML = ME ? avatarHTML(ME.name, "avatar-sm") : "";
   el.style.display = ME ? "" : "none";
+  // The name pill is gone; the name + role survive as a hover tooltip.
+  if (ME) el.title = ME.name + " \u00b7 " + ME.role;
 }
 async function loadAvatar() {
   ME_AVATAR = null;
