@@ -27,6 +27,37 @@ and `can't make it` do not count as attending.
   the linked member: the self link first, else the first parent link.
   Each row has Reset password (an overlay form: new password + confirm)
   and Reset 2FA (an overlay Yes/No confirm) buttons.
+- **Temporary passwords and forced reset:** any password set by someone
+  else — a sign-up temporary password, a mentor-created account's
+  password, or a mentor reset — marks the account `must_change_password`.
+  At next login the user is held on a Set-your-own-password view (current
+  temporary password + new + confirm) and the server closes every
+  non-auth API route until the change succeeds; only then does the app
+  open. A `password_history` table records every password the account
+  has held, and a user-chosen change is rejected if it matches any of
+  them — so a temporary password can never be reused, by that account,
+  ever again. Mentor resets record the new hash but skip the reuse
+  check (the mentor's explicit action may re-issue a known password).
+- **Disable and Delete:** each account row has Disable/Enable and
+  Delete. Disabling blocks login (a live session dies on its next
+  request) and archives the account's OWN roster entry (self link) to
+  status `archived`; children's records are untouched by a parent's
+  disable. Re-enabling restores login only — the roster entry stays
+  archived until a mentor moves it. Delete is two-stage: it requires
+  the account to be disabled first, then files a deletion request in
+  the Mentor Queue, and only an approval there deletes the account row
+  (plus its links, password history, and recovery codes). The roster
+  entries stay archived, so a mistaken deletion is recoverable by
+  re-approving the member. Guards: nobody can disable or
+  deletion-request their own account, and the last enabled mentor/admin
+  cannot be disabled.
+- **Archived members:** `archived` is a member status alongside
+  pending/approved/waitlisted/declined, with its own Mentor Queue filter.
+  Archived members are off the roster (not in approved lists, pickers,
+  or the public roster names) until a mentor moves them to another
+  stage from the queue card (Approve, Waitlist, Decline, or Reopen to
+  pending). Their RSVPs and carpool claims stay in place, so
+  re-approval restores them.
 - **Identity model:** each account has a long-int userId, first/last
   name, email (unique), phone, WhatsApp, password hash, OTP fields,
   and a **group** — its role (student/parent/mentor/admin). Accounts
@@ -170,6 +201,17 @@ and `can't make it` do not count as attending.
   student onto the roster, after which account auto-linking works by
   name as usual. Intake requires only first + last name
   (`POST /api/members` no longer requires a parent name or agreements).
+- **Temporary password:** both branches collect a Temporary password
+  + Re-enter to confirm (8+ chars, must match), and the signer's email
+  is required — it becomes the new account's login. The password is
+  stored only as a scrypt hash on the application (or link request)
+  until approval. When the member is approved (or the link request is
+  approved), a team account is created automatically from that email
+  and temporary password — parent signers get parent accounts, student
+  signers get student accounts — unless an account for that email
+  already exists, in which case it is linked and its password is never
+  overwritten from a sign-up. The temp hash is cleared once used, so
+  re-approving never creates a second account.
 - Every application goes to the **mentor approval queue**; a mentor approves,
   waitlists, or declines each one. Approved students join the roster.
   **Bulk approve** covers the import case: on the pending filter, mentors

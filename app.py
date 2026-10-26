@@ -122,6 +122,8 @@ def _migrate(db):
     user_cols = {r[1] for r in db.execute("PRAGMA table_info(users)")}
     task_cols = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
     event_cols = {r[1] for r in db.execute("PRAGMA table_info(events)")}
+    member_cols = {r[1] for r in db.execute("PRAGMA table_info(members)")}
+    lr_cols = {r[1] for r in db.execute("PRAGMA table_info(link_requests)")}
     with _lock:
         if "parent_member_id" not in room_cols:
             db.execute("ALTER TABLE rooms ADD COLUMN parent_member_id INTEGER")
@@ -150,6 +152,19 @@ def _migrate(db):
             db.execute("ALTER TABLE users ADD COLUMN whatsapp TEXT")
         if "avatar" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN avatar TEXT")
+        if "disabled" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN disabled INTEGER"
+                       " NOT NULL DEFAULT 0")
+        if "must_change_password" not in user_cols:
+            db.execute("ALTER TABLE users ADD COLUMN must_change_password"
+                       " INTEGER NOT NULL DEFAULT 0")
+        if "temp_password_hash" not in member_cols:
+            db.execute("ALTER TABLE members ADD COLUMN temp_password_hash TEXT")
+        # Only when the table already exists (fresh DBs get the column
+        # from the CREATE below; the ALTER would fail on a missing table).
+        if lr_cols and "temp_password_hash" not in lr_cols:
+            db.execute("ALTER TABLE link_requests ADD COLUMN"
+                       " temp_password_hash TEXT")
         # 2026-10-25: build/workshop sessions do not provide lunch.
         # The wording round fixed the seed note, but existing databases
         # already hold the old text on their events, and there is no UI
@@ -187,6 +202,17 @@ def _migrate(db):
             requester_kind TEXT NOT NULL
                 CHECK (requester_kind IN ('parent','student')),
             member_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending','approved','declined')),
+            temp_password_hash TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS password_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL, password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS deletion_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL, requested_by INTEGER,
             status TEXT NOT NULL DEFAULT 'pending'
                 CHECK (status IN ('pending','approved','declined')),
             created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
@@ -363,6 +389,17 @@ def _auth_gate():
     u = current_user()
     if not u:
         return err("login required", 401)
+    # A disabled account's session dies on its next request, and an
+    # account on a temporary password can do nothing until it sets its
+    # own (the forced-change endpoint lives under /api/auth/, so it
+    # passes the early return above).
+    full = q_one("SELECT disabled, must_change_password FROM users"
+                 " WHERE id=?", (u["id"],))
+    if full and full["disabled"]:
+        session.clear()
+        return err("account disabled", 401)
+    if full and full["must_change_password"]:
+        return err("password change required", 403)
     # Mentors/admins must have 2FA: without it, every non-auth API
     # route is closed. Setup itself lives under /api/auth/, so a
     # locked-out mentor can always reach it. Students/parents stay
@@ -383,6 +420,17 @@ def _flag_2fa_required(d, uid):
         d["requires_2fa"] = bool(full) and not full["totp_enabled"]
     else:
         d["requires_2fa"] = False
+    return d
+
+
+def _flag_pw_change(d, uid):
+    """Carry must_change_password on every user payload the frontend
+    stores as ME, so the UI can hold first-login accounts on the
+    password-change view (the server gate enforces the same rule)."""
+    full = q_one("SELECT must_change_password FROM users WHERE id=?",
+                 (uid,))
+    d["must_change_password"] = bool(full) and bool(
+        full["must_change_password"])
     return d
 
 
@@ -419,6 +467,7 @@ def api_auth_me():
     user["last_name"] = full["last_name"]
     user["totp_enabled"] = bool(full["totp_enabled"])
     _flag_2fa_required(user, u["id"])
+    _flag_pw_change(user, u["id"])
     return jsonify({"user": user, "setup_required": setup_required()})
 
 
@@ -427,6 +476,8 @@ def api_auth_login():
     b = request.get_json(force=True, silent=True) or {}
     email = (b.get("email") or "").strip().lower()
     u = q_one("SELECT * FROM users WHERE lower(email)=?", (email,))
+    if u and u.get("disabled"):
+        return err("account disabled", 403)
     if (not u or not u["password_hash"] or
             not check_password_hash(u["password_hash"], b.get("password") or "")):
         return err("invalid email or password", 401)
@@ -436,7 +487,10 @@ def api_auth_login():
         session["pending_uid"] = u["id"]
         return jsonify({"need_2fa": True})
     session["uid"] = u["id"]
-    return jsonify({"user": _flag_2fa_required(_public_user(u), u["id"])})
+    user = _public_user(u)
+    _flag_2fa_required(user, u["id"])
+    _flag_pw_change(user, u["id"])
+    return jsonify({"user": user})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -476,6 +530,23 @@ def api_auth_setup():
         "SELECT id, name, email, role FROM users WHERE id=?", (uid,)))}), 201
 
 
+def _password_reused(uid, new_password):
+    """True if the new password matches any password this user has held
+    (history includes every temporary password, so one can never be
+    reused — for that account, ever again)."""
+    for r in q_all("SELECT password_hash FROM password_history"
+                   " WHERE user_id=?", (uid,)):
+        if r["password_hash"] and check_password_hash(r["password_hash"],
+                                                      new_password):
+            return True
+    return False
+
+
+def _record_password(uid, password_hash):
+    execute("INSERT INTO password_history (user_id, password_hash)"
+            " VALUES (?,?)", (uid, password_hash))
+
+
 @app.route("/api/auth/password", methods=["POST"])
 def api_auth_password():
     u = current_user()
@@ -488,6 +559,10 @@ def api_auth_password():
     new = b.get("new") or ""
     if len(new) < 8:
         return err("new password must be 8+ characters")
+    # Before the 2FA gate, for the same reason: a doomed request must
+    # never spend a recovery code — and a reused password is doomed.
+    if _password_reused(u["id"], new):
+        return err("that password was used before — pick a new one")
     # Hardening: when 2FA is on, changing the password needs the second
     # factor too — otherwise a stolen password alone would let an
     # attacker lock the owner out. Same throttle, window, and recovery
@@ -508,8 +583,37 @@ def api_auth_password():
             _totp_fail(u["id"])
             return err("that code did not match", 403)
         _totp_clear(u["id"])
-    execute("UPDATE users SET password_hash=? WHERE id=?",
-            (generate_password_hash(new), u["id"]))
+    h = generate_password_hash(new)
+    execute("UPDATE users SET password_hash=?, must_change_password=0"
+            " WHERE id=?", (h, u["id"]))
+    _record_password(u["id"], h)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/auth/force-password-change", methods=["POST"])
+def api_auth_force_password_change():
+    """First-login reset for accounts on a temporary password (auto-created
+    at approval, or reset by a mentor): the session proves the login, and
+    the current password must still match, so a stale session alone
+    cannot change it. The new password must not match any previous one —
+    history includes the temp password, so it can never be reused."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    b = request.get_json(force=True, silent=True) or {}
+    full = q_one("SELECT * FROM users WHERE id=?", (u["id"],))
+    if not check_password_hash(full["password_hash"] or "",
+                               b.get("current") or ""):
+        return err("current password is incorrect", 403)
+    new = b.get("new") or ""
+    if len(new) < 8:
+        return err("new password must be 8+ characters")
+    if _password_reused(u["id"], new):
+        return err("that password was used before — pick a new one")
+    h = generate_password_hash(new)
+    execute("UPDATE users SET password_hash=?, must_change_password=0"
+            " WHERE id=?", (h, u["id"]))
+    _record_password(u["id"], h)
     return jsonify({"ok": True})
 
 
@@ -889,8 +993,11 @@ def api_verify_2fa():
     _totp_clear(uid)
     session.clear()
     session["uid"] = uid
-    return jsonify({"user": _flag_2fa_required(_public_user(q_one(
-        "SELECT id, name, email, role FROM users WHERE id=?", (uid,))), uid)})
+    user = _public_user(q_one(
+        "SELECT id, name, email, role FROM users WHERE id=?", (uid,)))
+    _flag_2fa_required(user, uid)
+    _flag_pw_change(user, uid)
+    return jsonify({"user": user})
 
 
 @app.route("/api/auth/totp-reset", methods=["POST"])
@@ -961,7 +1068,7 @@ def api_users():
     if request.method == "GET":
         users = q_all(
             "SELECT id, name, first_name, last_name, email, phone, whatsapp,"
-            " role, created_at,"
+            " role, created_at, disabled,"
             " (password_hash IS NOT NULL) AS has_password,"
             " (totp_enabled IS NOT NULL AND totp_enabled != 0) AS totp_enabled"
             " FROM users ORDER BY name")
@@ -984,15 +1091,20 @@ def api_users():
     pw = b.get("password") or ""
     if pw and len(pw) < 8:
         return err("password must be 8+ characters")
+    # A mentor-set password is a temporary password: the new account
+    # must change it at first login, and it joins history.
+    h = generate_password_hash(pw) if pw else None
     try:
         uid = execute(
             "INSERT INTO users (name, first_name, last_name, email, phone,"
-            " whatsapp, role, password_hash) VALUES (?,?,?,?,?,?,?,?)",
+            " whatsapp, role, password_hash, must_change_password)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
             (name, first, last, b.get("email"), b.get("phone"),
-             b.get("whatsapp"), b["role"],
-             generate_password_hash(pw) if pw else None))
+             b.get("whatsapp"), b["role"], h, 1 if pw else 0))
     except sqlite3.IntegrityError:
         return err("a user with that email already exists")
+    if h:
+        _record_password(uid, h)
     _auto_link_user(uid)
     user = q_one("SELECT id, name, first_name, last_name, email, phone,"
                  " whatsapp, role, created_at FROM users WHERE id=?", (uid,))
@@ -1011,8 +1123,142 @@ def api_user_password(uid):
         return err("password must be 8+ characters")
     if not q_one("SELECT id FROM users WHERE id=?", (uid,)):
         return err("user not found", 404)
-    execute("UPDATE users SET password_hash=? WHERE id=?",
-            (generate_password_hash(pw), uid))
+    # A mentor-set password is a temporary password by definition: the
+    # user must change it at next login, and it joins history so it can
+    # never be reused. No history CHECK here — the mentor's explicit
+    # action is allowed to re-issue a known password.
+    h = generate_password_hash(pw)
+    execute("UPDATE users SET password_hash=?, must_change_password=1"
+            " WHERE id=?", (h, uid))
+    _record_password(uid, h)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/users/<int:uid>/disable", methods=["POST"])
+@require_role("mentor", "admin")
+def api_user_disable(uid):
+    """Disable an account: it cannot log in, and any live session dies
+    on its next request (the auth gate clears it). The account's OWN
+    roster entry (self link) goes dormant with it — status 'archived',
+    recoverable from the queue. Children's records are untouched: a
+    disabled parent must not archive their kids."""
+    me = current_user()
+    if me and me["id"] == uid:
+        return err("you cannot disable your own account", 400)
+    u = q_one("SELECT id, role FROM users WHERE id=?", (uid,))
+    if not u:
+        return err("user not found", 404)
+    if u["role"] in MENTOR_ROLES:
+        remaining = q_one("SELECT COUNT(*) AS n FROM users"
+                          " WHERE role IN ('mentor','admin')"
+                          " AND (disabled IS NULL OR disabled=0)"
+                          " AND id!=?", (uid,))["n"]
+        if remaining == 0:
+            return err("cannot disable the last mentor/admin", 400)
+    execute("UPDATE users SET disabled=1 WHERE id=?", (uid,))
+    execute("UPDATE members SET status='archived' WHERE id IN"
+            " (SELECT member_id FROM user_members"
+            " WHERE user_id=? AND kind='self')", (uid,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/users/<int:uid>/enable", methods=["POST"])
+@require_role("mentor", "admin")
+def api_user_enable(uid):
+    """Re-enable a disabled account. The roster entry deliberately stays
+    archived until a mentor moves it back — re-enabling the login must
+    not silently re-activate the roster."""
+    if not q_one("SELECT id FROM users WHERE id=?", (uid,)):
+        return err("user not found", 404)
+    execute("UPDATE users SET disabled=0 WHERE id=?", (uid,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/deletion-requests", methods=["GET", "POST"])
+def api_deletion_requests():
+    if request.method == "GET":
+        denied = _mentor_denied()
+        if denied:
+            return denied
+        if request.args.get("status") == "all":
+            rows = q_all("SELECT dr.*, u.name AS target_name,"
+                         " u.email AS target_email, u.role AS target_role,"
+                         " r.name AS requester_name FROM deletion_requests dr"
+                         " LEFT JOIN users u ON u.id = dr.user_id"
+                         " LEFT JOIN users r ON r.id = dr.requested_by"
+                         " ORDER BY dr.id")
+        else:
+            rows = q_all("SELECT dr.*, u.name AS target_name,"
+                         " u.email AS target_email, u.role AS target_role,"
+                         " r.name AS requester_name FROM deletion_requests dr"
+                         " LEFT JOIN users u ON u.id = dr.user_id"
+                         " LEFT JOIN users r ON r.id = dr.requested_by"
+                         " WHERE dr.status='pending' ORDER BY dr.id")
+        return jsonify(rows)
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        target = int(b.get("user_id"))
+    except (ValueError, TypeError):
+        return err("user_id required")
+    me = current_user()
+    if me and me["id"] == target:
+        return err("you cannot request deletion of your own account", 400)
+    u = q_one("SELECT id, disabled FROM users WHERE id=?", (target,))
+    if not u:
+        return err("user not found", 404)
+    if not u["disabled"]:
+        return err("disable the account first", 400)
+    dup = q_one("SELECT id FROM deletion_requests WHERE user_id=?"
+                " AND status='pending'", (target,))
+    if dup:
+        return jsonify({"id": dup["id"], "duplicate": True})
+    rid = execute("INSERT INTO deletion_requests (user_id, requested_by)"
+                  " VALUES (?,?)", (target, me["id"] if me else None))
+    return jsonify({"id": rid, "duplicate": False}), 201
+
+
+@app.route("/api/deletion-requests/<int:rid>/approve", methods=["POST"])
+@require_role("mentor", "admin")
+def api_deletion_request_approve(rid):
+    """Final deletion, from the queue: the account row, its links, its
+    password history, and its recovery codes go. The roster entries
+    themselves stay — archived, so a mistaken deletion is recoverable
+    by re-approving the member, not by resurrecting the account."""
+    r = q_one("SELECT * FROM deletion_requests WHERE id=?", (rid,))
+    if not r:
+        return err("deletion request not found", 404)
+    if r["status"] != "pending":
+        return err("deletion request already decided")
+    if not q_one("SELECT id FROM users WHERE id=?", (r["user_id"],)):
+        execute("UPDATE deletion_requests SET status='declined'"
+                " WHERE id=?", (rid,))
+        return err("user already gone", 404)
+    execute("DELETE FROM user_members WHERE user_id=?", (r["user_id"],))
+    execute("DELETE FROM password_history WHERE user_id=?", (r["user_id"],))
+    execute("DELETE FROM totp_recovery_codes WHERE user_id=?",
+            (r["user_id"],))
+    execute("DELETE FROM users WHERE id=?", (r["user_id"],))
+    execute("UPDATE deletion_requests SET status='approved' WHERE id=?",
+            (rid,))
+    execute("UPDATE deletion_requests SET status='declined'"
+            " WHERE user_id=? AND status='pending' AND id!=?",
+            (r["user_id"], rid))
+    return jsonify({"deleted": r["user_id"]})
+
+
+@app.route("/api/deletion-requests/<int:rid>/decline", methods=["POST"])
+@require_role("mentor", "admin")
+def api_deletion_request_decline(rid):
+    r = q_one("SELECT * FROM deletion_requests WHERE id=?", (rid,))
+    if not r:
+        return err("deletion request not found", 404)
+    if r["status"] != "pending":
+        return err("deletion request already decided")
+    execute("UPDATE deletion_requests SET status='declined' WHERE id=?",
+            (rid,))
     return jsonify({"ok": True})
 # ----------------------------------------------------------------------------
 # Members (sign-up applications + roster)
@@ -1045,6 +1291,9 @@ def api_members():
     for f in ("first_name", "last_name"):
         if not b.get(f):
             return err(f"{f} is required")
+    temp = b.get("temp_password") or ""
+    if temp and len(temp) < 8:
+        return err("temporary password must be 8+ characters")
     ag = b.get("agreements") or {}
     mid = execute(
         f"""INSERT INTO members (status, sample, {MEMBER_COLS})
@@ -1060,6 +1309,9 @@ def api_members():
          b.get("discovery_sessions"), b.get("notes"),
          json.dumps(ag), b.get("assigned_subteam")))
     execute("UPDATE members SET code=? WHERE id=?", (f"FRC-{100 + mid}", mid))
+    if temp:
+        execute("UPDATE members SET temp_password_hash=? WHERE id=?",
+                (generate_password_hash(temp), mid))
     return jsonify(q_one("SELECT * FROM members WHERE id=?", (mid,))), 201
 
 
@@ -1078,7 +1330,8 @@ def api_member(mid):
     b = request.get_json(force=True)
     sets, args = [], []
     if "status" in b:
-        if b["status"] not in ("pending", "approved", "waitlisted", "declined"):
+        if b["status"] not in ("pending", "approved", "waitlisted",
+                               "declined", "archived"):
             return err("bad status")
         sets.append("status=?")
         args.append(b["status"])
@@ -1092,6 +1345,9 @@ def api_member(mid):
         # Approval brings the member onto the team: link any existing
         # accounts that match this member (or its parent) by name.
         _auto_link_member(mid)
+        # ...and create the signer's account from the temporary
+        # password, if the sign-up carried one.
+        _auto_create_account_for_member(mid)
     return jsonify(q_one("SELECT * FROM members WHERE id=?", (mid,)))
 
 
@@ -1160,6 +1416,9 @@ def api_link_requests():
     kind = b.get("requester_kind")
     if not name or kind not in ("parent", "student"):
         return err("requester_name and kind (parent|student) required")
+    temp = b.get("temp_password") or ""
+    if temp and len(temp) < 8:
+        return err("temporary password must be 8+ characters")
     try:
         mid = int(b.get("member_id"))
     except (ValueError, TypeError):
@@ -1178,9 +1437,10 @@ def api_link_requests():
         return jsonify(row)
     rid = execute("INSERT INTO link_requests (requester_name,"
                   " requester_email, requester_phone, requester_kind,"
-                  " member_id) VALUES (?,?,?,?,?)",
+                  " member_id, temp_password_hash) VALUES (?,?,?,?,?,?)",
                   (name, (b.get("requester_email") or "").strip(),
-                   (b.get("requester_phone") or "").strip(), kind, mid))
+                   (b.get("requester_phone") or "").strip(), kind, mid,
+                   generate_password_hash(temp) if temp else None))
     row = _link_request_row(rid)
     row["duplicate"] = False
     return jsonify(row), 201
@@ -1220,7 +1480,31 @@ def api_link_request_approve(rid):
             if not m["parent_phone"] and r["requester_phone"]:
                 execute("UPDATE members SET parent_phone=? WHERE id=?",
                         (r["requester_phone"], r["member_id"]))
-    execute("UPDATE link_requests SET status='approved' WHERE id=?", (rid,))
+    # No existing account for that email: create one from the temporary
+    # password the signer chose (forced to change at first login). An
+    # existing account is linked above and its password is never
+    # overwritten from a sign-up.
+    if not linked_user and r["temp_password_hash"] and r["requester_email"]:
+        email = r["requester_email"].strip().lower()
+        parts = (r["requester_name"] or "").split(None, 1)
+        first = parts[0] if parts else r["requester_name"]
+        last = parts[1] if len(parts) > 1 else ""
+        # Role is parent/student; the LINK kind is parent/self.
+        link_kind = "self" if r["requester_kind"] == "student" else "parent"
+        uid = _create_temp_account(r["requester_name"], first, last, email,
+                                   r["requester_phone"],
+                                   r["requester_kind"],
+                                   r["temp_password_hash"], r["member_id"],
+                                   link_kind)
+        if uid is None:
+            existing = q_one("SELECT id FROM users WHERE lower(email)=?",
+                             (email,))
+            if existing:
+                execute("INSERT OR IGNORE INTO user_members"
+                        " (user_id, member_id, kind) VALUES (?,?,?)",
+                        (existing["id"], r["member_id"], link_kind))
+    execute("UPDATE link_requests SET status='approved',"
+            " temp_password_hash=NULL WHERE id=?", (rid,))
     row = _link_request_row(rid)
     row["linked_user"] = linked_user
     return jsonify(row)
@@ -1260,6 +1544,7 @@ def api_members_bulk_approve():
             execute("UPDATE members SET status='approved' WHERE id=?",
                     (mid,))
             _auto_link_member(mid)
+            _auto_create_account_for_member(mid)
             approved += 1
     return jsonify({"approved": approved, "requested": len(ids)})
 
@@ -2458,6 +2743,83 @@ def _auto_link_member(mid):
             execute("INSERT OR IGNORE INTO user_members"
                     " (user_id, member_id, kind) VALUES (?,?,?)",
                     (u["id"], mid, kind))
+
+
+def _create_temp_account(name, first, last, email, phone, role, temp_hash,
+                         member_id, kind):
+    """Create a team account from a sign-up temporary password. The
+    account must change its password at first login, and the temp
+    password is recorded in history so it can never be reused. Returns
+    the new user id, or None if the email is already taken (the caller
+    links that account instead — an existing password is never
+    overwritten from a sign-up)."""
+    try:
+        uid = execute("INSERT INTO users (name, first_name, last_name,"
+                      " email, phone, role, password_hash,"
+                      " must_change_password) VALUES (?,?,?,?,?,?,?,1)",
+                      (name, first, last, email, phone, role, temp_hash))
+    except sqlite3.IntegrityError:
+        return None
+    _record_password(uid, temp_hash)
+    execute("INSERT OR IGNORE INTO user_members"
+            " (user_id, member_id, kind) VALUES (?,?,?)",
+            (uid, member_id, kind))
+    return uid
+
+
+def _auto_create_account_for_member(mid):
+    """On roster approval, create the signer's team account from the
+    temporary password stored at sign-up (if any). The signer's side is
+    inferred from which contact email the application carries: a parent
+    email means a parent account, otherwise a student account (the new
+    sign-up flow sends exactly one side). Returns the user id created
+    or linked, or None when there is nothing to create. The temp hash
+    is cleared once used, so re-approving never creates a second
+    account."""
+    m = q_one("SELECT * FROM members WHERE id=?", (mid,))
+    if not m or not m.get("temp_password_hash"):
+        return None
+    temp_hash = m["temp_password_hash"]
+    parent_email = (m.get("parent_email") or "").strip()
+    student_email = (m.get("student_email") or "").strip()
+    if parent_email:
+        email, kind = parent_email.lower(), "parent"
+        name = m.get("parent_name") or f"{m['first_name']} {m['last_name']}"
+        parts = (m.get("parent_name") or "").split(None, 1)
+        first = parts[0] if parts else m["first_name"]
+        last = parts[1] if len(parts) > 1 else m["last_name"]
+        phone = m.get("parent_phone")
+    elif student_email:
+        email, kind = student_email.lower(), "student"
+        name = f"{m['first_name']} {m['last_name']}"
+        first, last, phone = m["first_name"], m["last_name"], \
+            m.get("student_phone")
+    else:
+        return None
+    # The account role is parent/student, but the LINK kind is
+    # parent/self — passing 'student' as a link kind would trip the
+    # user_members CHECK and INSERT OR IGNORE would silently drop it.
+    link_kind = "self" if kind == "student" else "parent"
+    existing = q_one("SELECT id FROM users WHERE lower(email)=?", (email,))
+    if existing:
+        uid = existing["id"]
+        execute("INSERT OR IGNORE INTO user_members"
+                " (user_id, member_id, kind) VALUES (?,?,?)",
+                (uid, mid, link_kind))
+    else:
+        uid = _create_temp_account(name, first, last, email, phone, kind,
+                                   temp_hash, mid, link_kind)
+        if uid is None:
+            # Lost a race with another approval: link the account that won.
+            existing = q_one("SELECT id FROM users WHERE lower(email)=?",
+                             (email,))
+            if existing:
+                uid = existing["id"]
+                execute("INSERT OR IGNORE INTO user_members"
+                        " (user_id, member_id, kind) VALUES (?,?,?)",
+                        (uid, mid, link_kind))
+    execute("UPDATE members SET temp_password_hash=NULL WHERE id=?", (mid,))
+    return uid
 
 
 def _self_rsvp_scope(u):

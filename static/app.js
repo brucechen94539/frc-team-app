@@ -201,7 +201,7 @@ function closeQrModal() {
   if (m) m.classList.remove("open");
 }
 /* Team-account resets: per-row modals (password form, 2FA confirm). */
-let pwUid = null, pwName = "", faUid = null, faName = "";
+let pwUid = null, pwName = "", faUid = null, faName = "", delUid = null, delName = "";
 function openPwModal(uid, name) {
   pwUid = uid; pwName = name;
   $("pw-title").textContent = `Reset password for ${name}`;
@@ -218,6 +218,16 @@ function open2faModal(uid, name) {
 }
 function close2faModal() {
   $("2fa-modal").classList.remove("open");
+}
+/* Deletion requests: per-row confirm modal (the request goes to the
+   mentor queue; only an approval there deletes the account). */
+function openDelModal(uid, name) {
+  delUid = uid; delName = name;
+  $("del-title").textContent = `Request deletion of ${name}?`;
+  $("del-modal").classList.add("open");
+}
+function closeDelModal() {
+  $("del-modal").classList.remove("open");
 }
 /* A scanned #checkin-<id> link jumps to Tracking with that event
    selected (used at boot and after login, so a logged-out scan still
@@ -248,7 +258,7 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closePwModal(); close2faModal(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closePwModal(); close2faModal(); closeDelModal(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
@@ -288,12 +298,30 @@ if (_faYes) _faYes.addEventListener("click", async () => {
     close2faModal(); renderAccounts();
   } catch (e) { toast("Error: " + e.message); }
 });
+const _delModal = $("del-modal");
+if (_delModal) _delModal.addEventListener("click", (e) => { if (e.target === _delModal) closeDelModal(); });
+const _delNo = $("del-no");
+if (_delNo) _delNo.addEventListener("click", closeDelModal);
+const _delYes = $("del-yes");
+if (_delYes) _delYes.addEventListener("click", async () => {
+  try {
+    const r = await POST("/api/deletion-requests", {user_id: delUid});
+    toast(r.duplicate ? "A deletion request for that account is already waiting."
+                       : "Deletion request sent to the mentor queue.");
+    closeDelModal(); renderDeletionRequests();
+  } catch (e) { toast("Error: " + e.message); }
+});
 function showView(name) {
   closeAvatarMenu();
   closeLogoutModal();
   closeQrModal();
   closePwModal();
   close2faModal();
+  closeDelModal();
+  // A temporary password comes first: nothing else is reachable until
+  // the user sets their own (the server enforces the same rule).
+  if (ME && ME.must_change_password && name !== "password-change" && name !== "login")
+    name = "password-change";
   // Mentors/admins without 2FA are held on Security until they set it
   // up (the server enforces the same rule on every API route).
   if (ME && ME.requires_2fa && name !== "security" && name !== "login" && name !== "signup")
@@ -307,7 +335,8 @@ function showView(name) {
   $("view-" + name).classList.remove("hidden");
   const _views = {signup: renderSignup, queue: renderQueue, roster: renderRoster,
     events: renderEvents, tracking: renderTracking, tasks: renderTasks, travel: renderTravel,
-    security: renderSecurity, profile: renderProfile, login: renderLogin};
+    security: renderSecurity, profile: renderProfile, login: renderLogin,
+    "password-change": renderPasswordChange};
   // Unknown view (e.g. a newer nav button with an older script) falls
   // back to Events instead of throwing and leaving a blank page.
   (_views[name] || _views.events)();
@@ -628,6 +657,36 @@ async function refreshBadges() {
   } catch (e) { /* badges are best-effort */ }
 }
 
+/* ---------------- forced password change ---------------- */
+function renderPasswordChange() {
+  const v = $("view-password-change");
+  v.innerHTML = `
+  <div class="login-wrap"><div class="card">
+    <h2>Set your own password</h2>
+    <p class="sub">You are logging in with a temporary password. Set a new one before using the team portal — you can't reuse a previous password.</p>
+    <div class="err" id="pc-err"></div>
+    <div class="field"><label>Current (temporary) password</label><input id="pc-cur" type="password"></div>
+    <div class="field"><label>New password <span class="hint">(8+ chars)</span></label><input id="pc-new" type="password"></div>
+    <div class="field"><label>Re-enter new password</label><input id="pc-new2" type="password"></div>
+    <button class="btn" id="pc-save">Save new password</button>
+  </div></div>`;
+  $("pc-save").addEventListener("click", async () => {
+    const errBox = $("pc-err");
+    errBox.textContent = "";
+    const cur = $("pc-cur").value, nw = $("pc-new").value, nw2 = $("pc-new2").value;
+    if (nw.length < 8) return void (errBox.textContent = "New password must be 8+ characters.");
+    if (nw !== nw2) return void (errBox.textContent = "New passwords do not match.");
+    try {
+      await POST("/api/auth/force-password-change", {current: cur, new: nw});
+      const res = await GET("/api/auth/me");
+      ME = res.user;
+      applyNav();
+      toast("Password updated — welcome in.");
+      showView("events");
+    } catch (e) { errBox.textContent = e.message; }
+  });
+}
+
 /* ---------------- sign-up form ---------------- */
 async function renderSignup() {
   const v = $("view-signup");
@@ -646,8 +705,14 @@ async function renderSignup() {
   <h3>Your contact info</h3>
   <div class="grid2">
     <div class="field"><label>Your full name *</label><input id="su-name"></div>
-    <div class="field"><label>Your email</label><input id="su-email" type="email"></div>
+    <div class="field"><label>Your email *</label><input id="su-email" type="email"></div>
     <div class="field"><label>Your phone</label><input id="su-phone"></div>
+  </div>
+  <h3>Temporary password</h3>
+  <p class="sub">Used for your new account when a mentor approves. You'll set your own password at first login — and you can never reuse this one. If you already have an account, it is ignored.</p>
+  <div class="grid2">
+    <div class="field"><label>Temporary password *</label><input id="su-temp" type="password"></div>
+    <div class="field"><label>Re-enter to confirm *</label><input id="su-temp2" type="password"></div>
   </div>
   <div id="su-existing" style="display:none">
     <h3>Pick the student</h3>
@@ -681,19 +746,35 @@ async function renderSignup() {
   $("su-submit").addEventListener("click", submitNameOnly);
 }
 
-async function submitLinkRequest() {
+function suContact() {
+  // Shared sign-up validation: returns {name, email, phone, temp} or
+  // sets the error and returns null. The email is required because it
+  // becomes the new account's login; the temporary password is required
+  // because approval creates the account from it.
   const errBox = $("su-err");
   errBox.textContent = "";
-  const role = document.querySelector('input[name="su-role"]:checked').value;
   const name = $("su-name").value.trim();
+  const email = $("su-email").value.trim();
+  const temp = $("su-temp").value, temp2 = $("su-temp2").value;
+  if (!name) { errBox.textContent = "Your full name is required."; return null; }
+  if (!email || !email.includes("@")) { errBox.textContent = "Your email is required for the new account."; return null; }
+  if (temp.length < 8) { errBox.textContent = "Temporary password must be 8+ characters."; return null; }
+  if (temp !== temp2) { errBox.textContent = "Temporary passwords do not match."; return null; }
+  return {name, email, phone: $("su-phone").value.trim(), temp};
+}
+
+async function submitLinkRequest() {
+  const errBox = $("su-err");
+  const c = suContact();
+  if (!c) return;
+  const role = document.querySelector('input[name="su-role"]:checked').value;
   const mid = $("su-member").value;
-  if (!name) return void (errBox.textContent = "Your full name is required.");
   if (!mid) return void (errBox.textContent = "Pick an existing student.");
   try {
     const r = await POST("/api/link-requests", {
-      requester_name: name, requester_email: $("su-email").value.trim(),
-      requester_phone: $("su-phone").value.trim(), requester_kind: role,
-      member_id: +mid});
+      requester_name: c.name, requester_email: c.email,
+      requester_phone: c.phone, requester_kind: role,
+      member_id: +mid, temp_password: c.temp});
     toast(r.duplicate ? "That link request is already waiting for a mentor."
                        : "Link request sent — waiting for a mentor to approve it.");
     renderSignup();
@@ -705,22 +786,21 @@ const NAME_ONLY_NOTE = "Name-only sign-up — mentor to complete details and lin
 
 async function submitNameOnly() {
   const errBox = $("su-err");
-  errBox.textContent = "";
+  const c = suContact();
+  if (!c) return;
   const role = document.querySelector('input[name="su-role"]:checked').value;
   const full = $("su-student-name").value.trim();
   const sp = full.indexOf(" ");
   if (sp < 0 || !full.slice(sp + 1).trim())
     return void (errBox.textContent = "The student's full name (first and last) is required.");
   const first = full.slice(0, sp), last = full.slice(sp + 1).trim();
-  const contact = {name: $("su-name").value.trim(),
-                   email: $("su-email").value.trim(),
-                   phone: $("su-phone").value.trim()};
-  const body = {first_name: first, last_name: last, notes: NAME_ONLY_NOTE};
+  const body = {first_name: first, last_name: last, notes: NAME_ONLY_NOTE,
+                temp_password: c.temp};
   if (role === "parent") {
-    body.parent_name = contact.name; body.parent_email = contact.email;
-    body.parent_phone = contact.phone;
+    body.parent_name = c.name; body.parent_email = c.email;
+    body.parent_phone = c.phone;
   } else {
-    body.student_email = contact.email; body.student_phone = contact.phone;
+    body.student_email = c.email; body.student_phone = c.phone;
   }
   try {
     const m = await POST("/api/members", body);
@@ -732,19 +812,19 @@ async function submitNameOnly() {
 
 
 /* ---------------- mentor queue ---------------- */
-const STATUS_PILL = {pending: "amber", approved: "green", waitlisted: "gray", declined: "red"};
+const STATUS_PILL = {pending: "amber", approved: "green", waitlisted: "gray", declined: "red", archived: "gray"};
 
 async function renderQueue() {
   const v = $("view-queue");
   const members = await GET(`/api/members?status=${queueFilter}`);
   const counts = {};
-  for (const s of ["pending", "approved", "waitlisted", "declined"])
+  for (const s of ["pending", "approved", "waitlisted", "declined", "archived"])
     counts[s] = (await GET(`/api/members?status=${s}`)).length;
   v.innerHTML = `
   <div class="card"><h2>Mentor Queue</h2>
   <p class="sub">Review applications. Approving adds the student to the roster (and RSVPs).</p>
   <div class="row">
-    ${["pending", "approved", "waitlisted", "declined"].map((s) =>
+    ${["pending", "approved", "waitlisted", "declined", "archived"].map((s) =>
       `<button class="btn ${queueFilter === s ? "" : "ghost"} small"
         data-f="${s}">${s[0].toUpperCase() + s.slice(1)} (${counts[s]})</button>`).join("")}
     <span style="flex:1"></span>
@@ -761,6 +841,10 @@ async function renderQueue() {
   <div class="card"><h3>Link requests</h3>
     <p class="sub">Sign-ups for existing students — approve to link the requester to that student, decline to drop the request.</p>
     <div id="lr-list"><span class="sub">Loading…</span></div>
+  </div>
+  <div class="card"><h3>Account deletion requests</h3>
+    <p class="sub">Disabled accounts awaiting final deletion — approve to delete the account for good, decline to keep it disabled.</p>
+    <div id="dr-list"><span class="sub">Loading…</span></div>
   </div>
   <div class="card"><h3>Team accounts</h3>
     <p class="sub">Logins for mentors, parents and students \u2014 separate from sign-up applications. Only mentors/admins see this.</p>
@@ -825,6 +909,35 @@ async function renderQueue() {
     b.addEventListener("click", () => queueAction(b)));
   renderAccounts();
   renderLinkRequests();
+  renderDeletionRequests();
+}
+
+async function renderDeletionRequests() {
+  const el = $("dr-list");
+  if (!el) return;
+  let reqs = [];
+  try { reqs = await GET("/api/deletion-requests"); }
+  catch (e) { el.innerHTML = '<span class="sub">Could not load deletion requests.</span>'; return; }
+  el.innerHTML = reqs.map((r) => `<div class="row" style="margin:4px 0;flex-wrap:wrap">
+    <span><b>${esc(r.target_name || "deleted user")}</b> (${esc(r.target_role || "")} · ${esc(r.target_email || "")})</span>
+    <span class="sub">requested by ${esc(r.requester_name || "a mentor")}</span>
+    <span style="flex:1"></span>
+    <button class="btn small danger" data-dr-approve="${r.id}">Delete for good</button>
+    <button class="btn small ghost" data-dr-decline="${r.id}">Decline</button>
+  </div>`).join("") || '<span class="sub">No pending deletion requests.</span>';
+  el.querySelectorAll("[data-dr-approve]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        await POST(`/api/deletion-requests/${b.dataset.drApprove}/approve`, {});
+        toast("Account deleted.");
+        renderDeletionRequests(); renderAccounts();
+      } catch (e) { toast("Error: " + e.message); }
+    }));
+  el.querySelectorAll("[data-dr-decline]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try { await POST(`/api/deletion-requests/${b.dataset.drDecline}/decline`, {}); toast("Deletion request declined."); renderDeletionRequests(); }
+      catch (e) { toast("Error: " + e.message); }
+    }));
 }
 
 async function renderLinkRequests() {
@@ -889,7 +1002,7 @@ async function renderAccounts() {
         <td>${esc(u.name || "")}</td>
         <td>${esc(u.email || "")}</td>
         <td>${esc(u.phone || "")}</td>
-        <td><span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.role)}</span></td>
+        <td><span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.role)}</span>${u.disabled ? ' <span class="pill red">disabled</span>' : ""}</td>
         <td>${esc(m ? (m.school || "") : "")}</td>
         <td>${esc(m ? (m.grade || "") : "")}</td>
         <td>${esc(m ? (m.assigned_subteam || "") : "")}</td>
@@ -897,6 +1010,8 @@ async function renderAccounts() {
         <td><div class="row" style="flex-wrap:nowrap">
           <button class="btn small ghost" data-pw="${u.id}">Reset password</button>
           <button class="btn small ghost" data-faid="${u.id}">Reset 2FA${u.totp_enabled ? "" : " (off)"}</button>
+          <button class="btn small ghost" data-dis="${u.id}" ${(u.id === (ME && ME.id) && !u.disabled) ? "disabled title=\"You cannot disable your own account\"" : ""}>${u.disabled ? "Enable" : "Disable"}</button>
+          <button class="btn small ghost" data-del="${u.id}" ${u.disabled ? "" : "disabled title=\"Disable the account first\""}>Delete</button>
         </div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="11"><span class="sub">No accounts yet.</span></td></tr>`}
@@ -910,6 +1025,21 @@ async function renderAccounts() {
     b.addEventListener("click", () => {
       const u = users.find((x) => x.id === +b.dataset.faid);
       if (u) open2faModal(u.id, u.name);
+    }));
+  el.querySelectorAll("[data-dis]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const u = users.find((x) => x.id === +b.dataset.dis);
+      if (!u) return;
+      try {
+        await POST(`/api/users/${u.id}/${u.disabled ? "enable" : "disable"}`, {});
+        toast(u.disabled ? `Account enabled for ${u.name}.` : `Account disabled for ${u.name}.`);
+        renderAccounts();
+      } catch (e) { toast("Error: " + e.message); }
+    }));
+  el.querySelectorAll("[data-del]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const u = users.find((x) => x.id === +b.dataset.del);
+      if (u) openDelModal(u.id, u.name);
     }));
   $("ac-add").onclick = async () => {
     try {
@@ -962,7 +1092,11 @@ function queueCard(m) {
       ${m.status === "pending" ? `
         <button class="btn small" data-act="approve" data-id="${m.id}">Approve</button>
         <button class="btn small ghost" data-act="waitlist" data-id="${m.id}">Waitlist</button>
-        <button class="btn small danger" data-act="decline" data-id="${m.id}">Decline</button>` : `
+        <button class="btn small danger" data-act="decline" data-id="${m.id}">Decline</button>` : m.status === "archived" ? `
+        <button class="btn small" data-act="approve" data-id="${m.id}">Approve</button>
+        <button class="btn small ghost" data-act="waitlist" data-id="${m.id}">Waitlist</button>
+        <button class="btn small danger" data-act="decline" data-id="${m.id}">Decline</button>
+        <button class="btn small ghost" data-act="reopen" data-id="${m.id}">Reopen</button>` : `
         <button class="btn small ghost" data-act="reopen" data-id="${m.id}">Reopen</button>
         <button class="btn small ghost" data-act="welcome" data-id="${m.id}">Welcome message</button>`}
     </div>

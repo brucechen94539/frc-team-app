@@ -63,12 +63,20 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         <div class="menu-foot"><button class="btn" id="2fa-yes">YES</button><button class="btn ghost" id="2fa-no">NO</button></div>
       </div>
     </div>
+    <div id="del-modal" class="modal-backdrop">
+      <div class="modal-card">
+        <p style="font-size:17px;font-weight:700;margin:0 0 8px" id="del-title">Request deletion?</p>
+        <p class="sub">This does not delete the account yet. It files a deletion request in the mentor queue, and only an approval there deletes the account for good. The roster entry stays archived either way.</p>
+        <div class="menu-foot"><button class="btn danger" id="del-yes">YES</button><button class="btn ghost" id="del-no">NO</button></div>
+      </div>
+    </div>
   </div>
   <p class="tagline">Team HQ — sign-ups · events · tracking · tasks</p>
 </header>
 <main id="main">
   <section id="view-signup" class="view"></section>
   <section id="view-login" class="view hidden"></section>
+  <section id="view-password-change" class="view hidden"></section>
   <section id="view-queue" class="view hidden"></section>
   <section id="view-roster" class="view hidden"></section>
   <section id="view-events" class="view hidden"></section>

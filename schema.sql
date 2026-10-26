@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS users (
   totp_secret   TEXT,              -- Fernet-encrypted TOTP secret; NULL = no 2FA
   totp_enabled  INTEGER NOT NULL DEFAULT 0,
   totp_backup_codes TEXT,          -- LEGACY: moved to totp_recovery_codes; NULL
+  disabled      INTEGER NOT NULL DEFAULT 0,  -- mentor-disabled: cannot log in
+  must_change_password INTEGER NOT NULL DEFAULT 0,  -- temp password: force reset at next login
   created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -69,7 +71,8 @@ CREATE TABLE IF NOT EXISTS members (
   discovery_sessions TEXT,
   notes             TEXT,
   agreements        TEXT,            -- JSON {conduct,safety,photo,dues}
-  assigned_subteam  TEXT
+  assigned_subteam  TEXT,
+  temp_password_hash TEXT           -- scrypt hash from sign-up; NULL once used at approval
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -218,5 +221,28 @@ CREATE TABLE IF NOT EXISTS link_requests (
   member_id       INTEGER NOT NULL,
   status          TEXT NOT NULL DEFAULT 'pending'
                   CHECK (status IN ('pending','approved','declined')),
+  temp_password_hash TEXT,         -- sign-up temp password; NULL once used at approval
   created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Password history: every password a user has held (scrypt hashes).
+-- A new password must not match any of them, so a temporary password
+-- can never be reused — by the user, ever again.
+CREATE TABLE IF NOT EXISTS password_history (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Account deletion requests: deleting is two-stage on purpose. A
+-- mentor disables an account first; a second step files a request
+-- here, and only an approval from the Mentor Queue deletes the row.
+CREATE TABLE IF NOT EXISTS deletion_requests (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      INTEGER NOT NULL,
+  requested_by INTEGER,
+  status       TEXT NOT NULL DEFAULT 'pending'
+               CHECK (status IN ('pending','approved','declined')),
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
