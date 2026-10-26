@@ -121,6 +121,7 @@ def _migrate(db):
     car_cols = {r[1] for r in db.execute("PRAGMA table_info(carpools)")}
     user_cols = {r[1] for r in db.execute("PRAGMA table_info(users)")}
     task_cols = {r[1] for r in db.execute("PRAGMA table_info(tasks)")}
+    event_cols = {r[1] for r in db.execute("PRAGMA table_info(events)")}
     with _lock:
         if "parent_member_id" not in room_cols:
             db.execute("ALTER TABLE rooms ADD COLUMN parent_member_id INTEGER")
@@ -132,6 +133,8 @@ def _migrate(db):
             db.execute("ALTER TABLE rooms ADD COLUMN beds TEXT")
         if "vehicle" not in car_cols:
             db.execute("ALTER TABLE carpools ADD COLUMN vehicle TEXT")
+        if "season" not in event_cols:
+            db.execute("ALTER TABLE events ADD COLUMN season TEXT")
         if "totp_secret" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
         if "totp_enabled" not in user_cols:
@@ -168,6 +171,14 @@ def _migrate(db):
             used INTEGER NOT NULL DEFAULT 0, used_at TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE (user_id, code_hash))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS announcements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '',
+            author TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS team_vans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL, notes TEXT NOT NULL DEFAULT '')""")
         # Backfill: split display names into first/last, filling only
         # columns still NULL so a later manual edit is never overwritten.
         for r in db.execute(
@@ -289,7 +300,8 @@ def err(msg, code=400):
 # Public without login: the fresh sign-up application (POST /api/members),
 # the subteam list the form needs, and the /api/auth/* endpoints.
 # ----------------------------------------------------------------------------
-PUBLIC_API = {("GET", "/api/subteams"), ("POST", "/api/members")}
+PUBLIC_API = {("GET", "/api/subteams"), ("POST", "/api/members"),
+              ("GET", "/api/members/duplicate-check")}
 MENTOR_ROLES = ("mentor", "admin")
 
 
@@ -336,9 +348,30 @@ def _auth_gate():
         return None
     if (request.method, p) in PUBLIC_API:
         return None
-    if not current_user():
+    u = current_user()
+    if not u:
         return err("login required", 401)
+    # Mentors/admins must have 2FA: without it, every non-auth API
+    # route is closed. Setup itself lives under /api/auth/, so a
+    # locked-out mentor can always reach it. Students/parents stay
+    # opt-in.
+    if u["role"] in MENTOR_ROLES:
+        full = q_one("SELECT totp_enabled FROM users WHERE id=?", (u["id"],))
+        if full and not full["totp_enabled"]:
+            return err("two-factor setup required", 403)
     return None
+
+
+def _flag_2fa_required(d, uid):
+    """Carry requires_2fa on every user payload the frontend stores as
+    ME, so the UI can hold mentor/admin accounts on Security until
+    they set 2FA up (the server gate enforces the same rule)."""
+    if d.get("role") in MENTOR_ROLES:
+        full = q_one("SELECT totp_enabled FROM users WHERE id=?", (uid,))
+        d["requires_2fa"] = bool(full) and not full["totp_enabled"]
+    else:
+        d["requires_2fa"] = False
+    return d
 
 
 def _user_is_bif(uid):
@@ -373,6 +406,7 @@ def api_auth_me():
     user["first_name"] = full["first_name"]
     user["last_name"] = full["last_name"]
     user["totp_enabled"] = bool(full["totp_enabled"])
+    _flag_2fa_required(user, u["id"])
     return jsonify({"user": user, "setup_required": setup_required()})
 
 
@@ -390,7 +424,7 @@ def api_auth_login():
         session["pending_uid"] = u["id"]
         return jsonify({"need_2fa": True})
     session["uid"] = u["id"]
-    return jsonify({"user": _public_user(u)})
+    return jsonify({"user": _flag_2fa_required(_public_user(u), u["id"])})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -843,8 +877,8 @@ def api_verify_2fa():
     _totp_clear(uid)
     session.clear()
     session["uid"] = uid
-    return jsonify({"user": _public_user(q_one(
-        "SELECT id, name, email, role FROM users WHERE id=?", (uid,)))})
+    return jsonify({"user": _flag_2fa_required(_public_user(q_one(
+        "SELECT id, name, email, role FROM users WHERE id=?", (uid,))), uid)})
 
 
 @app.route("/api/auth/totp-reset", methods=["POST"])
@@ -1070,6 +1104,51 @@ def api_member(mid):
     return jsonify(q_one("SELECT * FROM members WHERE id=?", (mid,)))
 
 
+@app.route("/api/members/duplicate-check")
+def api_members_duplicate_check():
+    """Names-only duplicate hint for the public sign-up form: returns
+    existing members whose normalized name matches, so the form can
+    warn instead of filing a second application. No contact details
+    leave the server here."""
+    want = _norm_name(request.args.get("first_name", "")
+                      + request.args.get("last_name", ""))
+    if not want:
+        return jsonify([])
+    out = []
+    for m in q_all("SELECT first_name, last_name, school, status"
+                   " FROM members"):
+        if _norm_name(m["first_name"] + m["last_name"]) == want:
+            out.append({"name": f"{m['first_name']} {m['last_name']}",
+                        "school": m["school"], "status": m["status"]})
+    return jsonify(out)
+
+
+@app.route("/api/members/bulk-approve", methods=["POST"])
+@require_role("mentor", "admin")
+def api_members_bulk_approve():
+    """Approve several pending members at once (the CSV-import flow can
+    land a dozen pending applications; approving one by one is the
+    bottleneck). Only currently-pending members change, and each
+    approval runs the same account auto-link as a single approval."""
+    b = request.get_json(force=True, silent=True) or {}
+    ids = b.get("member_ids") or []
+    if not isinstance(ids, list):
+        return err("member_ids must be a list")
+    approved = 0
+    for mid in ids:
+        try:
+            mid = int(mid)
+        except (ValueError, TypeError):
+            continue
+        m = q_one("SELECT status FROM members WHERE id=?", (mid,))
+        if m and m["status"] == "pending":
+            execute("UPDATE members SET status='approved' WHERE id=?",
+                    (mid,))
+            _auto_link_member(mid)
+            approved += 1
+    return jsonify({"approved": approved, "requested": len(ids)})
+
+
 @app.route("/api/members/sample", methods=["DELETE"])
 @require_role("mentor", "admin")
 def api_members_clear_samples():
@@ -1100,6 +1179,38 @@ def api_welcome(mid):
                      f"{m['parent_whatsapp']}.")
     lines.append("Watch for the season calendar and first build session details.")
     return jsonify({"message": "\n".join(lines)})
+
+
+@app.route("/api/backup")
+@require_role("mentor", "admin")
+def api_backup():
+    """One-click full database download. Uses SQLite's online backup
+    API under the app lock, so the snapshot is consistent even while
+    the server is running; an in-memory database backs up to a file
+    the same way."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        with _lock:
+            src = get_db()
+            dst = sqlite3.connect(tmp)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        with open(tmp, "rb") as f:
+            data = f.read()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    stamp = datetime.datetime.now().strftime("%Y%m%d")
+    return app.response_class(data, mimetype="application/octet-stream",
+                              headers={"Content-Disposition":
+                                       "attachment; filename="
+                                       f"frc-team-app-backup-{stamp}.db"})
 
 
 @app.route("/api/roster")
@@ -1151,12 +1262,13 @@ def api_events_csv():
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["Code", "Title", "Type", "Date", "Time", "Location",
-                "Capacity", "Deadline", "Session hours", "Notes"])
+                "Capacity", "Deadline", "Session hours", "Notes", "Season"])
     for e in events:
         w.writerow([e["code"], e["title"], e["type"], e["date"], e["time"],
                     e["location"],
                     "" if e["capacity"] is None else e["capacity"],
-                    e["deadline"], e["session_hours"], e["notes"]])
+                    e["deadline"], e["session_hours"], e["notes"],
+                    e["season"]])
     return app.response_class(buf.getvalue(), mimetype="text/csv",
                               headers={"Content-Disposition":
                                        "attachment; filename=events.csv"})
@@ -1391,14 +1503,15 @@ def _validate_event_row(vals, seen_codes):
             "location": (vals.get("location") or "").strip(),
             "capacity": capacity, "deadline": deadline,
             "session_hours": hours,
-            "notes": (vals.get("notes") or "").strip()}
+            "notes": (vals.get("notes") or "").strip(),
+            "season": (vals.get("season") or "").strip() or None}
     present = set()
     for header, col in (("title", "title"), ("type", "type"),
                         ("date", "date"), ("time", "time"),
                         ("location", "location"), ("capacity", "capacity"),
                         ("deadline", "deadline"),
                         ("session hours", "session_hours"),
-                        ("notes", "notes")):
+                        ("notes", "notes"), ("season", "season")):
         if header in vals:
             present.add(col)
     action = "create"
@@ -1414,7 +1527,7 @@ def _apply_event_row(data, present):
     if existing:
         sets, args = [], []
         for col in ("title", "type", "date", "time", "location",
-                    "capacity", "deadline", "notes"):
+                    "capacity", "deadline", "notes", "season"):
             if col in present:
                 sets.append(f"{col}=?")
                 args.append(data[col])
@@ -1430,11 +1543,11 @@ def _apply_event_row(data, present):
         hours = _EVENT_HOUR_DEFAULTS.get(data["type"], 2)
     eid = execute(
         """INSERT INTO events (title, type, date, time, location, capacity,
-           deadline, session_hours, notes, sample)
-           VALUES (?,?,?,?,?,?,?,?,?,0)""",
+           deadline, session_hours, notes, season, sample)
+           VALUES (?,?,?,?,?,?,?,?,?,?,0)""",
         (data["title"], data["type"], data["date"], data["time"],
          data["location"], data["capacity"], data["deadline"], hours,
-         data["notes"]))
+         data["notes"], data["season"]))
     execute("UPDATE events SET code=? WHERE id=?",
             (data["code"] or f"EVT-{200 + eid}", eid))
     return "created"
@@ -1456,7 +1569,7 @@ def _csv_preview(kind):
                         "whatsapp updates", "discovery chats"},
              "events": {"code", "title", "type", "date", "time",
                         "location", "capacity", "deadline",
-                        "session hours", "notes"}}[kind]
+                        "session hours", "notes", "season"}}[kind]
     if not (set(headers) & known):
         return err("no recognized columns — is this the right file?"
                    " Export CSV gives you the template.", 400)
@@ -1528,7 +1641,8 @@ def _csv_confirm(kind):
                     "capacity": "" if data.get("capacity") is None else str(data["capacity"]),
                     "deadline": data.get("deadline") or "",
                     "session hours": "" if data.get("session_hours") is None else str(data["session_hours"]),
-                    "notes": data.get("notes") or ""}
+                    "notes": data.get("notes") or "",
+                    "season": data.get("season") or ""}
             norm, errors, _, _ = _validate_event_row(vals, seen)
         if errors:
             skipped.append({"line": row.get("line", i + 2), "errors": errors})
@@ -1571,6 +1685,37 @@ def api_events_import_confirm():
 
 
 # ----------------------------------------------------------------------------
+# Announcements: mentor-posted board on the Events page (everyone lands
+# there). Logged-in users read; only mentors/admins post or delete.
+# ----------------------------------------------------------------------------
+@app.route("/api/announcements", methods=["GET", "POST"])
+def api_announcements():
+    if request.method == "GET":
+        return jsonify(q_all("SELECT * FROM announcements"
+                             " ORDER BY created_at DESC, id DESC"))
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    b = request.get_json(force=True, silent=True) or {}
+    if not (b.get("title") or "").strip():
+        return err("title is required")
+    u = current_user()
+    aid = execute("INSERT INTO announcements (title, body, author)"
+                  " VALUES (?,?,?)",
+                  (b["title"].strip(), (b.get("body") or "").strip(),
+                   u["name"] if u else ""))
+    return jsonify(q_one("SELECT * FROM announcements WHERE id=?",
+                         (aid,))), 201
+
+
+@app.route("/api/announcements/<int:aid>", methods=["DELETE"])
+@require_role("mentor", "admin")
+def api_announcement_delete(aid):
+    execute("DELETE FROM announcements WHERE id=?", (aid,))
+    return jsonify({"deleted": aid})
+
+
+# ----------------------------------------------------------------------------
 # Events
 # ----------------------------------------------------------------------------
 @app.route("/api/events", methods=["GET", "POST"])
@@ -1580,7 +1725,18 @@ def api_events():
         if denied:
             return denied
     if request.method == "GET":
-        return jsonify(q_all("SELECT * FROM events ORDER BY date, id"))
+        # Seasons: current (NULL) by default, so old seasons stop
+        # cluttering every list; archived groups history read-only.
+        season = request.args.get("season", "current")
+        if season == "archived":
+            return jsonify(q_all("SELECT * FROM events"
+                                 " WHERE season IS NOT NULL"
+                                 " ORDER BY season, date, id"))
+        if season == "all":
+            return jsonify(q_all("SELECT * FROM events"
+                                 " ORDER BY date, id"))
+        return jsonify(q_all("SELECT * FROM events"
+                             " WHERE season IS NULL ORDER BY date, id"))
     b = request.get_json(force=True)
     if not b.get("title"):
         return err("title is required")
@@ -1598,11 +1754,185 @@ def api_events():
     return jsonify(q_one("SELECT * FROM events WHERE id=?", (eid,))), 201
 
 
-@app.route("/api/events/<int:eid>", methods=["DELETE"])
+@app.route("/api/events/<int:eid>.ics")
+def api_event_ics(eid):
+    """Per-event calendar download (ICS). Timed events use the event
+    time and session hours; events with a date but no parsable time
+    become all-day events; dateless events cannot be calendared."""
+    ev = q_one("SELECT * FROM events WHERE id=?", (eid,))
+    if not ev:
+        return err("event not found", 404)
+    if not ev["date"]:
+        return err("event has no date", 400)
+    try:
+        d0 = datetime.datetime.strptime(ev["date"], "%Y-%m-%d")
+    except ValueError:
+        return err("event date is not YYYY-MM-DD", 400)
+
+    def esc_ics(s):
+        return (s or "").replace("\\", "\\\\").replace(";", "\\;") \
+                        .replace(",", "\\,").replace("\n", "\\n")
+
+    def fold(line):
+        out = []
+        while len(line) > 75:
+            out.append(line[:75])
+            line = " " + line[75:]
+        out.append(line)
+        return "\r\n".join(out)
+
+    import re as _re
+    mt = _re.match(r"^(\d{1,2}):(\d{2})\s*([APap][Mm])?$",
+                   (ev["time"] or "").strip())
+    if mt:
+        hh, mm = int(mt.group(1)), int(mt.group(2))
+        ap = (mt.group(3) or "").upper()
+        if ap == "PM" and hh < 12:
+            hh += 12
+        if ap == "AM" and hh == 12:
+            hh = 0
+        try:
+            dur = float(ev["session_hours"] or 2)
+        except (ValueError, TypeError):
+            dur = 2
+        start_dt = d0.replace(hour=hh, minute=mm)
+        end_dt = start_dt + datetime.timedelta(hours=dur)
+        start = ("DTSTART:" + start_dt.strftime("%Y%m%dT%H%M%S"),
+                 "DTEND:" + end_dt.strftime("%Y%m%dT%H%M%S"))
+    else:
+        start = (f"DTSTART;VALUE=DATE:{d0.strftime('%Y%m%d')}",
+                 "DTEND;VALUE=DATE:"
+                 + (d0 + datetime.timedelta(days=1)).strftime("%Y%m%d"))
+    lines = ["BEGIN:VCALENDAR", "VERSION:2.0",
+             "PRODID:-//FRC Team App//EN", "BEGIN:VEVENT",
+             f"UID:event-{ev['id']}@frc-team-app",
+             "DTSTAMP:" + datetime.datetime.now(
+                 datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+             start[0], start[1],
+             f"SUMMARY:{esc_ics(ev['title'])}"]
+    if ev["location"]:
+        lines.append(f"LOCATION:{esc_ics(ev['location'])}")
+    if ev["notes"]:
+        lines.append(f"DESCRIPTION:{esc_ics(ev['notes'])}")
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+    body = "\r\n".join(fold(l) for l in lines) + "\r\n"
+    return app.response_class(body, mimetype="text/calendar",
+                              headers={"Content-Disposition":
+                                       "attachment; filename="
+                                       f"{ev['code'] or 'event'}.ics"})
+
+
+@app.route("/api/events/archive-season", methods=["POST"])
 @require_role("mentor", "admin")
-def api_event_delete(eid):
-    execute("DELETE FROM events WHERE id=?", (eid,))
-    return jsonify({"deleted": eid})
+def api_events_archive_season():
+    """Close the current season: every current (unarchived) event gets
+    the season label and leaves the main lists. History stays readable
+    in the archive section, and unarchive-season brings it back."""
+    b = request.get_json(force=True, silent=True) or {}
+    season = (b.get("season") or "").strip()
+    if not season:
+        return err("season name is required")
+    if len(season) > 40:
+        return err("season name is too long (40 max)")
+    with _lock:
+        db = get_db()
+        n = db.execute("UPDATE events SET season=? WHERE season IS NULL",
+                       (season,)).rowcount
+        db.commit()
+    return jsonify({"archived": n, "season": season})
+
+
+@app.route("/api/events/unarchive-season", methods=["POST"])
+@require_role("mentor", "admin")
+def api_events_unarchive_season():
+    b = request.get_json(force=True, silent=True) or {}
+    season = (b.get("season") or "").strip()
+    if not season:
+        return err("season name is required")
+    with _lock:
+        db = get_db()
+        n = db.execute("UPDATE events SET season=NULL WHERE season=?",
+                       (season,)).rowcount
+        db.commit()
+    return jsonify({"restored": n, "season": season})
+
+
+@app.route("/api/events/<int:eid>", methods=["PATCH", "DELETE"])
+@require_role("mentor", "admin")
+def api_event(eid):
+    if request.method == "DELETE":
+        execute("DELETE FROM events WHERE id=?", (eid,))
+        return jsonify({"deleted": eid})
+    ev = q_one("SELECT * FROM events WHERE id=?", (eid,))
+    if not ev:
+        return err("event not found", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    sets, args = [], []
+    if "title" in b:
+        if not (b["title"] or "").strip():
+            return err("title is required")
+        sets.append("title=?")
+        args.append(b["title"].strip())
+    if "type" in b:
+        if b["type"] not in ("meeting", "build", "competition",
+                             "outreach", "club"):
+            return err("unknown type")
+        sets.append("type=?")
+        args.append(b["type"])
+    import re as _re
+    for col in ("date", "deadline"):
+        if col in b:
+            raw = (b[col] or "").strip() or None
+            if raw:
+                try:
+                    datetime.datetime.strptime(raw, "%Y-%m-%d")
+                except ValueError:
+                    return err(f"{col} must be YYYY-MM-DD")
+            sets.append(f"{col}=?")
+            args.append(raw)
+    if "time" in b:
+        raw = (b["time"] or "").strip() or None
+        if raw and not _re.match(r"^\d{1,2}:\d{2}(\s*[APap][Mm])?$", raw):
+            return err("time must look like 6:00 PM or 18:00")
+        sets.append("time=?")
+        args.append(raw)
+    if "location" in b:
+        sets.append("location=?")
+        args.append((b["location"] or "").strip() or None)
+    if "capacity" in b:
+        raw = b["capacity"]
+        if raw in ("", None):
+            cap = None
+        else:
+            try:
+                cap = int(raw)
+                if cap < 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                return err("capacity must be a whole number 0 or higher")
+        sets.append("capacity=?")
+        args.append(cap)
+    if "session_hours" in b:
+        # Blank keeps the old value (hours must never go NULL, or
+        # check-in credit breaks); a number replaces it.
+        raw = b["session_hours"]
+        if raw not in ("", None):
+            try:
+                hours = float(raw)
+                if hours < 0:
+                    raise ValueError
+            except (ValueError, TypeError):
+                return err("session hours must be a number 0 or higher")
+            sets.append("session_hours=?")
+            args.append(hours)
+    if "notes" in b:
+        sets.append("notes=?")
+        args.append((b["notes"] or "").strip() or None)
+    if not sets:
+        return err("nothing to update")
+    execute(f"UPDATE events SET {', '.join(sets)} WHERE id=?",
+            (*args, eid))
+    return jsonify(q_one("SELECT * FROM events WHERE id=?", (eid,)))
 
 
 def _occupancy_count(eid):
@@ -1610,6 +1940,24 @@ def _occupancy_count(eid):
     r = q_one("SELECT COUNT(*) c FROM rsvps WHERE event_id=?"
               " AND status IN ('going','partial')", (eid,))
     return r["c"]
+
+
+@app.route("/api/events/<int:eid>/checkin-qr")
+@require_role("mentor", "admin")
+def api_event_checkin_qr(eid):
+    """Door QR: encodes a link that jumps a scanned phone straight to
+    Tracking with this event selected. Phones must reach the server
+    (same network) and be logged in; the login flow preserves the
+    link and lands on Tracking after signing in."""
+    ev = q_one("SELECT id, title FROM events WHERE id=?", (eid,))
+    if not ev:
+        return err("event not found", 404)
+    url = request.host_url + f"#checkin-{eid}"
+    try:
+        svg = _qr_svg_for_html(url)
+    except Exception:
+        return err("QR generation is unavailable on this server", 503)
+    return jsonify({"url": url, "title": ev["title"], "qr_svg": svg})
 
 
 @app.route("/api/events/<int:eid>/rsvps", methods=["GET", "POST"])
@@ -1759,6 +2107,38 @@ def api_checkin_verify(cid):
 def api_event_checkins(eid):
     return jsonify(q_all("SELECT * FROM checkins WHERE event_id=? ORDER BY id",
                          (eid,)))
+
+
+@app.route("/api/hours.csv")
+@require_role("mentor", "admin")
+def api_hours_csv():
+    """Per-student hours summary for award submissions and service-hour
+    verification: one row per approved roster member, verified +
+    unverified + total. Students with no check-ins still list, at 0."""
+    import csv
+    import io
+    rows = q_all(
+        """SELECT m.first_name, m.last_name, m.code, m.school,
+                  COALESCE(SUM(CASE WHEN c.verified=1 THEN c.hours
+                                    ELSE 0 END), 0) AS verified_hours,
+                  COALESCE(SUM(CASE WHEN c.verified=0 THEN c.hours
+                                    ELSE 0 END), 0) AS unverified_hours,
+                  COUNT(c.id) AS checkins
+           FROM members m LEFT JOIN checkins c ON c.member_id = m.id
+           WHERE m.status='approved'
+           GROUP BY m.id ORDER BY m.last_name, m.first_name""")
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Student", "Code", "School", "Verified hours",
+                "Unverified hours", "Total hours", "Check-ins"])
+    for r in rows:
+        v = r["verified_hours"] or 0
+        u = r["unverified_hours"] or 0
+        w.writerow([f"{r['first_name']} {r['last_name']}", r["code"],
+                    r["school"], v, u, v + u, r["checkins"]])
+    return app.response_class(buf.getvalue(), mimetype="text/csv",
+                              headers={"Content-Disposition":
+                                       "attachment; filename=hours.csv"})
 
 
 @app.route("/api/hours")
@@ -2106,30 +2486,59 @@ def api_tool_create():
 
 @app.route("/api/tools/<int:tid>/claim", methods=["POST"])
 def api_tool_claim(tid):
-    """Tools are hauled by parent drivers: the claim must name a parent
-    driver with a carpool for this event — not a student."""
+    """Tools are hauled by parent drivers (a parent driver with a
+    carpool for this event — not a student) or by a team van."""
     b = request.get_json(force=True)
     if not b.get("claimed_by"):
         return err("claimed_by required")
     t = q_one("SELECT * FROM tools WHERE id=?", (tid,))
     if not t:
         return err("tool not found", 404)
-    parent_drivers = {_norm_name(r["person_name"]) for r in q_all(
-        "SELECT person_name FROM rsvps WHERE event_id=? AND"
-        " person_kind='parent' AND status IN ('going','partial')",
-        (t["event_id"],))}
-    parent_drivers |= {_norm_name(m["parent_name"]) for m in q_all(
-        "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
-        " AND parent_name != ''")}
-    car_drivers = {_norm_name(c["driver_name"]) for c in q_all(
-        "SELECT driver_name FROM carpools WHERE event_id=?", (t["event_id"],))}
-    if (_norm_name(b["claimed_by"]) not in parent_drivers
-            or _norm_name(b["claimed_by"]) not in car_drivers):
-        return err("tools are hauled by parent drivers — pick a parent driver"
-                   " with a carpool for this event")
+    van_names = {_norm_name(r["name"]) for r in q_all(
+        "SELECT name FROM team_vans")}
+    if _norm_name(b["claimed_by"]) in van_names:
+        pass
+    else:
+        parent_drivers = {_norm_name(r["person_name"]) for r in q_all(
+            "SELECT person_name FROM rsvps WHERE event_id=? AND"
+            " person_kind='parent' AND status IN ('going','partial')",
+            (t["event_id"],))}
+        parent_drivers |= {_norm_name(m["parent_name"]) for m in q_all(
+            "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
+            " AND parent_name != ''")}
+        car_drivers = {_norm_name(c["driver_name"]) for c in q_all(
+            "SELECT driver_name FROM carpools WHERE event_id=?",
+            (t["event_id"],))}
+        if (_norm_name(b["claimed_by"]) not in parent_drivers
+                or _norm_name(b["claimed_by"]) not in car_drivers):
+            return err("tools are hauled by parent drivers or team vans —"
+                       " pick a parent driver with a carpool for this"
+                       " event, or a team van")
     execute("UPDATE tools SET claimed_by=?, claimed_at=datetime('now') WHERE id=?",
             (b["claimed_by"], tid))
     return jsonify(q_one("SELECT * FROM tools WHERE id=?", (tid,)))
+
+
+@app.route("/api/team-vans", methods=["GET", "POST"])
+def api_team_vans():
+    if request.method == "GET":
+        return jsonify(q_all("SELECT * FROM team_vans ORDER BY name"))
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    b = request.get_json(force=True, silent=True) or {}
+    if not (b.get("name") or "").strip():
+        return err("name is required")
+    vid = execute("INSERT INTO team_vans (name, notes) VALUES (?,?)",
+                  (b["name"].strip(), (b.get("notes") or "").strip()))
+    return jsonify(q_one("SELECT * FROM team_vans WHERE id=?", (vid,))), 201
+
+
+@app.route("/api/team-vans/<int:vid>", methods=["DELETE"])
+@require_role("mentor", "admin")
+def api_team_van_delete(vid):
+    execute("DELETE FROM team_vans WHERE id=?", (vid,))
+    return jsonify({"deleted": vid})
 
 
 @app.route("/api/tools/<int:tid>/unclaim", methods=["POST"])

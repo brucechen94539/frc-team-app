@@ -89,8 +89,13 @@ and `can't make it` do not count as attending.
   upload 401; non-image and oversized uploads 400; pre-avatar DB gains
   the column on boot.
 
-## Two-factor authentication (TOTP, opt-in)
+## Two-factor authentication (TOTP; opt-in for students/parents, required for mentors/admins)
 
+- **Mentor/admin accounts must have 2FA on.** Until a mentor sets it up,
+  the server closes every non-auth API route for them (403 "two-factor
+  setup required") and the UI holds them on the Security tab; setup
+  itself lives under `/api/auth/`, so a held mentor can always reach it.
+  Students and parents stay opt-in. `/api/auth/me` reports `requires_2fa`.
 - Any user can opt in from the **Security** tab: scan the QR code with
   **Google Authenticator or Apple Passwords** (both use the standard TOTP
   protocol, so one implementation serves both) or enter the key by hand,
@@ -141,6 +146,16 @@ and `can't make it` do not count as attending.
   same subteam cannot be picked twice.
 - Every application goes to the **mentor approval queue**; a mentor approves,
   waitlists, or declines each one. Approved students join the roster.
+  **Bulk approve** covers the import case: on the pending filter, mentors
+  tick members (or Select all) and approve them in one call
+  (`POST /api/members/bulk-approve`); only still-pending members change,
+  and each approval runs the same account auto-link as a single approval.
+- The sign-up form warns on a likely duplicate instead of silently filing
+  a second application: if the name matches an existing member, the form
+  shows that member (name, school, status) and submits on a second click.
+  The check (`GET /api/members/duplicate-check`) is names-only — no
+  contact details leave the server — and a failed check never blocks
+  sign-up.
 - New students are offered optional **Subteam Discovery Chats** with subteam
   captains.
 
@@ -174,11 +189,43 @@ and `can't make it` do not count as attending.
 - Import is mentor/admin-only on the server (logged-out 401, other
   roles 403) and the Import buttons are mentor-only in the UI, matching
   the export buttons.
+- The events export carries a **Season** column, and event import accepts
+  it: importing a season value archives the event under it (blank =
+  current season), so a season round-trips through export/import.
 
 ## Events & RSVPs
 
 - Mentors/admins create events (title, type, date/time, location, capacity).
   Event types: meeting, build, competition, outreach, **club**.
+- Mentors/admins **edit events in place**: an Edit button on each event
+  card opens a prefilled form (title, type, date, time, location,
+  capacity, deadline, session hours, notes); saving calls
+  `PATCH /api/events/<id>`, validated like creation (type in the 5,
+  dates YYYY-MM-DD, capacity a whole number 0+, hours a number 0+).
+  Clearing session hours keeps the old value (hours must never go NULL,
+  or check-in credit breaks); lowering capacity below current occupancy
+  leaves existing RSVPs in place, and new "going" answers waitlist.
+- **Duplicate** copies an event into the create form (title, type, time,
+  location, capacity, notes) with the date and deadline blank, so the
+  mentor picks a new date and saves. **Repeat weekly** on the create form
+  (1–12 weeks) creates one event per week at +7-day intervals, shifting
+  the deadline with the event; it only applies when a date is set.
+- The Events view has a **List / Calendar** toggle: the calendar is a
+  month grid (Sunday-first, prev/next/Today) over the filtered events,
+  and clicking a title jumps to that event's card below. Every event card
+  has an **Add to calendar** link (`GET /api/events/<id>.ics`): timed
+  events use the event time and session hours for the duration, events
+  with a date but no parsable time become all-day events, and dateless
+  events are rejected (400).
+- **Seasons:** events carry a `season` (NULL = current season). The main
+  lists — Events, Tracking and Travel pickers — show current-season
+  events only. Mentors close a season with **Archive season…** (a name
+  like `2025-26`), which labels every current event and moves it out of
+  the main lists; the **Show archived seasons** section lists archived
+  events grouped by season as read-only cards (RSVP lists visible, no
+  RSVP/edit/delete actions), and **Restore season to current** brings a
+  season back. `GET /api/events?season=archived|all` serves the archive
+  and the full list; the default is current only.
 - **Club** is a weekly event for **BASIS Independent Fremont (BIF) students
   only**, meeting **Mondays 4:00–5:05 PM** (1 session hour). Picking the Club
   type pre-fills 4:00 PM and the next Monday when those fields are empty,
@@ -226,12 +273,32 @@ and `can't make it` do not count as attending.
 - Event pickers in the UI are **bubbles** (chips), not dropdowns: the picked
   event is highlighted and the sections below update to that event.
 
+## Announcements
+
+- Mentors/admins post **announcements** (title + message) from a card at
+  the top of the Events page — the view everyone lands on. All logged-in
+  users read them, newest first, with the posting mentor's name and date;
+  mentors can delete them. Posting and deleting are mentor/admin-only on
+  the server (`GET|POST /api/announcements`, `DELETE /api/announcements/<id>`).
+
 ## Attendance tracking
 
 - Check-in has **two paths**: mentors mark attendance, and students can
   self check-in. A self check-in is unverified until a mentor confirms it.
 - The app tracks hours per student; a dashboard summarizes attendance
   and hours.
+- **Check-in QR:** each event card (mentors) has a Check-in QR button
+  showing a QR code for that event (`GET /api/events/<id>/checkin-qr`,
+  mentor/admin-only). Scanning it opens the app and jumps straight to
+  Tracking with that event selected — the link survives the login flow,
+  so a logged-out scan lands on Tracking after signing in, and the hash
+  is consumed so later reloads use the sticky place instead. Phones must
+  reach the server (same network as the self-hosted Mac) and be logged in.
+- **Hours export:** mentors can download a per-student hours summary
+  (`GET /api/hours.csv`, mentor/admin-only) for award submissions and
+  service-hour verification: one row per approved roster member with
+  verified, unverified, and total hours plus check-in count; students
+  with no check-ins still list, at 0.
 
 ## Task Board (Kanban, team-wide)
 
@@ -288,6 +355,12 @@ well as in the UI.
   their cars (driver + vehicle detail), never students. A claimed tool
   shows as "loaded in <driver>'s car" with the vehicle tooltip. Anyone
   signed in can claim a tool for a driver and unclaim it.
+- **Team vans** haul tools too: mentors manage a team-wide van list in
+  Travel & Logistics (`GET|POST /api/team-vans`, `DELETE /api/team-vans/<id>`,
+  mentor/admin-only for writes), and vans appear in every event's tool-claim
+  picker as "Team van: <name>". Claiming by a van name is allowed without
+  the parent-driver/carpool checks, and a van-hauled tool shows as
+  "loaded in team van <name>".
 
 ### Hotels & room parents
 
@@ -336,6 +409,12 @@ well as in the UI.
 - Self-hosted Flask + SQLite app; no external services required.
 - One database file (`data.db` by default, `DB` env var overrides);
   schema migrations for new columns run automatically at startup.
+- Mentors/admins can download a **full database backup** from the Mentor
+  Queue (`GET /api/backup`): the server copies the live database with
+  SQLite's online backup API under the app lock, so the snapshot is
+  consistent even while the server runs, and serves it as
+  `frc-team-app-backup-YYYYMMDD.db`. Restoring is copying the file back
+  over `data.db` while the server is stopped.
 
 ### Sticky session
 

@@ -286,6 +286,15 @@ pre.welcome{background:var(--fieldbg);border:1px dashed var(--accent);border-rad
 .avatar-sm{width:30px;height:30px;font-size:13px;cursor:pointer}
 .avatar-lg{width:96px;height:96px;font-size:34px}
 
+/* Month calendar grid (Events view). */
+.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin-top:10px}
+.cal-head{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.08em}
+.cal-cell{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:6px;min-height:64px;font-size:13px}
+.cal-cell.empty{background:transparent;border-color:transparent}
+.cal-cell.today{border-color:var(--accent)}
+.cal-cell b{display:block;margin-bottom:4px}
+.cal-ev{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent);font-size:12px}
+
 /* Avatar menu: just links now (General, Security, Log Out). Anchored
    to the top-right button row like the menu dropdown. */
 .avatar-menu{position:absolute;top:calc(100% + 8px);right:0;z-index:60;

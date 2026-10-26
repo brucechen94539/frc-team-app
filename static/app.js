@@ -66,6 +66,7 @@ let rosterCache = [];   // approved members
 let queueFilter = "pending";
 let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
+let eventCalMode = false, eventCalCursor = "";
 let openRsvpLists = new Set();  // event ids whose RSVP list is expanded
 let trackEventId = null, travelEventId = null;
 let currentView = "events";
@@ -191,6 +192,25 @@ function closeLogoutModal() {
   const m = $("logout-modal");
   if (m) m.classList.remove("open");
 }
+function openQrModal() {
+  const m = $("qr-modal");
+  if (m) m.classList.add("open");
+}
+function closeQrModal() {
+  const m = $("qr-modal");
+  if (m) m.classList.remove("open");
+}
+/* A scanned #checkin-<id> link jumps to Tracking with that event
+   selected (used at boot and after login, so a logged-out scan still
+   lands right). Consumes the hash so later reloads use sticky place. */
+function goCheckinQR() {
+  const qr = location.hash.match(/^#checkin-(\d+)$/);
+  if (!qr) return false;
+  trackEventId = parseInt(qr[1], 10);
+  try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+  showView("tracking");
+  return true;
+}
 document.querySelectorAll("#nav button").forEach((b) => {
   b.addEventListener("click", () => { showView(b.dataset.view); closeMenu(); });
 });
@@ -209,16 +229,25 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
 if (_loNo) _loNo.addEventListener("click", closeLogoutModal);
 const _loModal = $("logout-modal");
 if (_loModal) _loModal.addEventListener("click", (e) => { if (e.target === _loModal) closeLogoutModal(); });
+const _qrModal = $("qr-modal");
+if (_qrModal) _qrModal.addEventListener("click", (e) => { if (e.target === _qrModal) closeQrModal(); });
+const _qrClose = $("qr-close");
+if (_qrClose) _qrClose.addEventListener("click", closeQrModal);
 function showView(name) {
   closeAvatarMenu();
   closeLogoutModal();
+  closeQrModal();
+  // Mentors/admins without 2FA are held on Security until they set it
+  // up (the server enforces the same rule on every API route).
+  if (ME && ME.requires_2fa && name !== "security" && name !== "login" && name !== "signup")
+    name = "security";
   if (!ME && name !== "signup" && name !== "login") name = "login";
   currentView = name;
   savePlace();
@@ -274,7 +303,7 @@ async function submitLogin() {
     await loadAvatar();
     applyNav();
     toast("Welcome, " + ME.name + ".");
-    showView("events");
+    if (!goCheckinQR()) showView("events");
     refreshBadges();
   } catch (e) { errBox.textContent = e.message; }
 }
@@ -296,7 +325,7 @@ function render2FAStep() {
       await loadAvatar();
       applyNav();
       toast("Welcome, " + ME.name + ".");
-      showView("events");
+      if (!goCheckinQR()) showView("events");
       refreshBadges();
     } catch (e) { errBox.textContent = e.message; }
   };
@@ -431,6 +460,7 @@ async function renderSecurity() {
   catch (e) { v.innerHTML = `<div class="card"><p class="sub">Could not load security settings.</p></div>`; return; }
   if (!st.enabled) {
     v.innerHTML = `
+    ${ME && ME.requires_2fa ? `<div class="card"><p><b>Mentor accounts must set up two-factor authentication.</b> Other sections stay locked until you finish setup below.</p></div>` : ""}
     <div class="card"><h2>Two-factor authentication</h2>
       <p class="sub">Add a second step to your login with an authenticator app
       (Google Authenticator or Apple Passwords). Scan the QR code, then enter
@@ -464,7 +494,10 @@ async function renderSecurity() {
               <div class="row" style="flex-wrap:wrap;gap:6px">${r.backup_codes.map((c) =>
                 `<span class="pill">${esc(c)}</span>`).join("")}</div>
               <button class="btn" id="t-done" style="margin-top:12px">Done — I saved them</button>`;
-            $("t-done").addEventListener("click", renderSecurity);
+            $("t-done").addEventListener("click", async () => {
+              ME = (await GET("/api/auth/me")).user;
+              renderSecurity();
+            });
           } catch (e) { toast("Error: " + e.message); }
         });
       } catch (e) { toast("Error: " + e.message); }
@@ -490,6 +523,7 @@ async function renderSecurity() {
   $("t-disable").addEventListener("click", async () => {
     try {
       await POST("/api/auth/totp-disable", {code: $("t-code").value.trim()});
+      ME = (await GET("/api/auth/me")).user;
       toast("Two-factor authentication disabled."); renderSecurity();
     } catch (e) { toast("Error: " + e.message); }
   });
@@ -656,6 +690,21 @@ async function submitApplication() {
     return void (errBox.textContent = "Student first/last name and parent name are required.");
   if (!Object.values(ag).every(Boolean))
     return void (errBox.textContent = "All four agreements must be accepted.");
+  // Duplicate warning, not a block: if this name already exists on the
+  // roster, show it once and let a second click submit anyway (a check
+  // failure never blocks sign-up). The warned name is remembered so
+  // editing the name re-arms the check.
+  const who = val("f-first") + " " + val("f-last");
+  if (dupWarnedFor !== who) {
+    try {
+      const dups = await GET(`/api/members/duplicate-check?first_name=${encodeURIComponent(val("f-first"))}&last_name=${encodeURIComponent(val("f-last"))}`);
+      if (dups.length) {
+        errBox.innerHTML = `This looks like an existing member: ${dups.map((d) => `${esc(d.name)} (${esc(d.school || "no school")} · ${d.status})`).join(", ")}. If this is a different person, click Submit again.`;
+        dupWarnedFor = who;
+        return;
+      }
+    } catch (e) { /* ignore: a failed check must not block sign-up */ }
+  }
   const prefs = [...new Set([0, 1, 2].map((i) => $("pref" + i).value).filter(Boolean))];
   const chats = [...document.querySelectorAll("#f-chats input:checked")].map((c) => c.value);
   try {
@@ -678,6 +727,7 @@ async function submitApplication() {
 
 /* ---------------- mentor queue ---------------- */
 const STATUS_PILL = {pending: "amber", approved: "green", waitlisted: "gray", declined: "red"};
+let dupWarnedFor = "";
 
 async function renderQueue() {
   const v = $("view-queue");
@@ -693,8 +743,15 @@ async function renderQueue() {
       `<button class="btn ${queueFilter === s ? "" : "ghost"} small"
         data-f="${s}">${s[0].toUpperCase() + s.slice(1)} (${counts[s]})</button>`).join("")}
     <span style="flex:1"></span>
+    <a class="btn ghost small" href="/api/backup">Download backup</a>
     <button class="btn danger small" id="q-clear">Clear sample entries</button>
   </div></div>
+  ${queueFilter === "pending" && members.length ? `<div class="card"><div class="row">
+    <label><input type="checkbox" id="q-select-all"> Select all</label>
+    <button class="btn small" id="q-approve-sel">Approve selected</button>
+    <button class="btn small ghost" id="q-approve-all">Approve all pending</button>
+    <span class="sub" id="q-sel-count"></span>
+  </div></div>` : ""}
   <div id="q-list">${members.map(queueCard).join("") || '<div class="card">Nothing here.</div>'}</div>
   <div class="card"><h3>Team accounts</h3>
     <p class="sub">Logins for mentors, parents and students \u2014 separate from sign-up applications. Only mentors/admins see this.</p>
@@ -728,6 +785,35 @@ async function renderQueue() {
     toast(`Cleared ${r.cleared} sample entries.`);
     renderQueue(); refreshBadges();
   });
+  const selAll = $("q-select-all");
+  if (selAll) {
+    const boxes = () => [...v.querySelectorAll(".q-bulk")];
+    const updateCount = () => {
+      const n = boxes().filter((c) => c.checked).length;
+      const lbl = $("q-sel-count");
+      if (lbl) lbl.textContent = n ? `${n} selected` : "";
+      const btn = $("q-approve-sel");
+      if (btn) btn.textContent = `Approve selected${n ? ` (${n})` : ""}`;
+    };
+    selAll.addEventListener("change", () => {
+      boxes().forEach((c) => { c.checked = selAll.checked; });
+      updateCount();
+    });
+    boxes().forEach((c) => c.addEventListener("change", updateCount));
+    const approveIds = async (ids) => {
+      if (!ids.length) { toast("Nothing selected."); return; }
+      try {
+        const r = await POST("/api/members/bulk-approve", {member_ids: ids});
+        toast(`Approved ${r.approved}.`);
+        renderQueue(); refreshBadges();
+      } catch (err) { toast("Error: " + err.message); }
+    };
+    $("q-approve-sel").addEventListener("click", () =>
+      approveIds(boxes().filter((c) => c.checked)
+        .map((c) => parseInt(c.dataset.bulkId, 10))));
+    $("q-approve-all").addEventListener("click", () =>
+      approveIds(boxes().map((c) => parseInt(c.dataset.bulkId, 10))));
+  }
   v.querySelectorAll("[data-act]").forEach((b) =>
     b.addEventListener("click", () => queueAction(b)));
   renderAccounts();
@@ -829,6 +915,7 @@ function queueCard(m) {
       </table>
     </details>
     <div class="row" style="margin-top:8px">
+      ${m.status === "pending" ? `<input type="checkbox" class="q-bulk" data-bulk-id="${m.id}" title="Select for bulk approve">` : ""}
       <select id="sub-${m.id}">
         <option value="">Assign subteam…</option>
         ${SUBTEAMS.map((s) => `<option ${m.assigned_subteam === s.name ? "selected" : ""}>${esc(s.name)}</option>`).join("")}
@@ -1038,6 +1125,67 @@ async function loadPeople() {
   rosterCache = await GET(MENTOR() ? "/api/roster" : "/api/people");
 }
 
+async function renderAnnouncements() {
+  const el = $("an-list");
+  if (!el) return;
+  let list = [];
+  try { list = await GET("/api/announcements"); } catch (e) {
+    el.innerHTML = '<span class="sub">Could not load announcements.</span>';
+    return;
+  }
+  el.innerHTML = list.map((a) => `
+    <div style="margin:8px 0">
+      <b>${esc(a.title)}</b>
+      <span class="sub"> · ${esc(a.author || "")} · ${(a.created_at || "").slice(0, 10)}</span>
+      ${MENTOR() ? `<button class="btn small ghost" data-delan="${a.id}">Delete</button>` : ""}
+      <div>${esc(a.body)}</div>
+    </div>`).join("") || '<span class="sub">No announcements yet.</span>';
+  el.querySelectorAll("[data-delan]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("Delete this announcement?")) return;
+      await DEL(`/api/announcements/${b.dataset.delan}`);
+      renderAnnouncements();
+    }));
+}
+
+/* Month grid over the filtered events: an overview above the list.
+   Clicking a title jumps to that event's card below. */
+function eventCalendarHtml(list) {
+  const now = new Date();
+  const cur = eventCalCursor ||
+    `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const [y, m] = cur.split("-").map(Number);
+  const first = new Date(y, m - 1, 1);
+  const startDay = first.getDay();
+  const days = new Date(y, m, 0).getDate();
+  const label = first.toLocaleString(undefined, {month: "long", year: "numeric"});
+  const byDay = {};
+  for (const e of list) {
+    if (!e.date || !e.date.startsWith(cur)) continue;
+    (byDay[e.date] = byDay[e.date] || []).push(e);
+  }
+  const cells = [];
+  for (let i = 0; i < startDay; i++) cells.push(`<div class="cal-cell empty"></div>`);
+  for (let d = 1; d <= days; d++) {
+    const ds = `${cur}-${String(d).padStart(2, "0")}`;
+    const evs = byDay[ds] || [];
+    const today = ds === now.toISOString().slice(0, 10) ? " today" : "";
+    cells.push(`<div class="cal-cell${today}"><b>${d}</b>
+      ${evs.slice(0, 3).map((e) => `<a href="#ev-card-${e.id}" class="cal-ev">${esc(e.title)}</a>`).join("")}
+      ${evs.length > 3 ? `<span class="sub">+${evs.length - 3} more</span>` : ""}</div>`);
+  }
+  return `<div class="card"><div class="row">
+    <button class="btn small ghost" data-calnav="-1">‹ Prev</button>
+    <b style="flex:1;text-align:center">${label}</b>
+    <button class="btn small ghost" data-calnav="0">Today</button>
+    <button class="btn small ghost" data-calnav="1">Next ›</button>
+  </div>
+  <div class="cal-grid">
+    ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => `<div class="cal-head">${d}</div>`).join("")}
+    ${cells.join("")}
+  </div></div>`;
+}
+
 async function renderEvents() {
   const v = $("view-events");
   await loadPeople();
@@ -1051,6 +1199,14 @@ async function renderEvents() {
   for (const e of list) cards.push(await eventCard(e));
   const types = ["meeting", "build", "competition", "outreach", "club"];
   v.innerHTML = `
+  <div class="card"><h2>Announcements</h2>
+    <div id="an-list"><span class="sub">Loading…</span></div>
+    <div class="mo" style="margin-top:12px">
+      <div class="field"><label>Title</label><input id="an-title"></div>
+      <div class="field"><label>Message</label><textarea id="an-body"></textarea></div>
+      <button class="btn small" id="an-post">Post announcement</button>
+    </div>
+  </div>
   <div class="card"><h2>Events &amp; RSVPs</h2>
   <p class="sub">Mentors create events. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote.</p>
   <h3 class="mo">Create event</h3>
@@ -1064,6 +1220,8 @@ async function renderEvents() {
     <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label>
       <input id="e-cap" inputmode="numeric"></div>
     <div class="field"><label>RSVP deadline</label><input id="e-dead" type="date"></div>
+    <div class="field"><label>Repeat weekly <span class="hint">(weeks, 1 = once, max 12)</span></label>
+      <input id="e-repeat" inputmode="numeric" value="1"></div>
   </div>
   <div class="field mo"><label>Notes</label><textarea id="e-notes"></textarea></div>
   <div class="row mo"><button class="btn" id="e-create">Create event</button>
@@ -1073,6 +1231,7 @@ async function renderEvents() {
   <div class="row mo">
     <a class="btn ghost small" href="/api/events.csv">Export CSV</a>
     <button class="btn ghost small" id="e-import">Import CSV</button>
+    <button class="btn ghost small" id="e-archive">Archive season…</button>
   </div>
   <div id="e-import-panel" class="mo hidden"></div>
   </div>
@@ -1082,14 +1241,87 @@ async function renderEvents() {
     <input id="e-q" placeholder="Search…" value="${esc(eventSearch)}" style="max-width:200px">
     <button class="btn small ghost" id="ev-expand-all">Expand all</button>
     <button class="btn small ghost" id="ev-collapse-all">Collapse all</button>
+    <button class="btn small ${eventCalMode ? "ghost" : ""}" id="ev-list-view">List</button>
+    <button class="btn small ${eventCalMode ? "" : "ghost"}" id="ev-cal-view">Calendar</button>
   </div></div>
-  <div id="ev-list">${cards.join("")}</div>`;
+  ${eventCalMode ? eventCalendarHtml(list) : ""}
+  <div id="ev-list">${cards.join("")}</div>
+  <div class="card"><button class="btn small ghost" id="ev-arch-toggle">Show archived seasons</button>
+  <div id="ev-arch" class="hidden" style="margin-top:10px"></div></div>`;
   v.querySelectorAll("[data-et]").forEach((b) =>
     b.addEventListener("click", () => { eventFilter = b.dataset.et; renderEvents(); }));
   $("e-q").addEventListener("input", (e) => { eventSearch = e.target.value; renderEvents(); });
+  const lv = $("ev-list-view"), cv = $("ev-cal-view");
+  if (lv) lv.addEventListener("click", () => { eventCalMode = false; renderEvents(); });
+  if (cv) cv.addEventListener("click", () => { eventCalMode = true; renderEvents(); });
+  v.querySelectorAll("[data-calnav]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const step = parseInt(b.dataset.calnav, 10);
+      const now = new Date();
+      const base = eventCalCursor ||
+        `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+      if (step === 0) { eventCalCursor = ""; }
+      else {
+        const [y, m] = base.split("-").map(Number);
+        const d = new Date(y, m - 1 + step, 1);
+        eventCalCursor = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      }
+      renderEvents();
+    }));
+  renderAnnouncements();
+  const anPost = $("an-post");
+  if (anPost) anPost.addEventListener("click", async () => {
+    const title = $("an-title").value.trim();
+    if (!title) { toast("Title is required."); return; }
+    try {
+      await POST("/api/announcements", {title, body: $("an-body").value.trim()});
+      $("an-title").value = ""; $("an-body").value = "";
+      toast("Announcement posted."); renderAnnouncements();
+    } catch (err) { toast("Error: " + err.message); }
+  });
   const eImp = $("e-import");
   if (eImp) eImp.addEventListener("click", () => $("e-import-panel").classList.toggle("hidden"));
   bindCsvImport($("e-import-panel"), "events");
+  const eArch = $("e-archive");
+  if (eArch) eArch.addEventListener("click", async () => {
+    const name = prompt("Season name, e.g. 2025-26 (all current events will be archived under it):");
+    if (!name || !name.trim()) return;
+    try {
+      const r = await POST("/api/events/archive-season", {season: name.trim()});
+      toast(`Archived ${r.archived} events under ${r.season}.`);
+      renderEvents();
+    } catch (err) { toast("Error: " + err.message); }
+  });
+  const archT = $("ev-arch-toggle");
+  if (archT) archT.addEventListener("click", async () => {
+    const box = $("ev-arch");
+    const opening = box.classList.contains("hidden");
+    box.classList.toggle("hidden");
+    archT.textContent = opening ? "Hide archived seasons" : "Show archived seasons";
+    if (!opening || box.dataset.loaded) return;
+    box.dataset.loaded = "1";
+    try {
+      const arch = await GET("/api/events?season=archived");
+      if (!arch.length) { box.innerHTML = '<p class="sub">No archived seasons yet.</p>'; return; }
+      const groups = {};
+      for (const e of arch) (groups[e.season || ""] = groups[e.season || ""] || []).push(e);
+      let html = "";
+      for (const [season, evs] of Object.entries(groups)) {
+        const cards2 = [];
+        for (const e of evs) cards2.push(await eventCard(e, true));
+        html += `<h3>${esc(season)} <span class="sub">(${evs.length} events, read-only)</span>
+          ${MENTOR() ? `<button class="btn small ghost" data-unarch="${esc(season)}">Restore season to current</button>` : ""}</h3>
+          ${cards2.join("")}`;
+      }
+      box.innerHTML = html;
+      box.querySelectorAll("[data-unarch]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          if (!confirm(`Restore the ${b.dataset.unarch} season to the current lists?`)) return;
+          await POST("/api/events/unarchive-season", {season: b.dataset.unarch});
+          toast("Season restored."); renderEvents();
+        }));
+    } catch (err) { box.innerHTML = `<p class="sub">Could not load archive: ${esc(err.message)}</p>`; }
+  });
   if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
   const _ec = $("e-create"); if (_ec) _ec.addEventListener("click", createEvent);
   const _ef = $("e-fill"); if (_ef) _ef.addEventListener("click", () => {
@@ -1150,21 +1382,85 @@ async function renderEvents() {
       await DEL(`/api/events/${b.dataset.delev}`);
       toast("Event deleted."); renderEvents();
     }));
+  v.querySelectorAll("[data-qr]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        const r = await GET(`/api/events/${b.dataset.qr}/checkin-qr`);
+        $("qr-title").textContent = `Check-in QR — ${r.title}`;
+        $("qr-body").innerHTML = r.qr_svg;
+        $("qr-url").textContent = r.url;
+        openQrModal();
+      } catch (err) { toast("Error: " + err.message); }
+    }));
+  v.querySelectorAll("[data-dupev]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const e = list.find((x) => x.id === parseInt(b.dataset.dupev, 10));
+      if (!e) return;
+      $("e-title").value = e.title;
+      $("e-type").value = e.type;
+      $("e-time").value = e.time || "";
+      $("e-loc").value = e.location || "";
+      $("e-cap").value = e.capacity === null || e.capacity === undefined ? "" : e.capacity;
+      $("e-notes").value = e.notes || "";
+      $("e-date").value = "";
+      $("e-dead").value = "";
+      $("e-title").scrollIntoView();
+      toast("Copied — pick a new date and save.");
+    }));
+  v.querySelectorAll("[data-editev]").forEach((b) =>
+    b.addEventListener("click", () =>
+      v.querySelector(`#ef-${b.dataset.editev}`).classList.toggle("hidden")));
+  v.querySelectorAll("[data-cancelev]").forEach((b) =>
+    b.addEventListener("click", () =>
+      v.querySelector(`#ef-${b.dataset.cancelev}`).classList.add("hidden")));
+  v.querySelectorAll("[data-saveev]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const f = v.querySelector(`#ef-${b.dataset.saveev}`);
+      const q = (sel) => f.querySelector(sel).value;
+      try {
+        await PATCH(`/api/events/${b.dataset.saveev}`, {title: q(".ef-title").trim(),
+          type: q(".ef-type"), date: q(".ef-date").trim(),
+          time: q(".ef-time").trim(), location: q(".ef-loc").trim(),
+          capacity: q(".ef-cap").trim(), deadline: q(".ef-dead").trim(),
+          session_hours: q(".ef-hours").trim(), notes: q(".ef-notes").trim()});
+        toast("Event updated."); renderEvents();
+      } catch (err) { toast("Error: " + err.message); }
+    }));
 }
 
 async function createEvent() {
   const val = (id) => $(id).value.trim();
   if (!val("e-title")) return toast("Title is required.");
+  const base = {title: val("e-title"), type: $("e-type").value,
+    date: val("e-date"), time: val("e-time"), location: val("e-loc"),
+    capacity: val("e-cap") ? parseInt(val("e-cap"), 10) : null,
+    deadline: val("e-dead"), notes: val("e-notes")};
+  // Weekly repeat: pure calendar math (UTC) so timezones can't shift
+  // the day; the deadline shifts with the event. Dateless events
+  // ignore repeat — a series without dates is meaningless.
+  const addWeeks = (ds, w) => {
+    if (!ds) return "";
+    const [y, m, d] = ds.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, d + w * 7)).toISOString().slice(0, 10);
+  };
   try {
-    await POST("/api/events", {title: val("e-title"), type: $("e-type").value,
-      date: val("e-date"), time: val("e-time"), location: val("e-loc"),
-      capacity: val("e-cap") ? parseInt(val("e-cap"), 10) : null,
-      deadline: val("e-dead"), notes: val("e-notes")});
-    toast("Event created."); renderEvents();
+    await POST("/api/events", base);
+    let weeks = parseInt(val("e-repeat") || "1", 10);
+    if (isNaN(weeks) || weeks < 1) weeks = 1;
+    if (weeks > 12) weeks = 12;
+    if (weeks > 1 && base.date) {
+      for (let w = 1; w < weeks; w++) {
+        await POST("/api/events", {...base,
+          date: addWeeks(base.date, w),
+          deadline: addWeeks(base.deadline, w)});
+      }
+    }
+    toast(weeks > 1 && base.date ? `Created ${weeks} weekly events.` : "Event created.");
+    renderEvents();
   } catch (e) { toast("Error: " + e.message); }
 }
 
-async function eventCard(e) {
+async function eventCard(e, ro = false) {
   const d = await GET(`/api/events/${e.id}/rsvps`);
   const hc = d.headcounts;
   const closed = e.deadline && e.deadline < new Date().toISOString().slice(0, 10);
@@ -1178,7 +1474,8 @@ async function eventCard(e) {
   // only gate, which still rejects with a clear message).
   const clubBlocked = e.type === "club" && !MENTOR() && ME && ME.bif === false;
   let pickerRow;
-  if (clubBlocked) pickerRow = `<p class="sub">Club events are only for BASIS Independent Fremont students.</p>`;
+  if (ro) pickerRow = "";
+  else if (clubBlocked) pickerRow = `<p class="sub">Club events are only for BASIS Independent Fremont students.</p>`;
   else if (closed && !MENTOR()) pickerRow = "";
   else if (pickerOpts.length) pickerRow = `<div class="row">
       <select id="rp-${e.id}">${opts}</select>
@@ -1192,26 +1489,44 @@ async function eventCard(e) {
   const row = (r) => {
     const pill = r.status === "going" ? "green" : r.status === "waitlisted" ? "amber"
       : r.status === "maybe" ? "blue" : r.status === "partial" ? "purple" : "gray";
-    const canRemove = MENTOR() || (ME
+    const canRemove = !ro && (MENTOR() || (ME
       && ((r.person_kind === "student" && r.member_id === scope.student)
-        || (r.person_kind === "parent" && scope.parents.includes(r.member_id))));
+        || (r.person_kind === "parent" && scope.parents.includes(r.member_id)))));
     return `<div class="row" style="margin:4px 0">
       <span class="pill ${pill}">${r.status}</span>
       <span>${esc(r.person_name)} <span class="sub">(${r.person_kind})</span></span>
       ${canRemove ? `<button class="btn small ghost" data-unrsvp="${r.id}">Remove</button>` : ""}</div>`;
   };
-  return `<div class="card">
+  return `<div class="card" id="ev-card-${e.id}">
     <div class="row"><b>${esc(e.title)}</b>
       <span class="pill">${esc(e.type)}</span>
+      ${e.season ? `<span class="pill gray">${esc(e.season)}</span>` : ""}
       ${closed ? '<span class="pill red">RSVP closed</span>' : ""}
       <span style="flex:1"></span>
-      ${MENTOR() ? `<button class="btn small danger" data-delev="${e.id}">Delete</button>` : ""}</div>
+      ${ro ? "" : `<a class="btn small ghost" href="/api/events/${e.id}.ics">Add to calendar</a>
+      ${MENTOR() ? `<button class="btn small ghost" data-qr="${e.id}">Check-in QR</button><button class="btn small ghost" data-dupev="${e.id}">Duplicate</button><button class="btn small ghost" data-editev="${e.id}">Edit</button><button class="btn small danger" data-delev="${e.id}">Delete</button>` : ""}`}</div>
     <div class="sub">${esc(e.date || "")} ${esc(e.time || "")} · ${esc(e.location || "")}
       ${e.capacity ? `· ${hc.going}/${e.capacity} going` : `· ${hc.going} going`}
       · ${hc.maybe} maybe · ${hc.partial} partial
       · ${hc.waitlisted} waitlisted · ${hc.cant} can't make it</div>
     ${e.notes ? `<div class="sub">${esc(e.notes)}</div>` : ""}
     ${e.type === "club" ? `<div class="sub">Club — BASIS Independent Fremont students only · Mondays 4:00–5:05 PM.</div>` : ""}
+    ${MENTOR() && !ro ? `<div id="ef-${e.id}" class="hidden" style="margin-top:10px">
+      <div class="grid3">
+        <div class="field"><label>Title *</label><input class="ef-title" value="${esc(e.title)}"></div>
+        <div class="field"><label>Type</label><select class="ef-type">
+          ${["meeting", "build", "competition", "outreach", "club"].map((t) => `<option value="${t}" ${e.type === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
+        <div class="field"><label>Date</label><input class="ef-date" type="date" value="${esc(e.date || "")}"></div>
+        <div class="field"><label>Time</label><input class="ef-time" value="${esc(e.time || "")}"></div>
+        <div class="field"><label>Location</label><input class="ef-loc" value="${esc(e.location || "")}"></div>
+        <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label><input class="ef-cap" inputmode="numeric" value="${e.capacity === null || e.capacity === undefined ? "" : e.capacity}"></div>
+        <div class="field"><label>RSVP deadline</label><input class="ef-dead" type="date" value="${esc(e.deadline || "")}"></div>
+        <div class="field"><label>Session hours</label><input class="ef-hours" inputmode="decimal" value="${e.session_hours === null || e.session_hours === undefined ? "" : e.session_hours}"></div>
+      </div>
+      <div class="field"><label>Notes</label><textarea class="ef-notes">${esc(e.notes || "")}</textarea></div>
+      <div class="row"><button class="btn small" data-saveev="${e.id}">Save changes</button>
+        <button class="btn small ghost" data-cancelev="${e.id}">Cancel</button></div>
+    </div>` : ""}
     ${pickerRow}
     ${d.rsvps.length ? `<div class="row" style="margin-top:6px"><button class="btn small ghost" data-expand="${e.id}" data-count="${d.rsvps.length}">${openRsvpLists.has(e.id) ? "Collapse list" : `Expand list (${d.rsvps.length})`}</button></div>` : ""}
     <div id="rl-${e.id}" style="margin-top:6px" class="${openRsvpLists.has(e.id) ? "" : "hidden"}">${d.rsvps.map(row).join("") || '<span class="sub">No RSVPs yet.</span>'}</div>
@@ -1252,7 +1567,8 @@ async function renderTracking() {
     <div class="stat"><div class="n">${totV}</div><div class="l">verified hours</div></div>
     <div class="stat"><div class="n">${totU}</div><div class="l">hours awaiting verify</div></div>
     <div class="stat"><div class="n">${checked.length}</div><div class="l">check-ins</div></div>
-  </div></div>
+  </div>
+  <div class="row mo" style="margin-top:10px"><a class="btn ghost small" href="/api/hours.csv">Export hours CSV</a></div></div>
   <div class="card"><h3>Attendance</h3>
   <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === trackEventId ? "active" : ""}" data-tev="${e.id}">${esc(e.title)} (${esc(e.date || "")})</button>`).join("")}</div>
   <div class="row" style="margin-top:8px"><span class="sub">Session hours:</span>
@@ -1457,6 +1773,7 @@ async function renderTravel() {
   }
   const t = await GET(`/api/events/${travelEventId}/travel`);
   const ev = t.event;
+  const vans = await GET("/api/team-vans").catch(() => []);
   const people = personOptions();
   const popts = people.map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
@@ -1478,6 +1795,8 @@ async function renderTravel() {
     const v = vehicleTip(c.vehicle);
     return `<option value="${esc(c.driver_name)}">${esc(v ? `${c.driver_name} · ${v}` : c.driver_name)}</option>`;
   }).join("");
+  const vanOpts = vans.map((vn) => `<option value="${esc(vn.name)}">\u{1F69A} Team van: ${esc(vn.name)}</option>`).join("");
+  const vanNames = new Set(vans.map((vn) => normName(vn.name)));
   const students = attStudents.map((a) =>
     `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
   const studentNames = attStudents.map((a) =>
@@ -1529,8 +1848,20 @@ async function renderTravel() {
     </div>`).join("") || '<p class="sub">No carpools posted for this event yet.</p>'}
   </div></div>
 
+  <div class="card"><h3>Team vans</h3>
+  <p class="sub">Team-owned vans can haul tools too, alongside parent drivers.</p>
+  <div class="row mo">
+    <input id="tv-name" placeholder="Van name *" style="flex:1;min-width:160px">
+    <input id="tv-notes" placeholder="Notes (capacity, keys…)" style="flex:1;min-width:120px">
+    <button class="btn small" id="tv-add">Add van</button>
+  </div>
+  <div style="margin-top:8px">
+  ${vans.map((vn) => `<div class="row" style="margin:6px 0"><span><b>${esc(vn.name)}</b>${vn.notes ? ` <span class="sub">${esc(vn.notes)}</span>` : ""}</span>
+    ${MENTOR() ? `<button class="btn small ghost" data-tvdel="${vn.id}">Delete</button>` : ""}</div>`).join("") || '<p class="sub">No team vans yet.</p>'}
+  </div></div>
+
   <div class="card"><h3>Tool sign-up</h3>
-  <p class="sub">Mentors list what the event needs; parent drivers claim what they'll haul in their cars.</p>
+  <p class="sub">Mentors list what the event needs; parent drivers and team vans claim what they'll haul.</p>
   <div class="row mo">
     <input id="tl-name" placeholder="Tool or gear needed *" style="flex:2;min-width:160px">
     <input id="tl-qty" placeholder="Qty" inputmode="numeric" style="max-width:70px">
@@ -1541,14 +1872,18 @@ async function renderTravel() {
   ${t.tools.map((x) => {
     const driver = (t.carpools || []).find((c) => normName(c.driver_name) === normName(x.claimed_by));
     const veh = driver ? vehicleTip(driver.vehicle) : "";
+    const isVan = vanNames.has(normName(x.claimed_by || ""));
     return `<div class="row" style="margin:6px 0">
-    <span><b>${esc(x.name)}</b> <span class="sub">×${x.qty}</span></span>
-    ${x.claimed_by ? `<span class="pill green">\u{1F697} loaded in ${esc(x.claimed_by)}'s car</span>
-      ${veh ? `<span class="pill" title="${esc(veh)}">\u{1F697} vehicle</span>` : ""}
+    <span><b>${esc(x.name)}</b> <span class="sub">\u00d7${x.qty}</span></span>
+    ${x.claimed_by ? (isVan
+      ? `<span class="pill green">\u{1F69A} loaded in team van ${esc(x.claimed_by)}</span>
       <button class="btn small ghost" data-tunclaim="${x.id}">Unclaim</button>`
-    : driverOpts ? `<select id="tls-${x.id}">${driverOpts}</select>
+      : `<span class="pill green">\u{1F697} loaded in ${esc(x.claimed_by)}'s car</span>
+      ${veh ? `<span class="pill" title="${esc(veh)}">\u{1F697} vehicle</span>` : ""}
+      <button class="btn small ghost" data-tunclaim="${x.id}">Unclaim</button>`)
+    : (driverOpts || vanOpts) ? `<select id="tls-${x.id}">${driverOpts}${vanOpts}</select>
       <button class="btn small" data-tclaim="${x.id}">Claim</button>`
-    : `<span class="sub">No parent drivers with carpools for this event yet — post a ride in Carpools first.</span>`}
+    : `<span class="sub">No haulers yet \u2014 post a carpool ride above or add a team van above.</span>`}
   </div>`;}).join("") || '<p class="sub">Nothing listed yet.</p>'}
   </div></div>
 
@@ -1621,6 +1956,21 @@ async function renderTravel() {
       renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   }));
+  const tvAdd = $("tv-add");
+  if (tvAdd) tvAdd.addEventListener("click", async () => {
+    const name = $("tv-name").value.trim();
+    if (!name) { toast("Van name is required."); return; }
+    try {
+      await POST("/api/team-vans", {name, notes: $("tv-notes").value.trim()});
+      toast("Van added."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  });
+  v.querySelectorAll("[data-tvdel]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("Delete this team van?")) return;
+      await DEL(`/api/team-vans/${b.dataset.tvdel}`);
+      toast("Van deleted."); renderTravel();
+    }));
   v.querySelectorAll("[data-tunclaim]").forEach((b) => b.addEventListener("click", async () => {
     await POST(`/api/tools/${b.dataset.tunclaim}/unclaim`);
     toast("Unclaimed."); renderTravel();
@@ -1863,7 +2213,7 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents) {
     // Profile card's button), but a reloaded tab should still return
     // to them instead of falling back to Events.
     const offMenu = place && (place.view === "profile" || place.view === "security");
-    showView(btn && !btn.classList.contains("navhide") ? place.view : (offMenu ? place.view : "events"));
+    if (!goCheckinQR()) showView(btn && !btn.classList.contains("navhide") ? place.view : (offMenu ? place.view : "events"));
     refreshBadges();
   } else {
     showView("login");

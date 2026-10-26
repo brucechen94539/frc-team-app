@@ -38,6 +38,15 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         </div>
       </div>
     </div>
+    <div id="qr-modal" class="modal-backdrop">
+      <div class="modal-card">
+        <p style="font-size:17px;font-weight:700;margin:0 0 8px" id="qr-title">Check-in QR</p>
+        <div id="qr-body" style="max-width:280px;margin:0 auto"></div>
+        <p class="sub" id="qr-url" style="word-break:break-all"></p>
+        <p class="sub">Print this or show it at the door. Phones need to be on the same network as the server, and logged in — the link lands on Tracking for this event.</p>
+        <div class="menu-foot"><button class="btn ghost" id="qr-close">Close</button></div>
+      </div>
+    </div>
   </div>
   <p class="tagline">Team HQ — sign-ups · events · tracking · tasks</p>
 </header>

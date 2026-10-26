@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS events (
   deadline     TEXT,                 -- RSVP deadline, YYYY-MM-DD
   session_hours REAL,               -- default hours credited per check-in
   notes        TEXT,
+  season       TEXT,                 -- NULL = current season; set when archived
   sample       INTEGER NOT NULL DEFAULT 0
 );
 
@@ -186,4 +187,21 @@ CREATE TABLE IF NOT EXISTS rooming_requests (
   status              TEXT NOT NULL DEFAULT 'pending',  -- pending | placed
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(hotel_id, member_id)
+);
+
+-- Mentor-posted announcements, newest first.
+CREATE TABLE IF NOT EXISTS announcements (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  title      TEXT NOT NULL,
+  body       TEXT NOT NULL DEFAULT '',
+  author     TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Team vans: mentor-managed haulers, usable for tool sign-up alongside
+-- parent drivers.
+CREATE TABLE IF NOT EXISTS team_vans (
+  id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  name  TEXT NOT NULL,
+  notes TEXT NOT NULL DEFAULT ''
 );
