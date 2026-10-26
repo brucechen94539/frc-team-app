@@ -47,6 +47,22 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         <div class="menu-foot"><button class="btn ghost" id="qr-close">Close</button></div>
       </div>
     </div>
+    <div id="pw-modal" class="modal-backdrop">
+      <div class="modal-card">
+        <p style="font-size:17px;font-weight:700;margin:0 0 8px" id="pw-title">Reset password</p>
+        <div class="field"><label>New password <span class="hint">(8+ chars)</span></label><input id="pw-new" type="password"></div>
+        <div class="field"><label>Confirm new password</label><input id="pw-new2" type="password"></div>
+        <p class="err" id="pw-err"></p>
+        <div class="menu-foot"><button class="btn" id="pw-save">Save new password</button><button class="btn ghost" id="pw-cancel">Cancel</button></div>
+      </div>
+    </div>
+    <div id="2fa-modal" class="modal-backdrop">
+      <div class="modal-card">
+        <p style="font-size:17px;font-weight:700;margin:0 0 8px" id="2fa-title">Reset 2FA?</p>
+        <p class="sub">This clears the account's authenticator setup (lost phone). The account will need to set 2FA up again — and mentor accounts are held on Security until they do.</p>
+        <div class="menu-foot"><button class="btn" id="2fa-yes">YES</button><button class="btn ghost" id="2fa-no">NO</button></div>
+      </div>
+    </div>
   </div>
   <p class="tagline">Team HQ — sign-ups · events · tracking · tasks</p>
 </header>

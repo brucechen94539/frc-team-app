@@ -918,10 +918,11 @@ def api_subteams():
 
 def _user_links_map(user_ids=None):
     """{user_id: [{member_id, kind, member_name, school, grade,
-    assigned_subteam, prefs}]} for the link table."""
+    assigned_subteam, parent_name, prefs}]} for the link table."""
     sql = ("SELECT um.user_id, um.member_id, um.kind,"
            " m.first_name AS m_first, m.last_name AS m_last,"
-           " m.school, m.grade, m.assigned_subteam, m.prefs"
+           " m.school, m.grade, m.assigned_subteam, m.parent_name,"
+           " m.prefs"
            " FROM user_members um JOIN members m ON m.id = um.member_id")
     args = ()
     if user_ids is not None:
@@ -935,6 +936,7 @@ def _user_links_map(user_ids=None):
                              + (l["m_last"] or "")).strip(),
             "school": l["school"], "grade": l["grade"],
             "assigned_subteam": l["assigned_subteam"],
+            "parent_name": l["parent_name"],
             "prefs": l["prefs"]})
     return out
 
@@ -984,31 +986,6 @@ def api_users():
                  " whatsapp, role, created_at FROM users WHERE id=?", (uid,))
     user["links"] = _user_links_map([uid]).get(uid, [])
     return jsonify(user), 201
-
-
-@app.route("/api/users/<int:uid>/links", methods=["POST", "DELETE"])
-def api_user_links(uid):
-    """Mentor-managed identity links: attach or detach an account from a
-    roster member, as 'self' or 'parent'. This is the fix for any link
-    the name backfill got wrong."""
-    denied = _mentor_denied()
-    if denied:
-        return denied
-    if not q_one("SELECT id FROM users WHERE id=?", (uid,)):
-        return err("user not found", 404)
-    b = request.get_json(force=True, silent=True) or {}
-    if not b.get("member_id") or b.get("kind") not in ("self", "parent"):
-        return err("member_id and kind (self|parent) required")
-    if not q_one("SELECT id FROM members WHERE id=?", (b["member_id"],)):
-        return err("member not found", 404)
-    if request.method == "POST":
-        execute("INSERT OR IGNORE INTO user_members"
-                " (user_id, member_id, kind) VALUES (?,?,?)",
-                (uid, b["member_id"], b["kind"]))
-    else:
-        execute("DELETE FROM user_members WHERE user_id=? AND member_id=?"
-                " AND kind=?", (uid, b["member_id"], b["kind"]))
-    return jsonify({"links": _user_links_map([uid]).get(uid, [])})
 
 
 @app.route("/api/users/<int:uid>/password", methods=["POST"])

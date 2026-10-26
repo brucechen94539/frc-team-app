@@ -19,6 +19,14 @@ and `can't make it` do not count as attending.
 - First run: if no account has a password, the login page offers one-time
   admin-account creation.
 - Mentors/admins create and reset team accounts (Mentor Queue → Team accounts).
+  The accounts list is a table: first/last name, username (the account's
+  display name), email, phone, member type (the role), school, grade, team
+  (the linked roster member's subteam), and relationship to other members
+  derived from the links — a parent link reads "parent of <student>", a
+  self link reads "child of <parent>". School, grade, and team come from
+  the linked member: the self link first, else the first parent link.
+  Each row has Reset password (an overlay form: new password + confirm)
+  and Reset 2FA (an overlay Yes/No confirm) buttons.
 - **Identity model:** each account has a long-int userId, first/last
   name, email (unique), phone, WhatsApp, password hash, OTP fields,
   and a **group** — its role (student/parent/mentor/admin). Accounts
@@ -26,14 +34,13 @@ and `can't make it` do not count as attending.
   (the student's own record) or `parent` (their children's records).
   **Every ownership rule (RSVP, rooming, removal) reads this table,
   never names** — so renames and duplicate names can't move or merge
-  someone's permissions. Links are created three ways: a one-time
-  backfill by name when the table first appears (tracked by a marker
-  row, so a mentor's manual unlink survives restarts), automatically
+  someone's permissions. Links are created two ways: automatically
   when an account is created, and automatically when a member is
-  approved. Mentors can fix any link by hand in Team accounts
-  (Link/Unlink per account). Name matching survives only as the
-  link-creation heuristic, plus a fallback for accounts with no links
-  yet.
+  approved (plus the one-time name backfill from when the table first
+  appeared). There is no manual Link/Unlink UI: the relationship is
+  shown read-only in the accounts table, and the link endpoints are
+  gone. Name matching survives only as the link-creation heuristic,
+  plus a fallback for accounts with no links yet.
 - Role rules are enforced on the server, not just hidden in the UI.
   Non-mentors see a names-only people directory (no contact details).
 - Event **Delete** buttons are shown to mentors/admins only (the server

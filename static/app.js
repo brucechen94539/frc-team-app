@@ -200,6 +200,25 @@ function closeQrModal() {
   const m = $("qr-modal");
   if (m) m.classList.remove("open");
 }
+/* Team-account resets: per-row modals (password form, 2FA confirm). */
+let pwUid = null, pwName = "", faUid = null, faName = "";
+function openPwModal(uid, name) {
+  pwUid = uid; pwName = name;
+  $("pw-title").textContent = `Reset password for ${name}`;
+  $("pw-new").value = ""; $("pw-new2").value = ""; $("pw-err").textContent = "";
+  $("pw-modal").classList.add("open");
+}
+function closePwModal() {
+  $("pw-modal").classList.remove("open");
+}
+function open2faModal(uid, name) {
+  faUid = uid; faName = name;
+  $("2fa-title").textContent = `Reset 2FA for ${name}?`;
+  $("2fa-modal").classList.add("open");
+}
+function close2faModal() {
+  $("2fa-modal").classList.remove("open");
+}
 /* A scanned #checkin-<id> link jumps to Tracking with that event
    selected (used at boot and after login, so a logged-out scan still
    lands right). Consumes the hash so later reloads use sticky place. */
@@ -229,7 +248,7 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closePwModal(); close2faModal(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
@@ -240,10 +259,41 @@ const _qrModal = $("qr-modal");
 if (_qrModal) _qrModal.addEventListener("click", (e) => { if (e.target === _qrModal) closeQrModal(); });
 const _qrClose = $("qr-close");
 if (_qrClose) _qrClose.addEventListener("click", closeQrModal);
+const _pwModal = $("pw-modal");
+if (_pwModal) _pwModal.addEventListener("click", (e) => { if (e.target === _pwModal) closePwModal(); });
+const _pwCancel = $("pw-cancel");
+if (_pwCancel) _pwCancel.addEventListener("click", closePwModal);
+const _pwSave = $("pw-save");
+if (_pwSave) _pwSave.addEventListener("click", async () => {
+  const pw = $("pw-new").value, pw2 = $("pw-new2").value;
+  const errBox = $("pw-err");
+  errBox.textContent = "";
+  if (pw.length < 8) { errBox.textContent = "Password must be 8+ characters."; return; }
+  if (pw !== pw2) { errBox.textContent = "Passwords do not match."; return; }
+  try {
+    await POST(`/api/users/${pwUid}/password`, {password: pw});
+    toast(`Password reset for ${pwName}.`);
+    closePwModal(); renderAccounts();
+  } catch (e) { errBox.textContent = e.message; }
+});
+const _faModal = $("2fa-modal");
+if (_faModal) _faModal.addEventListener("click", (e) => { if (e.target === _faModal) close2faModal(); });
+const _faNo = $("2fa-no");
+if (_faNo) _faNo.addEventListener("click", close2faModal);
+const _faYes = $("2fa-yes");
+if (_faYes) _faYes.addEventListener("click", async () => {
+  try {
+    await POST("/api/auth/totp-reset", {user_id: faUid});
+    toast(`2FA reset for ${faName}.`);
+    close2faModal(); renderAccounts();
+  } catch (e) { toast("Error: " + e.message); }
+});
 function showView(name) {
   closeAvatarMenu();
   closeLogoutModal();
   closeQrModal();
+  closePwModal();
+  close2faModal();
   // Mentors/admins without 2FA are held on Security until they set it
   // up (the server enforces the same rule on every API route).
   if (ME && ME.requires_2fa && name !== "security" && name !== "login" && name !== "signup")
@@ -771,11 +821,9 @@ async function renderQueue() {
       <div class="field"><label>Password <span class="hint">(8+ chars)</span></label><input id="ac-pass" type="password"></div>
       <div class="field"><label>&nbsp;</label><div class="row">
         <button class="btn small" id="ac-add">Create account</button>
-        <button class="btn small ghost" id="ac-reset">Reset password</button>
-        <button class="btn small ghost" id="ac-reset2fa">Reset 2FA</button>
       </div></div>
     </div>
-    <p class="sub">Reset: put the account's email above, a new password, then hit Reset password. Reset 2FA clears that account's authenticator setup (lost phone).</p>
+    <p class="sub">Reset password and Reset 2FA are per-row buttons in the table above.</p>
   </div>`;
   v.querySelectorAll("[data-f]").forEach((b) =>
     b.addEventListener("click", () => { queueFilter = b.dataset.f; renderQueue(); }));
@@ -823,35 +871,58 @@ async function renderAccounts() {
   const el = $("ac-list");
   if (!el) return;
   let users = [];
-  let people = [];
   try { users = await GET("/api/users"); }
   catch (e) { el.innerHTML = '<span class="sub">Could not load accounts.</span>'; return; }
-  try { people = await GET("/api/people"); } catch (e) { people = []; }
-  const peopleOpts = people.map((p) =>
-    `<option value="${p.id}">${esc(p.first_name)} ${esc(p.last_name)}</option>`).join("");
-  el.innerHTML = users.map((u) => {
-    const links = (u.links || []).map((l) =>
-      `<span class="pill gray">${esc(l.member_name)} · ${l.kind} <button class="btn small ghost" data-unlink="${u.id}" data-member="${l.member_id}" data-kind="${l.kind}" style="margin-left:6px">Unlink</button></span>`).join(" ");
-    return `<div class="row" style="margin:4px 0;flex-wrap:wrap">
-      <span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.name)} · ${esc(u.role)}${u.has_password ? "" : " · no login"}${u.totp_enabled ? " · 🔒 2FA" : ""}${u.phone ? ` · ${esc(u.phone)}` : ""}${u.whatsapp ? ` · WhatsApp ${esc(u.whatsapp)}` : ""}</span>
-      ${links || '<span class="sub">No roster links.</span>'}
-      <select class="link-member" data-user="${u.id}"><option value="">Link a roster member…</option>${peopleOpts}</select>
-      <select class="link-kind" data-user="${u.id}"><option value="self">as self</option><option value="parent">as parent</option></select>
-      <button class="btn small ghost" data-link="${u.id}">Link</button>
-    </div>`;
-  }).join("") || '<span class="sub">No accounts yet.</span>';
-  el.querySelectorAll("[data-link]").forEach((b) => b.addEventListener("click", async () => {
-    const uid = b.dataset.link;
-    const mid = el.querySelector(`.link-member[data-user="${uid}"]`).value;
-    const kind = el.querySelector(`.link-kind[data-user="${uid}"]`).value;
-    if (!mid) return toast("Pick a roster member first.");
-    try { await POST(`/api/users/${uid}/links`, {member_id: +mid, kind}); toast("Linked."); renderAccounts(); }
-    catch (e) { toast("Error: " + e.message); }
-  }));
-  el.querySelectorAll("[data-unlink]").forEach((b) => b.addEventListener("click", async () => {
-    try { await api("DELETE", `/api/users/${b.dataset.unlink}/links`, {member_id: +b.dataset.member, kind: b.dataset.kind}); toast("Unlinked."); renderAccounts(); }
-    catch (e) { toast("Error: " + e.message); }
-  }));
+  // Relationship is read-only now: links are created automatically at
+  // signup approval and account creation, never managed by hand.
+  // A self link reads as "child of <member's parent>"; a parent link
+  // reads as "parent of <member>". School / grade / team come from the
+  // linked roster member: the self link first, else the first parent
+  // link (the child).
+  const relOf = (u) => (u.links || []).map((l) => {
+    if (l.kind === "parent") return `parent of ${l.member_name}`;
+    if (l.kind === "self") return l.parent_name ? `child of ${l.parent_name}` : `self (${l.member_name})`;
+    return `${l.kind} of ${l.member_name}`;
+  });
+  const memberOf = (u) => {
+    const links = u.links || [];
+    return links.find((l) => l.kind === "self") || links[0] || null;
+  };
+  el.innerHTML = `<div style="overflow-x:auto"><table class="acct">
+    <thead><tr><th>First name</th><th>Last name</th><th>Username</th><th>Email</th>
+    <th>Phone #</th><th>Member type</th><th>School</th><th>Grade</th><th>Team</th>
+    <th>Relationship to other member</th><th>Actions</th></tr></thead>
+    <tbody>${users.map((u) => {
+      const m = memberOf(u);
+      const rel = relOf(u).join(", ");
+      return `<tr>
+        <td>${esc(u.first_name || "")}</td>
+        <td>${esc(u.last_name || "")}</td>
+        <td>${esc(u.name || "")}</td>
+        <td>${esc(u.email || "")}</td>
+        <td>${esc(u.phone || "")}</td>
+        <td><span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.role)}</span></td>
+        <td>${esc(m ? (m.school || "") : "")}</td>
+        <td>${esc(m ? (m.grade || "") : "")}</td>
+        <td>${esc(m ? (m.assigned_subteam || "") : "")}</td>
+        <td>${rel ? esc(rel) : '<span class="sub">—</span>'}</td>
+        <td><div class="row" style="flex-wrap:nowrap">
+          <button class="btn small ghost" data-pw="${u.id}">Reset password</button>
+          <button class="btn small ghost" data-faid="${u.id}">Reset 2FA${u.totp_enabled ? "" : " (off)"}</button>
+        </div></td>
+      </tr>`;
+    }).join("") || `<tr><td colspan="11"><span class="sub">No accounts yet.</span></td></tr>`}
+    </tbody></table></div>`;
+  el.querySelectorAll("[data-pw]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const u = users.find((x) => x.id === +b.dataset.pw);
+      if (u) openPwModal(u.id, u.name);
+    }));
+  el.querySelectorAll("[data-faid]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const u = users.find((x) => x.id === +b.dataset.faid);
+      if (u) open2faModal(u.id, u.name);
+    }));
   $("ac-add").onclick = async () => {
     try {
       await POST("/api/users", {first_name: $("ac-first").value.trim(),
@@ -866,30 +937,8 @@ async function renderAccounts() {
       renderAccounts();
     } catch (e) { toast("Error: " + e.message); }
   };
-  $("ac-reset2fa").onclick = async () => {
-    try {
-      const email = $("ac-email").value.trim().toLowerCase();
-      const u = users.find((x) => (x.email || "").toLowerCase() === email);
-      if (!u) return toast("No account with that email.");
-      if (!confirm("Reset two-factor authentication for " + u.name + " (" + u.email + ")? They will log in with just a password until they set it up again.")) return;
-      await POST("/api/auth/totp-reset", {user_id: u.id});
-      toast("2FA reset for " + u.name + ".");
-      renderAccounts();
-    } catch (e) { toast("Error: " + e.message); }
-  };
-  $("ac-reset").onclick = async () => {
-    try {
-      const email = $("ac-email").value.trim().toLowerCase();
-      const u = users.find((x) => (x.email || "").toLowerCase() === email);
-      if (!u) return toast("No account with that email.");
-      if (!confirm("Reset password for " + u.name + " (" + u.email + ")?")) return;
-      await POST("/api/users/" + u.id + "/password", {password: $("ac-pass").value});
-      toast("Password reset for " + u.name + ".");
-      $("ac-pass").value = "";
-      renderAccounts();
-    } catch (e) { toast("Error: " + e.message); }
-  };
 }
+
 
 function queueCard(m) {
   const chats = (m.discovery_chats || []).map((c) =>
