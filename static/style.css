@@ -1,5 +1,5 @@
 /* FRC Team Sign-Up — sharp professional theme.
-   Flat surfaces, one restrained brand orange used only for actions
+   Flat surfaces, one restrained indigo accent used only for actions
    and selection, neutral slate text. All class names match the markup
    in index.html / app.js; this file is a pure reskin. */
 /* Dark is the default theme; light overrides below. */
@@ -16,10 +16,10 @@
   --label:#cbd5e1;
   --header1:#0f172a;
   --header2:#0f172a;
-  --accent:#ea580c;
-  --accent-hover:#f97316;
-  --accent-text:#fb923c;
-  --accent-soft:rgba(234,88,12,.14);
+  --accent:#6366f1;
+  --accent-hover:#818cf8;
+  --accent-text:#a5b4fc;
+  --accent-soft:rgba(99,102,241,.14);
   --green:#34d399;
   --amber:#fbbf24;
   --red:#f87171;
@@ -41,10 +41,10 @@
   --label:#334155;
   --header1:#ffffff;
   --header2:#ffffff;
-  --accent:#ea580c;
-  --accent-hover:#c2410c;
-  --accent-text:#c2410c;
-  --accent-soft:rgba(234,88,12,.08);
+  --accent:#4f46e5;
+  --accent-hover:#4338ca;
+  --accent-text:#4338ca;
+  --accent-soft:rgba(79,70,229,.08);
   --green:#059669;
   --amber:#b45309;
   --red:#dc2626;
