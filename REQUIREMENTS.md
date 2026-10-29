@@ -343,9 +343,21 @@ and `can't make it` do not count as attending.
   someone else** (override). The server enforces it: a non-mentor RSVP
   for anyone else is rejected, matched by member linkage (student record
   or parent_name), with loose name matching so 'zanderchen' matches
-  'Zander Chen'. Statuses: going / maybe / partial / can't make it /
-  waitlisted. **Partial** is for multi-day events such as tournaments,
-  when someone attends only part of the event.
+  'Zander Chen'. **The name itself is also checked:** the scope check
+  used to pin only member_id + kind, so a parent linked to one child
+  could file a going RSVP under another parent's name — and that fake
+  name would then count as a going parent for driver eligibility,
+  ride status, and headcounts. Now a non-mentor's supplied name must
+  match (case/space-insensitively) the roster record for that
+  member/kind or their own account name, or the RSVP is rejected
+  with a 403 instead of being silently corrected; the account-name
+  allowance covers relationship-linked parents whose recorded
+  parent_name differs from their account name. Statuses: going /
+  maybe / partial / can't make it / waitlisted. **Partial** is for
+  multi-day events such as tournaments, when someone attends only
+  part of the event — but note it records *that* someone is partial,
+  not *which days*; per-day attendance is still an open design (see
+  BUGS.md / multi-day notes).
 - **RSVP deadlines are enforced on the server, not just by hiding the
   buttons:** once an event's deadline passes, non-mentors get a 403
   filing an RSVP (the UI hides their picker and shows an "RSVP closed"

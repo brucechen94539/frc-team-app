@@ -9,6 +9,34 @@ _None right now._
 
 ## Fixed
 
+### RSVP spoofing via the name field (2026-10-28)
+- **Reported:** Bruce — RSVP should limit to self, with an error
+  when spoofing happens.
+- **Root cause:** the RSVP scope check pinned only member_id +
+  kind. It never looked at person_name, so a parent linked to one
+  child could file a going RSVP under another parent's name — and
+  that fake name then counted as a going parent for driver
+  eligibility (going_parents is name-matched), ride status, and
+  headcounts. A student could likewise overwrite their own row's
+  name with someone else's, since the upsert rewrites person_name.
+  The UI picker only ever offered own entries, so this was only
+  reachable by a forged request — but the server is the gate that
+  matters.
+- **Fix:** for non-mentors, the supplied name must now match
+  (case/space-insensitively) the roster record for that member/kind
+  or the signer's own account name, or the request is rejected
+  with a 403 ("that name doesn't match your roster record or
+  account — you can only RSVP as yourself") instead of being
+  silently corrected. The account-name allowance covers
+  relationship-linked parents whose recorded parent_name differs
+  from their account name. Mentor/admin override is unchanged:
+  mentors can still file for anyone under any name. Verified by
+  API: a parent spoofing another parent's name and a student
+  spoofing another student's name both get 403 with no row
+  created/changed, legit RSVPs (including a loose case/space
+  variant) still succeed, and the mentor override still files.
+  (commit TBD)
+
 ### Tool sign-up list: collapse/expand all + red/green assignment status (2026-10-28)
 - **Reported:** Bruce — "make collapse all/expand all for Tool
   sign-up list" and "tools show red color when not assigned to

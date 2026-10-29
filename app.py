@@ -2602,6 +2602,31 @@ def api_rsvps(eid):
         if not ok:
             return err("you can only RSVP for yourself"
                        " — mentors can RSVP for others", 403)
+        # The scope check above only pins member_id + kind — it never
+        # looked at the name. A parent linked to one child could file
+        # a going RSVP under another parent's name, and that fake name
+        # would then count as a going parent for driver eligibility
+        # (going_parents is name-matched), ride status, and headcounts;
+        # a student could likewise overwrite their own row's name with
+        # someone else's. So the name itself must match: the roster
+        # record for that member/kind, or the signer's own account
+        # name (the second covers relationship-linked parents, whose
+        # recorded parent_name may differ from their account name).
+        # Anything else is spoofing and gets a 403, not a silent fix.
+        m = q_one("SELECT first_name, last_name, parent_name FROM members"
+                  " WHERE id=?", (b.get("member_id"),))
+        if not m:
+            return err("you can only RSVP for yourself"
+                       " — mentors can RSVP for others", 403)
+        if b.get("person_kind") == "student":
+            canonical = f"{m['first_name']} {m['last_name']}".strip()
+        else:
+            canonical = (m.get("parent_name") or "").strip()
+        allowed = {_norm_name(canonical)} if canonical else set()
+        allowed.add(_norm_name(u["name"]))
+        if _norm_name(b.get("person_name")) not in allowed:
+            return err("that name doesn't match your roster record or"
+                       " account — you can only RSVP as yourself", 403)
     # Club events are only for BASIS Independent Fremont students: the
     # member being RSVP'd must attend BIF. Mentors/admins keep their
     # override (e.g. to file while a member's school record is fixed).
