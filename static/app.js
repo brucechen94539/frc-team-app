@@ -2346,17 +2346,21 @@ async function renderTravel() {
         ? `<p class="sub">Needs a ride: ${needs.map((a) => esc(a.person_name)).join(", ")}</p>`
         : `<p class="sub">Everyone has a ride for this day.</p>`)
       : `<p class="sub">Nobody RSVP'd yet.</p>`;
+    // A day with no team vans shows no van section at all — no
+    // heading, no explainer, no "no vans yet" nag, and no Needs-a-
+    // ride line (the Logistics status table above already shows
+    // each person's ride gap per day). Days with vans are unchanged.
+    const vanBlock = dp.t.event_vans.length ? `
+    <h4>Team van rides</h4>
+    <p class="sub">A van takes riders only with seats set and a driver attending that day who isn't driving a carpool that day.</p>
+    <div style="overflow-x:auto"><table class="acct"><thead><tr><th>Van / Driver</th><th>Riders</th><th>Seats</th><th>Actions</th></tr></thead><tbody>${dp.t.event_vans.map((vv) => vanRow(dp, vv)).join("")}</tbody></table></div>
+    ${needsLine}` : "";
     return `
     <h4>Carpools</h4>
     ${dp.t.carpools.length
       ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Car / Driver</th><th>Riders</th><th>Seats</th><th>Actions</th></tr></thead><tbody>${dp.t.carpools.map((c) => carRow(dp, c)).join("")}</tbody></table></div>`
       : '<p class="sub">No carpools posted for this day yet.</p>'}
-    <h4>Team van rides</h4>
-    <p class="sub">A van takes riders only with seats set and a driver attending that day who isn't driving a carpool that day.</p>
-    ${dp.t.event_vans.length
-      ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Van / Driver</th><th>Riders</th><th>Seats</th><th>Actions</th></tr></thead><tbody>${dp.t.event_vans.map((vv) => vanRow(dp, vv)).join("")}</tbody></table></div>`
-      : '<p class="sub">No team vans going to this day yet — designate a driver who RSVP\'d going, and set the van\'s seats.</p>'}
-    ${needsLine}`;
+    ${vanBlock}`;
   };
   // Per-day room place options: students attending that day who
   // don't already hold a room that day (any room). The rooms table

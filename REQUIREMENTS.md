@@ -674,7 +674,11 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   lists only the attendees who still **need a ride** that day.
   Waitlisted riders count as needing a ride (no seat yet). 'Needs
   ride' means not on any posted ride; a parent driving themselves
-  without posting a carpool still shows as needing one.
+  without posting a carpool still shows as needing one. On a day
+  with no team vans going, the whole van section is omitted —
+  heading, explainer, "no vans yet" nag, and gap line — since the
+  Logistics status table above already shows each person's ride
+  gap per day; days with vans going are unchanged.
 
 ### Hotels & room parents
 
