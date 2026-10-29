@@ -2176,15 +2176,23 @@ async function renderTravel() {
 
   const allDayCars = dayPayloads.flatMap((d) => d.t.carpools || []);
   const allDayVans = dayPayloads.flatMap((d) => d.t.event_vans || []);
-  // allUsers is kept for the van driver dropdowns (a van's driver is
-  // a global designation, not per-event). There is no Post Ride
-  // driver pool anymore: everyone posts only their own vehicle.
+  // allUsers is kept for the van driver dropdowns. A van's driver
+  // is a global designation, but the pickers hide parents already
+  // driving for THIS event — one driver, one vehicle: a parent
+  // driving a carpool any day of the event, designated on another
+  // seated van, or day-driving another van any day of the event
+  // would make the new van ineligible (or double-booked) on those
+  // days. The edit form re-adds the van's own current driver
+  // below (tvedit keep logic), so saving never silently clears one.
   let allUsers = [];
   if (MENTOR()) allUsers = await GET("/api/users").catch(() => []);
-
-  const vanDriverOpts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
-    .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
   const vans = await GET("/api/team-vans").catch(() => []);
+  const eventCarDriverIds = new Set((t.all_carpools || []).map((c) => c.driver_user_id).filter(Boolean));
+  const eventVanDayDriverIds = new Set(dayPayloads.flatMap((d) => (d.t.event_vans || []).map((v) => v.driver_user_id)).filter(Boolean));
+  const seatedVanDriverIds = new Set(vans.filter((vv) => vv.seats).map((vv) => vv.driver_user_id).filter(Boolean));
+  const vanDriverOpts = allUsers.filter((u) => u.role === "parent" && !u.disabled
+    && !eventCarDriverIds.has(u.id) && !seatedVanDriverIds.has(u.id) && !eventVanDayDriverIds.has(u.id))
+    .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
   const optJSON = (p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`;
   // Seat picker filter, per day: a rider choice excludes everyone
@@ -2312,7 +2320,14 @@ async function renderTravel() {
       : `<span class="sub">Everyone attending is already driving or seated on another ride.</span>`;
     const dayDriverCell = (MENTOR() && multi) ? (() => {
       const designated = allUsers.find((u) => u.id === vv.designated_driver_user_id);
-      const opts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
+      // Per-day precision: hide parents driving a carpool THIS day
+      // or another van that is actually going this day — but keep
+      // this van's own day driver selectable, so a double-booked
+      // driver can still be kept (or the override cleared).
+      const dayCarIds = new Set(dp.t.carpools.map((c) => c.driver_user_id).filter(Boolean));
+      const otherVanDayIds = new Set(dp.t.event_vans.filter((x) => x.id !== vv.id).map((x) => x.driver_user_id).filter(Boolean));
+      const opts = allUsers.filter((u) => u.role === "parent" && !u.disabled
+        && (u.id === vv.driver_user_id || (!dayCarIds.has(u.id) && !otherVanDayIds.has(u.id))))
         .map((u) => `<option value="${u.id}"${vv.day_driver_override && u.id === vv.driver_user_id ? " selected" : ""}>${esc(u.name)}</option>`).join("");
       return `<div class="row" style="margin-top:4px"><span class="sub">Driver for ${dayLabel(dp.day)}:</span>
         <select id="vd-${vv.id}-${dayKey}"><option value=""${!vv.day_driver_override ? " selected" : ""}>Designated: ${esc(designated ? designated.name : "none")}</option>${opts}</select>
@@ -2403,8 +2418,10 @@ async function renderTravel() {
   // = placed in a room running that day, or room parent that day;
   // red = still needs a room) and Ride (green = driving or holding
   // a claimed seat that day; red = still needs a ride). A day the
-  // person doesn't attend shows a dash, as does the hotel indicator
-  // when the event has no hotel block at all.
+  // person doesn't attend (a partial RSVP not covering that day)
+  // shows both pills gray — "not participating", not a gap to
+  // fill. The hotel indicator is a dash only when the event has
+  // no hotel block at all.
   const statusTableHTML = () => {
     const tableDays = evDays.length ? evDays : [dayPayloads[0].day];
     const dpFor = (ds) => dayPayloads.find((d) => d.day === ds) || dayPayloads[0];
@@ -2446,10 +2463,10 @@ async function renderTravel() {
       : "No hotel block for this event.";
     return `<div class="card"><h3>Logistics status</h3>
     <p class="sub">${hotelLine}</p>
-    <p class="sub">Green = assigned for that day, red = still needed, — = not attending that day or no hotel block.</p>
+    <p class="sub">Green = assigned for that day, red = still needed, gray = not attending that day, — = no hotel block.</p>
     <div style="overflow-x:auto"><table class="acct"><thead><tr><th>Person</th>${tableDays.map((ds, i) => `<th>Day ${i + 1}${ds ? `<div class="sub">${dayLabel(ds)}</div>` : ""}</th>`).join("")}</tr></thead>
     <tbody>${rows.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.kind === "parent" ? ` <span class="sub">(parent)</span>` : ""}</td>${tableDays.map((ds) => {
-      if (!attNames(ds).has(normName(r.name))) return `<td><span class="sub">—</span></td>`;
+      if (!attNames(ds).has(normName(r.name))) return `<td><span class="pill gray">Hotel</span> <span class="pill gray">Ride</span></td>`;
       const hotel = !t.hotel ? `<span class="sub">—</span>`
         : `<span class="pill ${hotelNames(ds).has(normName(r.name)) ? "green" : "red"}">Hotel</span>`;
       const ride = `<span class="pill ${rideNames(ds).has(normName(r.name)) ? "green" : "red"}">Ride</span>`;

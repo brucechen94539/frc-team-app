@@ -4449,6 +4449,14 @@ def api_team_vans():
                     (b["driver_user_id"],))
         if not drv or drv["role"] != "parent":
             return err("the van driver must be a parent account")
+        # One driver, one vehicle: a parent designated on another
+        # seated van can't drive this one too (seatless vans are
+        # tools-only, not driving, so they don't count).
+        clash = q_one("SELECT name FROM team_vans WHERE driver_user_id=?"
+                      " AND seats IS NOT NULL", (drv["id"],))
+        if clash:
+            return err(f"that parent is already the driver of team van"
+                       f" {clash['name']}", 409)
         driver_uid = drv["id"]
     seats = None
     if b.get("seats") not in (None, ""):
@@ -4490,6 +4498,12 @@ def api_team_van_patch(vid):
                         (b["driver_user_id"],))
             if not drv or drv["role"] != "parent":
                 return err("the van driver must be a parent account")
+            clash = q_one("SELECT name FROM team_vans WHERE driver_user_id=?"
+                          " AND seats IS NOT NULL AND id != ?",
+                          (drv["id"], vid))
+            if clash:
+                return err(f"that parent is already the driver of team van"
+                           f" {clash['name']}", 409)
             sets.append("driver_user_id=?")
             args.append(drv["id"])
     if "seats" in b:
@@ -4679,10 +4693,11 @@ def api_van_day_driver(vid):
     """Per-day van driver override for one event: a different parent
     may drive the van on a given trip day. driver_user_id null (or
     empty) clears the override back to the designated driver. The
-    override itself is permissive — van eligibility for that day
-    still requires the day driver to be attending that day and not
-    driving a carpool that day — so a mentor can set it before
-    RSVPs are filed."""
+    override stays permissive about RSVPs — a mentor can set it
+    before RSVPs are filed — but a parent already driving that day
+    (a carpool, or another van) is rejected; van eligibility for
+    that day still requires the day driver to be attending that
+    day."""
     v = q_one("SELECT * FROM team_vans WHERE id=?", (vid,))
     if not v:
         return err("team van not found", 404)
@@ -4701,6 +4716,22 @@ def api_van_day_driver(vid):
             return err("pick a parent account as the day driver")
         with _lock:
             db = get_db()
+            # One driver, one vehicle, per day: the override stays
+            # permissive about RSVPs (a mentor may set it before
+            # RSVPs are filed), but a parent already driving that
+            # day — a carpool, or another van — is a hard conflict.
+            car_days = _carpool_days_map(db, ev["id"])
+            for c in db.execute("SELECT id FROM carpools WHERE event_id=?"
+                                " AND driver_user_id=?", (ev["id"], drv_uid)):
+                if _carpool_runs_day(car_days, c["id"], day):
+                    return err("that parent is already driving a carpool"
+                               " on that day", 409)
+            overrides = _van_day_drivers_map(db, ev["id"])
+            for v in db.execute("SELECT * FROM team_vans WHERE seats"
+                                " IS NOT NULL AND id != ?", (vid,)):
+                if _van_driver_for_day(v, ev["id"], day, overrides) == drv_uid:
+                    return err("that parent is already driving another"
+                               " team van on that day", 409)
             db.execute(
                 """INSERT INTO van_day_drivers (van_id, event_id, day,
                    driver_user_id) VALUES (?,?,?,?)

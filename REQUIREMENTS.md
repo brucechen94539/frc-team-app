@@ -542,10 +542,12 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   running that day, or room parent that day; red = still needs a
   room) and **Ride** (green = driving or holding a claimed seat that
   day — driving counts as a ride; red = still needs a ride). A day
-  the person doesn't attend shows a dash, as does the hotel
-  indicator when the event has no hotel block. The card's header
-  line shows the hotel block as `Name · address · check-in →
-  check-out` (event dates when block dates are empty).
+  the person doesn't attend (a partial RSVP not covering that day)
+  shows both pills **gray** — "not participating", not a gap to
+  fill. The hotel indicator is a dash only when the event has no
+  hotel block. The card's header line shows the hotel block as
+  `Name · address · check-in → check-out` (event dates when block
+  dates are empty).
 - **Hotel assignments card is mentor-only:** the trip-level card
   (block info, Add room, rooming requests) renders only for
   mentors/admins. The rooms tables themselves stay visible to
@@ -653,6 +655,21 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   — otherwise the van is tools-only for the event. Eligible vans show
   as table rows with seats, riders, waitlist, and claim/release,
   mirroring carpools (capacity → waitlist → auto-promote).
+- **Van driver pickers hide already-driving parents (one driver,
+  one vehicle):** the new/edit van driver dropdown excludes parents
+  driving a carpool any day of the selected event, designated on
+  another seated van, or day-driving another van any day of the
+  event (the van's own current driver stays selectable on edit, so
+  saving never silently clears one). The per-day driver override
+  dropdown is per-day precise: it hides parents driving a carpool
+  THAT day or another van that is actually going that day, and
+  keeps the van's own day driver selectable. The server enforces
+  the same conflicts (409): a designated driver can't be set on a
+  second seated van, and a day-driver override can't go to a parent
+  driving a carpool that day or another van that day. The override
+  stays permissive about RSVPs — a mentor may set it before RSVPs
+  are filed — and a van whose day driver doesn't attend that day
+  simply doesn't run that day.
 - **Needs-a-ride gap line:** under each day's rides tables, Travel
   lists only the attendees who still **need a ride** that day.
   Waitlisted riders count as needing a ride (no seat yet). 'Needs
