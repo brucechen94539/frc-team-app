@@ -3275,7 +3275,7 @@ function roomsTableHTML(h, day, placeOpts, parentOpts, opts) {
     return `<tr id="rm-row-${r.id}-${dayKey}"><td><b>${esc(r.label)}</b>
       ${r.room_number ? `<div class="sub">room #${esc(r.room_number)}</div>` : ""}
       ${opts.editableNumber && MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}
-      <div><span class="pill ${occ.length + (r.parent_name ? 1 : 0) >= r.capacity ? "red" : "green"}"${r.parent_name ? ' title="Includes the room parent\'s bed"' : ""}>${occ.length + (r.parent_name ? 1 : 0)}/${r.capacity} beds</span></div>
+      <div><span class="pill ${occ.length + (r.parent_name ? 1 : 0) >= r.capacity ? "red" : "green"}"${r.parent_name ? ' title="Includes the room parent\'s bed"' : ""}>${occ.length + (r.parent_name ? 1 : 0)}/${r.capacity} occupied</span></div>
       ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}
       ${opts.showEdit ? `<div class="sub">Runs: ${(r.days && r.days.length ? r.days.map(dayLabel).join(", ") : "every day")}</div>` : ""}</td>
       <td>${occPills || '<span class="sub">empty</span>'}</td>
