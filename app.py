@@ -415,6 +415,38 @@ def _migrate(db):
                 person_name, method, verified, hours, created_at
                 FROM checkins_old""")
             db.execute("DROP TABLE checkins_old")
+        # 2026-10-29: rooms go per-day like carpools. room_days holds
+        # the days a room is allocated for (empty = every day); the
+        # occupants table gains a day column and its UNIQUE widens
+        # to (room, member, day), so one student can sleep in
+        # different rooms on different nights. Old tables are
+        # rebuilt with data preserved (day NULL = every day, the
+        # legacy meaning). Fresh DBs already have the new shape
+        # from schema.sql, so the rebuild (guarded on the missing
+        # column) never runs there.
+        db.execute("""CREATE TABLE IF NOT EXISTS room_days (
+            room_id INTEGER NOT NULL REFERENCES rooms(id)
+                ON DELETE CASCADE,
+            day TEXT NOT NULL, UNIQUE(room_id, day))""")
+        occ_cols = {r[1] for r in db.execute(
+            "PRAGMA table_info(room_occupants)")}
+        if occ_cols and "day" not in occ_cols:
+            db.execute("ALTER TABLE room_occupants"
+                       " RENAME TO room_occupants_old")
+            db.execute("""CREATE TABLE room_occupants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id INTEGER NOT NULL REFERENCES rooms(id)
+                    ON DELETE CASCADE,
+                member_id INTEGER NOT NULL REFERENCES members(id)
+                    ON DELETE CASCADE,
+                day TEXT,
+                placed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(room_id, member_id, day))""")
+            db.execute("""INSERT INTO room_occupants
+                (id, room_id, member_id, placed_at)
+                SELECT id, room_id, member_id, placed_at
+                FROM room_occupants_old""")
+            db.execute("DROP TABLE room_occupants_old")
         db.commit()
         db.commit()
 
@@ -3059,9 +3091,11 @@ def api_travel(eid):
         return err("event not found", 404)
     # The day this payload is FOR: ?day=, else the trip's first day,
     # else None for dateless events. Rides, seats, drivers, and the
-    # ride-status attendees are all per-day; tools and hotel are
-    # per-trip and ignore it. Without a day, a multi-day payload
-    # defaults to Day 1 rather than mixing days incoherently.
+    # attendees are all per-day; tools are per-trip and ignore it.
+    # Hotel rooms carry their days and every occupant row (with its
+    # day) so the frontend can build per-day rooms tables. Without
+    # a day, a multi-day payload defaults to Day 1 rather than
+    # mixing days incoherently.
     event_days = _event_days(ev)
     day = request.args.get("day")
     if day:
@@ -3135,9 +3169,19 @@ def api_travel(eid):
     if hotel:
         rooms = q_all("SELECT * FROM rooms WHERE hotel_id=? ORDER BY id",
                       (hotel["id"],))
+        with _lock:
+            db = get_db()
+            room_days = _room_days_map(db, hotel["id"])
         for rm in rooms:
+            # Days this room is allocated for (empty = every day),
+            # and every occupant row with its day — the frontend
+            # filters both per day, since rooms are day tables now
+            # like carpools. Occupants are NOT day-filtered here:
+            # a day table needs its own day's rows, and the payload
+            # is small.
+            rm["days"] = sorted(room_days.get(rm["id"], set()))
             rm["occupants"] = q_all(
-                """SELECT o.id, o.member_id, m.first_name, m.last_name
+                """SELECT o.id, o.member_id, o.day, m.first_name, m.last_name
                    FROM room_occupants o JOIN members m ON m.id = o.member_id
                    WHERE o.room_id=? ORDER BY o.id""", (rm["id"],))
         hotel["rooms"] = rooms
@@ -3507,6 +3551,38 @@ def _carpool_runs_day(days_map, cid, day):
     if days is None:
         return True
     return not days or day in days
+
+
+def _room_days_map(db, hid):
+    """room_id -> set of days (empty set = allocated every day)."""
+    out = {}
+    for r in db.execute("SELECT id FROM rooms WHERE hotel_id=?",
+                        (hid,)):
+        out[r["id"]] = set()
+    for r in db.execute(
+            "SELECT rd.room_id, rd.day FROM room_days rd"
+            " JOIN rooms r ON r.id = rd.room_id"
+            " WHERE r.hotel_id=?", (hid,)):
+        out.setdefault(r["room_id"], set()).add(r["day"])
+    return out
+
+
+def _room_runs_day(days_map, rid, day):
+    """Mirror of _carpool_runs_day, for rooms."""
+    if day is None:
+        return True
+    days = days_map.get(rid)
+    if days is None:
+        return True
+    return not days or day in days
+
+
+def _occupant_day_matches(occ_day, day):
+    """An occupant row covers `day` when it is an all-days row
+    (NULL) or its day equals it. day=None matches every row."""
+    if day is None:
+        return True
+    return occ_day is None or occ_day == day
 
 
 def _days_overlap(days_a, days_b, event_days):
@@ -4628,7 +4704,8 @@ def api_room_create(hid):
     from the bed builder; capacity is derived: double/queen/king sleep 2,
     a sofa bed sleeps 1."""
     b = request.get_json(force=True, silent=True) or {}
-    if not q_one("SELECT id FROM hotels WHERE id=?", (hid,)):
+    hotel = q_one("SELECT * FROM hotels WHERE id=?", (hid,))
+    if not hotel:
         return err("hotel not found", 404)
     fits = {"double": 2, "queen": 2, "king": 2, "sofa bed": 1}
     beds = b.get("beds") or []
@@ -4637,24 +4714,61 @@ def api_room_create(hid):
     capacity = sum(fits[t] for t in beds)
     if capacity == 0:
         capacity = int(b.get("capacity") or 4)
+    # Days this room is allocated for: a room not needed on the
+    # first or last day simply has no row for that day. No days key
+    # (or an empty list) means every day, like carpools.
+    ev = q_one("SELECT * FROM events WHERE id=?", (hotel["event_id"],))
+    event_days = _event_days(ev) if ev else []
+    days, days_err = _validate_days_input(b.get("days"), event_days)
+    if days_err:
+        return err(days_err)
     n = q_one("SELECT COUNT(*) n FROM rooms WHERE hotel_id=?", (hid,))["n"]
     label = (b.get("label") or "").strip() or f"Room #{n + 1}"
     rid = execute("INSERT INTO rooms (hotel_id, label, capacity, beds)"
                   " VALUES (?,?,?,?)",
                   (hid, label, capacity, json.dumps(beds)))
+    if days:
+        with _lock:
+            db = get_db()
+            for d in days:
+                db.execute("INSERT OR IGNORE INTO room_days (room_id, day)"
+                           " VALUES (?,?)", (rid, d))
+            db.commit()
     return jsonify(q_one("SELECT * FROM rooms WHERE id=?", (rid,))), 201
 
 
 @app.route("/api/rooms/<int:rid>", methods=["PUT"])
 @require_role("mentor", "admin")
 def api_room_update(rid):
-    """After check-in, mentors record the hotel's actual room number."""
+    """After check-in, mentors record the hotel's actual room number.
+    Mentors also change which days the room is allocated for here:
+    the day set is replaced wholesale when "days" is sent. Occupant
+    rows on days that drop out are NOT deleted — they are hidden
+    (a room that doesn't run a day shows no occupants for it) and
+    reappear if the day is added back; removing a student from a
+    day is the occupant's ✕, not a day change."""
     b = request.get_json(force=True, silent=True) or {}
-    if not q_one("SELECT id FROM rooms WHERE id=?", (rid,)):
+    rm = q_one("SELECT * FROM rooms WHERE id=?", (rid,))
+    if not rm:
         return err("room not found", 404)
     if "room_number" in b:
         execute("UPDATE rooms SET room_number=? WHERE id=?",
                 ((b["room_number"] or "").strip() or None, rid))
+    if "days" in b:
+        hotel = q_one("SELECT * FROM hotels WHERE id=?", (rm["hotel_id"],))
+        ev = q_one("SELECT * FROM events WHERE id=?",
+                   (hotel["event_id"],)) if hotel else None
+        event_days = _event_days(ev) if ev else []
+        days, days_err = _validate_days_input(b.get("days"), event_days)
+        if days_err:
+            return err(days_err)
+        with _lock:
+            db = get_db()
+            db.execute("DELETE FROM room_days WHERE room_id=?", (rid,))
+            for d in (days or []):
+                db.execute("INSERT OR IGNORE INTO room_days (room_id, day)"
+                           " VALUES (?,?)", (rid, d))
+            db.commit()
     return jsonify(q_one("SELECT * FROM rooms WHERE id=?", (rid,)))
 
 
@@ -4735,6 +4849,13 @@ def api_rooming_request_delete(qid):
 @app.route("/api/rooms/<int:rid>/occupants", methods=["POST"])
 @require_role("mentor", "admin")
 def api_room_place(rid):
+    """Place a student in a room FOR ONE DAY, like a carpool seat:
+    the day is required on multi-day events, defaulted to the one
+    date on single-day events. Capacity is per day, the room must
+    be allocated for that day, the student must attend that day,
+    and a student sleeps in at most one room per day. Placing in
+    the same room for the same day twice is a no-op, not an error
+    (the old INSERT OR IGNORE behavior)."""
     b = request.get_json(force=True)
     if not b.get("member_id"):
         return err("member_id required")
@@ -4742,17 +4863,62 @@ def api_room_place(rid):
     if not rm:
         return err("room not found", 404)
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (rm["hotel_id"],))
-    if not is_attending(hotel["event_id"], b["member_id"], "student"):
-        return err("only students attending this event can be placed"
-                   " — RSVP as going first")
-    occ = q_one("SELECT COUNT(*) n FROM room_occupants WHERE room_id=?", (rid,))["n"]
-    if occ >= rm["capacity"]:
-        return err("room is full", 409)
+    ev = q_one("SELECT * FROM events WHERE id=?", (hotel["event_id"],))
+    event_days = _event_days(ev) if ev else []
+    # Day resolution, mirroring carpool claims exactly.
+    day_in = (b.get("day") or "").strip() or None
+    if len(event_days) > 1:
+        if not day_in:
+            return err("day is required for multi-day events"
+                       " — pick a day")
+        if day_in not in event_days:
+            return err("day is not part of this event")
+        day = day_in
+    elif len(event_days) == 1:
+        if day_in and day_in != event_days[0]:
+            return err("day is not part of this event")
+        day = event_days[0]
+    else:
+        day = None
     with _lock:
         db = get_db()
+        if not _room_runs_day(_room_days_map(db, rm["hotel_id"]),
+                              rid, day):
+            return err("this room isn't allocated for that day", 400)
+        # Attending ON THAT DAY, not just the trip: a partial
+        # attending only Day 3 can't be placed on Day 1.
+        days_map = _rsvp_days_map(db, hotel["event_id"])
+        rsvp = db.execute(
+            "SELECT id, status FROM rsvps WHERE event_id=? AND member_id=?"
+            " AND person_kind='student'",
+            (hotel["event_id"], b["member_id"])).fetchone()
+        if not rsvp or not _attends_day(rsvp["status"],
+                                        days_map.get(rsvp["id"], set()),
+                                        day, event_days):
+            return err("only students attending on that day can be placed"
+                       " — RSVP for that day first")
+        # Already placed for this day? Same room = no-op; another
+        # room = one room per person per day.
+        placed = db.execute(
+            """SELECT o.room_id, o.day FROM room_occupants o
+               JOIN rooms r ON r.id = o.room_id
+               WHERE r.hotel_id=? AND o.member_id=?""",
+            (rm["hotel_id"], b["member_id"])).fetchall()
+        if any(r["room_id"] == rid
+               and _occupant_day_matches(r["day"], day) for r in placed):
+            return jsonify({"ok": True}), 201
+        if any(r["room_id"] != rid
+               and _occupant_day_matches(r["day"], day) for r in placed):
+            return err("already placed in another room for that day", 409)
+        occ = db.execute(
+            "SELECT day FROM room_occupants WHERE room_id=?",
+            (rid,)).fetchall()
+        if sum(1 for r in occ
+               if _occupant_day_matches(r["day"], day)) >= rm["capacity"]:
+            return err("room is full for that day", 409)
         db.execute(
-            "INSERT OR IGNORE INTO room_occupants (room_id, member_id) VALUES (?,?)",
-            (rid, b["member_id"]))
+            "INSERT INTO room_occupants (room_id, member_id, day)"
+            " VALUES (?,?,?)", (rid, b["member_id"], day))
         db.execute("UPDATE rooming_requests SET status='placed'"
                    " WHERE hotel_id=? AND member_id=?",
                    (rm["hotel_id"], b["member_id"]))
@@ -4770,9 +4936,18 @@ def api_room_unplace(oid):
     with _lock:
         db = get_db()
         db.execute("DELETE FROM room_occupants WHERE id=?", (oid,))
-        db.execute("UPDATE rooming_requests SET status='pending'"
-                   " WHERE hotel_id=? AND member_id=?",
-                   (o["hotel_id"], o["member_id"]))
+        # Per-day placements: the request goes back to pending only
+        # when the student holds no room on any day anymore — removing
+        # one night must not un-place their other nights.
+        left = db.execute(
+            """SELECT COUNT(*) n FROM room_occupants o
+               JOIN rooms r ON r.id = o.room_id
+               WHERE r.hotel_id=? AND o.member_id=?""",
+            (o["hotel_id"], o["member_id"])).fetchone()["n"]
+        if not left:
+            db.execute("UPDATE rooming_requests SET status='pending'"
+                       " WHERE hotel_id=? AND member_id=?",
+                       (o["hotel_id"], o["member_id"]))
         db.commit()
     return jsonify({"deleted": oid})
 

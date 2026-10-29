@@ -212,9 +212,17 @@ CREATE TABLE IF NOT EXISTS room_occupants (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id    INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
   member_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  day        TEXT,  -- NULL = placed every day (legacy, pre-per-day rooms)
   placed_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(room_id, member_id)
+  UNIQUE(room_id, member_id, day)
 );
+
+-- Days a room is allocated for: empty set = every day of the trip,
+-- mirroring carpool_days. A room not needed on the first or last day
+-- simply has no row for that day.
+CREATE TABLE IF NOT EXISTS room_days (
+  room_id INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  day     TEXT NOT NULL, UNIQUE(room_id, day));
 
 -- One replaceable rooming request per student per hotel.
 CREATE TABLE IF NOT EXISTS rooming_requests (

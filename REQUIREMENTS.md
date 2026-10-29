@@ -362,11 +362,12 @@ and `can't make it` do not count as attending.
   **Going** covers every day. Event capacity is checked **per day**:
   a partial attending only Day 1 does not occupy a Day 3 spot, and
   if any covered day is full the whole RSVP waitlists.
-- **Per-day rides:** Travel shows one **collapsible section per
-  trip day** (Day 1 open, the rest closed, with Expand/Collapse all),
-  each with a **carpool table** and a **van table** for that day;
-  Tracking keeps day tabs. Tools and hotel rooms stay per-trip. A
-  carpool lists the days it runs (default every day); a rider claims
+- **Per-day rides and rooms:** Travel shows one **collapsible
+  section per trip day** (Day 1 open, the rest closed, with
+  Expand/Collapse all), each with a **carpool table**, a **van
+  table**, and a **rooms table** for that day; Tracking keeps day
+  tabs. Tools stay per-trip. A carpool lists the days it runs
+  (default every day); a rider claims
   **one seat per person per day** across every vehicle, so riding
   Car A out Day 1 and Car B back Day 3 is allowed and a same-day
   seat elsewhere blocks a second claim that day. A driver must be
@@ -387,23 +388,38 @@ and `can't make it` do not count as attending.
   Car/Driver (driver, vehicle make/model/color, departure, return,
   notes), Riders (claimed + waitlisted), Seats (open/total),
   Actions (claim picker, Edit/Remove). A van table row mirrors it,
-  plus the per-day driver control for mentors. Below each day's
-  tables, a **gap line** lists only who still **needs a ride** that
-  day (waitlisted counts as needing one); placed riders and drivers
-  are not repeated. **Tooltips are used sparingly:** vehicle
-  make/model/color are visible text and only the license plate
-  hides behind a hover tooltip, so nothing decision-relevant is
-  hover-only. **Single-day events** get one carpool table and one
-  van table with no day sections, and **no hotel section at all**
-  unless a hotel block already exists — a day trip needs no rooms.
-- **Room status (gap lines):** the Hotel assignments section shows
-  one **rooms table** (Room with label, actual room number, beds and
-  capacity; Occupants; Room parent; Actions with Place and
-  Volunteer controls) plus two gap lines — who still **needs a
-  room**, and whose request is **awaiting placement**. Placed
-  students already show in the table, so they are not listed twice.
-  Rooms stay per-trip, so the table and gap lines cover all trip
-  attendees, not just one day's riders.
+  plus the per-day driver control for mentors. A rooms table row is
+  one room — Room (label, actual room number, beds, per-day
+  capacity), Occupants for that day, Room parent, Actions (place
+  picker, volunteer, Edit for mentors). Below each day's tables,
+  **gap lines** list only who still **needs a ride** and who still
+  **needs a room** that day (waitlisted counts as needing one);
+  placed riders, drivers, and placed students are not repeated.
+  **Tooltips are used sparingly:** vehicle make/model/color are
+  visible text and only the license plate hides behind a hover
+  tooltip, so nothing decision-relevant is hover-only.
+  **Single-day events** get one carpool table, one van table, and
+  one rooms table with no day sections, and **no hotel section at
+  all** unless a hotel block already exists — a day trip needs no
+  rooms.
+- **Per-day rooms:** like carpools, a room is **allocated for
+  specific days** — mentors pick the days when adding a room (all
+  checked = every day) and can change them later with Edit, so a
+  room not needed on the first or last day simply doesn't appear
+  in that day's table. **Placement is per day, like a carpool
+  seat:** the day is required on multi-day events, the room must
+  be allocated for that day, the student must attend that day,
+  capacity counts that day's occupants only, and a student sleeps
+  in at most one room per day (placing in the same room for the
+  same day twice is a no-op). A student may sleep in different
+  rooms on different nights. The room parent stays per room (not
+  per day), and rooming requests stay per-trip wishes. Dropping a
+  day from a room hides that day's placements (they reappear if
+  the day is added back); removing a student from a day is the
+  occupant's ✕, and a rooming request returns to pending only when
+  the student holds no room on any day anymore. Old placements
+  (no day recorded) mean every day, so pre-existing rooms keep
+  working untouched.
 - **RSVP deadlines are enforced on the server, not just by hiding the
   buttons:** once an event's deadline passes, non-mentors get a 403
   filing an RSVP (the UI hides their picker and shows an "RSVP closed"
@@ -478,9 +494,8 @@ and `can't make it` do not count as attending.
 All assignment lists in this tab are **attendance-driven**: they are pulled
 dynamically from the event's attendees (RSVP = going or partial). People who have not
 RSVP'd as attending do not appear and cannot be assigned, on the server as
-well as in the UI. On a multi-day trip the ride lists are for the selected
-day (see the multi-day bullets under Events & RSVPs); tools and hotel rooms
-stay per-trip.
+well as in the UI. On a multi-day trip the ride and room lists are per day
+(see the multi-day bullets under Events & RSVPs); tools stay per-trip.
 
 ### Carpools
 

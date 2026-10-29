@@ -2342,9 +2342,22 @@ async function renderTravel() {
       : '<p class="sub">No team vans going to this day yet — designate a driver who RSVP\'d going, and set the van\'s seats.</p>'}
     ${needsLine}`;
   };
+  // Per-day room place options: students attending that day who
+  // don't already hold a room that day (any room). The rooms table
+  // for a day lists only the rooms allocated for it, with that
+  // day's occupants and per-day capacity.
+  const placeOptsForDay = (dp) => {
+    const placed = placedIdsForDay(t.hotel, dp.day);
+    return (dp.t.attendees || []).filter((a) => a.person_kind === "student" && !placed.has(a.member_id))
+      .map((a) => `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
+  };
+  const roomsDaySection = (dp) => `
+    <h4>Rooms</h4>
+    ${roomsTableHTML(t.hotel, dp.day, placeOptsForDay(dp), allAttParents, {editableNumber: false, showEdit: true})}
+    ${roomGapHTML(t.hotel, dp.t.attendees, dp.day)}`;
   const daySection = (dp, idx) => `
   <div class="card"><h3><button class="btn small ghost" data-tdaysec="${dp.day}">${openTravelDays.has(dp.day) ? "▾" : "▸"}</button> Day ${idx + 1} · ${dayLabel(dp.day)}</h3>
-  <div id="tday-body-${dp.day}" class="${openTravelDays.has(dp.day) ? "" : "hidden"}">${ridesTables(dp)}</div></div>`;
+  <div id="tday-body-${dp.day}" class="${openTravelDays.has(dp.day) ? "" : "hidden"}">${ridesTables(dp)}${t.hotel ? roomsDaySection(dp) : ""}</div></div>`;
   // Post Ride lives in its own card now (trip-level, not per-day):
   // the days the car runs are picked with checkboxes, and the driver
   // pool + the already-driving note refresh as those boxes change,
@@ -2374,7 +2387,7 @@ async function renderTravel() {
   <button class="btn small" id="cp-add">Post ride</button></div></div>`);
   v.innerHTML = `
   <div class="card"><h2>Travel &amp; Logistics</h2>
-  <p class="sub">${multi ? "Each trip day expands to its own rides tables. Tools and hotel rooms are for the whole trip." : "Carpools, tool sign-up, and hotel assignments — organized per event."}</p>
+  <p class="sub">${multi ? "Each trip day expands to its own rides and rooms tables. Tools are for the whole trip." : "Carpools, tool sign-up, and hotel assignments — organized per event."}</p>
   <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div>
   ${multi ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" id="td-expand-all">Expand all days</button><button class="btn small ghost" id="td-collapse-all">Collapse all days</button></div>` : ""}</div>
 
@@ -2468,7 +2481,9 @@ async function renderTravel() {
   </div>
 
   ${(t.hotel || multi) ? `<div class="card"><h3>Hotel assignments</h3>
-  ${t.hotel ? hotelHTML(t.hotel, allStudents, allAttParents, allStudentNames, allAttStudents, allAtt) : `
+  ${t.hotel ? (multi
+    ? hotelTopHTML(t.hotel, {evDays, parentOpts: allAttParents, rqWhoOpts: allStudents, studentNames: allStudentNames, attStudents: allAttStudents})
+    : hotelHTML(t.hotel, {day: dayPayloads[0].day, dayAttendees: dayPayloads[0].t.attendees, placeOpts: placeOptsForDay(dayPayloads[0]), parentOpts: allAttParents, rqWhoOpts: allStudents, studentNames: allStudentNames, attStudents: allAttStudents})) : `
     <p class="sub">No hotel block for this event. Add one for remote tournaments:</p>
     <div class="grid3 mo">
       <div class="field"><label>Hotel name *</label><input id="h-name"></div>
@@ -2852,8 +2867,11 @@ async function renderTravel() {
       toast(`Van deleted.${r.tools_unassigned ? ` ${r.tools_unassigned} tool(s) back in the pool.` : ""}${r.claims_removed ? ` ${r.claims_removed} rider(s) released.` : ""}`); renderTravel();
     }));
   v.querySelectorAll("[data-rvol]").forEach((b) => b.addEventListener("click", async () => {
-    const sel = $("rp-" + b.dataset.rvol);
-    if (!sel.value) return toast("Pick which parent is volunteering.");
+    // Room parents are per room, but the volunteer select is
+    // day-scoped (one rooms table per day) — read that day's select.
+    const day = b.dataset.rvolday || null;
+    const sel = $("rp-" + b.dataset.rvol + "-" + (day || "all"));
+    if (!sel || !sel.value) return toast("Pick which parent is volunteering.");
     const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
     try {
       await POST(`/api/rooms/${b.dataset.rvol}/parent`, {member_id: p.member_id});
@@ -2891,8 +2909,17 @@ async function renderTravel() {
   }); paintBeds(); }
   const ra = $("rm-add");
   if (ra) ra.addEventListener("click", async () => {
+    // Multi-day: the checked rm-day boxes are the days this room
+    // is allocated for; all checked (the default) means every day.
+    const dayBoxes = [...document.querySelectorAll("input.rm-day")];
+    const body = {beds: pendingBeds};
+    if (dayBoxes.length) {
+      const days = dayBoxes.filter((x) => x.checked).map((x) => x.dataset.day);
+      if (!days.length) return toast("Pick at least one day for the room.");
+      body.days = days;
+    }
     try {
-      const r = await POST(`/api/hotels/${t.hotel.id}/rooms`, {beds: pendingBeds});
+      const r = await POST(`/api/hotels/${t.hotel.id}/rooms`, body);
       pendingBeds = [];
       toast(`${r.label} added.`); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
@@ -2904,11 +2931,54 @@ async function renderTravel() {
     if (r.ok) { toast("Room number saved."); renderTravel(); }
     else toast("Error: could not save the room number.");
   }));
+  // Edit a room's allocation (mentor): a form row under that day's
+  // table row with day checkboxes (pre-checked from the room's
+  // days, empty = all checked) and the actual room number. Saving
+  // replaces the day set; occupant rows on dropped days are hidden,
+  // not deleted, and reappear if the day is added back.
+  v.querySelectorAll("[data-roomedit]").forEach((b) => b.addEventListener("click", () => {
+    const day = b.dataset.roomday || "";
+    const r = (t.hotel.rooms || []).find((x) => x.id === +b.dataset.roomedit);
+    if (!r) return;
+    const row = $("rm-row-" + r.id + "-" + (day || "all"))
+      || document.querySelector(`[id^="rm-row-${r.id}-"]`);
+    if (!row) return;
+    const prev = $("rm-edit-" + r.id);
+    if (prev) prev.remove();
+    const tr = document.createElement("tr");
+    tr.id = "rm-edit-" + r.id;
+    tr.innerHTML = `<td colspan="4"><div class="row"><span class="sub">Days this room is allocated for:</span>
+      ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="re-day" data-day="${ds}"${!r.days || !r.days.length || r.days.includes(ds) ? " checked" : ""}> ${dayLabel(ds)}</label>`).join("")}</div>
+    <div class="row" style="margin-top:6px"><span class="sub">Actual room #:</span>
+      <input id="re-rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">
+      <button class="btn small" id="re-save-${r.id}">Save</button><button class="btn small ghost" id="re-cancel-${r.id}">Cancel</button></div></td>`;
+    row.after(tr);
+    $("re-cancel-" + r.id).addEventListener("click", () => tr.remove());
+    $("re-save-" + r.id).addEventListener("click", async () => {
+      const boxes = [...tr.querySelectorAll("input.re-day")];
+      const days = boxes.filter((x) => x.checked).map((x) => x.dataset.day);
+      if (!days.length) return toast("Pick at least one day for the room.");
+      try {
+        const resp = await fetch(`/api/rooms/${r.id}`, {method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({room_number: $("re-rn-" + r.id).value.trim(), days})});
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || "update failed");
+        toast("Room updated."); renderTravel();
+      } catch (e) { toast("Error: " + e.message); }
+    });
+  }));
   v.querySelectorAll("[data-place]").forEach((b) => b.addEventListener("click", async () => {
-    const mid = parseInt($("plc-" + b.dataset.place).value, 10);
+    // Placement is per day: the select is day-scoped, and the day
+    // travels with the POST so the server can check that day's
+    // attendance, allocation, and capacity.
+    const day = b.dataset.placeday || null;
+    const sel = $("plc-" + b.dataset.place + "-" + (day || "all"));
+    if (!sel) return;
+    const mid = parseInt(sel.value, 10);
     if (!mid) return toast("Pick a student to place.");
     try {
-      await POST(`/api/rooms/${b.dataset.place}/occupants`, {member_id: mid});
+      await POST(`/api/rooms/${b.dataset.place}/occupants`, {member_id: mid, day});
       toast("Placed."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   }));
@@ -2982,8 +3052,91 @@ function bedSummary(beds) {
     `${n} ${t}${n > 1 ? "s" : ""}`).join(" · ");
 }
 
-function hotelHTML(h, students, poptParents, studentNames, attStudents, allAtt) {
+// Per-day rooms, mirroring the carpool day rules: a room runs the
+// days in its room_days set (empty = every day), and an occupant row
+// covers its day, or every day when its day is NULL (legacy rows).
+function roomRunsDay(rm, day) {
+  if (day === null || day === undefined) return true;
+  const days = rm.days || [];
+  return !days.length || days.includes(day);
+}
+function occMatchesDay(o, day) {
+  if (day === null || day === undefined) return true;
+  return o.day === null || o.day === undefined || o.day === day;
+}
+function placedIdsForDay(h, day) {
+  const ids = new Set();
+  (h.rooms || []).forEach((r) => {
+    if (!roomRunsDay(r, day)) return;
+    (r.occupants || []).forEach((o) => {
+      if (occMatchesDay(o, day)) ids.add(o.member_id);
+    });
+  });
+  return ids;
+}
+function roomGapHTML(h, dayAttendees, day) {
+  const students = (dayAttendees || []).filter((a) => a.person_kind === "student");
+  const placed = placedIdsForDay(h, day);
+  const pendingReq = (mid) => (h.requests || []).find((q) =>
+    q.member_id === mid && q.status === "pending");
+  const needs = students.filter((a) => !placed.has(a.member_id) && !pendingReq(a.member_id));
+  const awaiting = students.filter((a) => !placed.has(a.member_id) && pendingReq(a.member_id));
+  return `<p class="sub">Needs a room: ${needs.length ? needs.map((a) => esc(a.person_name)).join(", ") : "everyone has a room."}</p>
+  <p class="sub">Requested — awaiting placement: ${awaiting.length ? awaiting.map((a) => esc(a.person_name)).join(", ") : "none."}</p>`;
+}
+function roomsTableHTML(h, day, placeOpts, parentOpts, opts) {
   const canVol = ME && ME.role !== "student";
+  const dayKey = day || "all";
+  const rooms = (h.rooms || []).filter((r) => roomRunsDay(r, day));
+  if (!(h.rooms || []).length) return '<p class="sub">No rooms yet — add one above.</p>';
+  if (!rooms.length) return '<p class="sub">No rooms allocated for this day yet.</p>';
+  return `<div style="overflow-x:auto"><table class="acct" style="margin-top:8px"><thead><tr><th>Room</th><th>Occupants</th><th>Room parent</th><th>Actions</th></tr></thead><tbody>
+  ${rooms.map((r) => {
+    const occ = (r.occupants || []).filter((o) => occMatchesDay(o, day));
+    const occPills = occ.map((o) =>
+      `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${MENTOR() ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
+    const parentCell = r.parent_name
+      ? `<span class="pill green">Room parent: ${esc(r.parent_name)}</span>
+         ${canVol ? `<button class="btn small ghost" data-rparentx="${r.id}">Remove</button>` : ""}`
+      : `<span class="pill gray">No room parent (optional)</span>`;
+    const volCell = (!r.parent_name && canVol) ? `<div class="row" style="margin-top:4px">
+      <select id="rp-${r.id}-${dayKey}"><option value="">Volunteer as room parent…</option>${parentOpts}</select>
+      <button class="btn small" data-rvol="${r.id}" data-rvolday="${day || ""}">Volunteer</button></div>` : "";
+    const editCell = (opts.showEdit && MENTOR()) ? `<div class="row" style="margin-top:4px"><button class="btn small ghost" data-roomedit="${r.id}" data-roomday="${day || ""}">Edit</button></div>` : "";
+    return `<tr id="rm-row-${r.id}-${dayKey}"><td><b>${esc(r.label)}</b>
+      ${r.room_number ? `<div class="sub">room #${esc(r.room_number)}</div>` : ""}
+      ${opts.editableNumber && MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}
+      <div><span class="pill ${occ.length >= r.capacity ? "red" : "green"}">${occ.length}/${r.capacity} beds</span></div>
+      ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}
+      ${opts.showEdit ? `<div class="sub">Runs: ${(r.days && r.days.length ? r.days.map(dayLabel).join(", ") : "every day")}</div>` : ""}</td>
+      <td>${occPills || '<span class="sub">empty</span>'}</td>
+      <td>${parentCell}</td>
+      <td><div class="row mo"><select id="plc-${r.id}-${dayKey}">
+        <option value="">Place a student…</option>${placeOpts}</select>
+        <button class="btn small" data-place="${r.id}" data-placeday="${day || ""}">Place</button></div>${volCell}${editCell}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
+}
+// Add-room form (bed builder + Add room). On a multi-day trip it
+// also picks the days the room is allocated for — a room not needed
+// on the first or last day just unchecks it. The form lives in the
+// trip-level hotel card; placement happens in the day tables.
+function addRoomFormHTML(multi, evDays) {
+  return `<div class="row mo" style="flex-wrap:wrap;gap:8px;align-items:center">
+    <select id="bed-type">
+      <option value="queen">Queen · sleeps 2</option>
+      <option value="double">Double · sleeps 2</option>
+      <option value="king">King · sleeps 2</option>
+      <option value="sofa bed">Sofa bed · sleeps 1</option>
+    </select>
+    <button class="btn small" id="bed-add">Add bed</button>
+    <span id="bed-list"></span>
+    <button class="btn small" id="rm-add">Add room</button>
+    <span class="sub">Rooms are numbered automatically (Room #1, #2, …).</span></div>
+  ${multi ? `<div class="row" style="margin-top:6px"><span class="sub">Days this room is allocated for:</span>
+    ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="rm-day" data-day="${ds}" checked> ${dayLabel(ds)}</label>`).join("")}
+    <span class="sub">(all checked = every day)</span></div>` : ""}`;
+}
+function roomingHTML(h, rqWhoOpts, studentNames, attStudents) {
   // Rooming requests are a student feature: a student files for themself
   // only (never appears in their own pickers); parents don't see the
   // module at all — they take part as room parents, above.
@@ -2998,7 +3151,8 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents, allAtt) 
   const matesExclSelf = (attStudents || [])
     .filter((a) => !selfStudent || a.member_id !== selfStudent.member_id)
     .map((a) => chipButton(a.person_name, a.person_name)).join("");
-  const roomingBlock = ME.role === "parent" ? "" : `
+  if (ME.role === "parent") return "";
+  return `
   <h3>Rooming requests ${pendingReqs ? `<span class="pill amber">${pendingReqs} awaiting placement</span>` : ""}</h3>
   <p class="sub">A student requests to stay with other students — only for yourself, and you can't pick yourself as a roommate.</p>
   ${ME.role === "student"
@@ -3009,7 +3163,7 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents, allAtt) 
         <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
         <button class="btn small" id="rq-add">Save request</button></div>`
       : `<p class="sub">We couldn't match your account to an attending student, so you can't file a request — ask a mentor to check your account name.</p>`
-    : `<div class="row"><select id="rq-who"><option value="">Student…</option>${students}</select>
+    : `<div class="row"><select id="rq-who"><option value="">Student…</option>${rqWhoOpts}</select>
       <div class="bubbles chipgroup" id="rq-mates" title="Tap preferred roommates" style="flex:1;min-width:160px;max-height:120px;overflow-y:auto">${studentNames}</div>
       <input id="rq-notes" placeholder="Notes" style="flex:1;min-width:120px">
       <button class="btn small" id="rq-add">Save request</button></div>`}
@@ -3023,64 +3177,36 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents, allAtt) 
       ? `<button class="btn small ghost" data-reqdel="${q.id}">${MENTOR() ? "Remove" : "Withdraw"}</button>` : ""}
     </div>`).join("") || '<span class="sub">No requests yet.</span>'}
   </div>`;
-  // Room status, as gap lines under the table (not a pill per
-  // attendee — placed students already show in the table, so listing
-  // everyone twice was noise): who still needs a room, and whose
-  // request is still awaiting placement. Rooms are per-trip, so this
-  // uses everyone attending the trip.
-  const roomAtt = allAtt || attStudents || [];
-  const roomOf = (memberId) => (h.rooms || []).find((r) =>
-    (r.occupants || []).some((o) => o.member_id === memberId));
-  const pendingReq = (memberId) => (h.requests || []).find((q) =>
-    q.member_id === memberId && q.status === "pending");
-  const needsRoom = roomAtt.filter((a) => a.person_kind === "student"
-    && !roomOf(a.member_id) && !pendingReq(a.member_id));
-  const awaiting = roomAtt.filter((a) => a.person_kind === "student"
-    && !roomOf(a.member_id) && pendingReq(a.member_id));
+}
+function hotelHeaderHTML(h) {
   return `
   <div class="sub"><b>${esc(h.name)}</b> · ${esc(h.address || "")} ·
     ${esc(h.check_in || "")} → ${esc(h.check_out || "")}</div>
-  ${h.notes ? `<div class="sub">${esc(h.notes)}</div>` : ""}
+  ${h.notes ? `<div class="sub">${esc(h.notes)}</div>` : ""}`;
+}
+// Single-day hotel card: header + gap lines + add-room form + rooms
+// table + rooming requests, all for the trip's one day.
+function hotelHTML(h, args) {
+  return `${hotelHeaderHTML(h)}
   <h3>Room status</h3>
   <p class="sub">Who still needs a room for this trip, and whose request is still awaiting placement. Placed students and room parents show in the table below.</p>
-  <p class="sub">Needs a room: ${needsRoom.length ? needsRoom.map((a) => esc(a.person_name)).join(", ") : "everyone has a room."}</p>
-  <p class="sub">Requested — awaiting placement: ${awaiting.length ? awaiting.map((a) => esc(a.person_name)).join(", ") : "none."}</p>
+  ${roomGapHTML(h, args.dayAttendees, args.day)}
   <h3>Rooms</h3>
   <p class="sub">The block is already booked. A room can have an adult <b>room parent</b> to check in, since students under 18 can't check in themselves — optional; senior rooms often go without. Parents can volunteer for a room below.</p>
-  <div class="row mo" style="flex-wrap:wrap;gap:8px;align-items:center">
-    <select id="bed-type">
-      <option value="queen">Queen · sleeps 2</option>
-      <option value="double">Double · sleeps 2</option>
-      <option value="king">King · sleeps 2</option>
-      <option value="sofa bed">Sofa bed · sleeps 1</option>
-    </select>
-    <button class="btn small" id="bed-add">Add bed</button>
-    <span id="bed-list"></span>
-    <button class="btn small" id="rm-add">Add room</button>
-    <span class="sub">Rooms are numbered automatically (Room #1, #2, …).</span></div>
-  ${h.rooms.length ? `<div style="overflow-x:auto"><table class="acct" style="margin-top:8px"><thead><tr><th>Room</th><th>Occupants</th><th>Room parent</th><th>Actions</th></tr></thead><tbody>
-  ${h.rooms.map((r) => {
-    const occ = r.occupants.map((o) =>
-      `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${MENTOR() ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
-    const parentCell = r.parent_name
-      ? `<span class="pill green">Room parent: ${esc(r.parent_name)}</span>
-         ${canVol ? `<button class="btn small ghost" data-rparentx="${r.id}">Remove</button>` : ""}`
-      : `<span class="pill gray">No room parent (optional)</span>`;
-    const volCell = (!r.parent_name && canVol) ? `<div class="row" style="margin-top:4px">
-      <select id="rp-${r.id}"><option value="">Volunteer as room parent…</option>${poptParents}</select>
-      <button class="btn small" data-rvol="${r.id}">Volunteer</button></div>` : "";
-    return `<tr><td><b>${esc(r.label)}</b>
-      ${r.room_number ? `<div class="sub">room #${esc(r.room_number)}</div>` : ""}
-      ${MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}
-      <div><span class="pill ${r.occupants.length >= r.capacity ? "red" : "green"}">${r.occupants.length}/${r.capacity} beds</span></div>
-      ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}</td>
-      <td>${occ || '<span class="sub">empty</span>'}</td>
-      <td>${parentCell}</td>
-      <td><div class="row mo"><select id="plc-${r.id}">
-        <option value="">Place a student…</option>${students}</select>
-        <button class="btn small" data-place="${r.id}">Place</button></div>${volCell}</td></tr>`;
-  }).join("")}</tbody></table></div>` : '<p class="sub">No rooms yet — add one above.</p>'}
-  ${roomingBlock}`;
+  ${addRoomFormHTML(false, [])}
+  ${roomsTableHTML(h, args.day, args.placeOpts, args.parentOpts, {editableNumber: true, showEdit: false})}
+  ${roomingHTML(h, args.rqWhoOpts, args.studentNames, args.attStudents)}`;
+}
+// Multi-day hotel card: block info + add-room form (with day picks)
+// + rooming requests. The rooms tables live in the day sections,
+// not here — a room allocated for specific days belongs to those
+// days' tables.
+function hotelTopHTML(h, args) {
+  return `${hotelHeaderHTML(h)}
+  <h3>Rooms</h3>
+  <p class="sub">The block is already booked. A room can have an adult <b>room parent</b> to check in, since students under 18 can't check in themselves — optional; senior rooms often go without. Parents can volunteer for a room below.</p>
+  ${addRoomFormHTML(true, args.evDays)}
+  ${roomingHTML(h, args.rqWhoOpts, args.studentNames, args.attStudents)}`;
 }
 
 /* ---------------- boot ---------------- */
