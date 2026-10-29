@@ -2068,17 +2068,60 @@ async function renderTravel() {
   const t = await GET(`/api/events/${travelEventId}/travel`);
   const ev = t.event;
   // Mentor driver pool: parent accounts (not disabled) not already
-  // driving for this event. Parents never see it — their driver is
-  // themselves, auto-filled and grayed out below. allUsers is kept
-  // for the van driver dropdown (a van's driver is a global
+  // driving for this event — neither a carpool nor an eligible team
+  // van. The pool is recomputed from this render's travel data, so
+  // the moment a van becomes eligible (seats + RSVP'd driver) its
+  // driver drops out of Post Ride. Parents never see it — their
+  // driver is themselves, auto-filled and grayed out below. allUsers
+  // is kept for the van driver dropdown (a van's driver is a global
   // designation, not per-event).
   let poolUsers = [];
   let allUsers = [];
   if (MENTOR()) {
     allUsers = await GET("/api/users").catch(() => []);
     const taken = new Set((t.carpools || []).map((c) => c.driver_user_id).filter(Boolean));
-    poolUsers = allUsers.filter((u) => u.role === "parent" && !u.disabled && !taken.has(u.id));
+    const vanTaken = new Set((t.event_vans || []).map((v) => v.driver_user_id).filter(Boolean));
+    poolUsers = allUsers.filter((u) => u.role === "parent" && !u.disabled && !taken.has(u.id) && !vanTaken.has(u.id));
   }
+  // Seat picker filter, shared by carpools and vans: a rider choice
+  // excludes everyone driving for this event (carpool or van driver
+  // — including the driver of the very card being filled) and
+  // everyone already holding a CLAIMED seat on any vehicle for this
+  // event. The caller's own-vehicle waitlist is passed in as well,
+  // so a waitlisted rider isn't offered their own ride twice; a
+  // person waitlisted elsewhere can still grab an open seat here
+  // (they hold no seat yet), and the server skips them on promotion
+  // if they have since been seated elsewhere.
+  const driverNames = new Set([
+    ...(t.carpools || []).map((c) => normName(c.driver_name)),
+    ...(t.event_vans || []).map((v) => normName(v.driver_name))]);
+  const claimedEverywhere = new Set();
+  const collectClaimed = (claims) => (claims || []).forEach((x) => {
+    claimedEverywhere.add(`${x.member_id}:${x.person_kind}`);
+    claimedEverywhere.add(`${normName(x.person_name)}:${x.person_kind}`);
+  });
+  (t.carpools || []).forEach((c) => collectClaimed(c.claims));
+  (t.event_vans || []).forEach((v) => collectClaimed(v.claims));
+  const cleanAttName = (p) => p.name.replace(/ \((student|parent)\)$/, "");
+  const claimOptsFor = (ownRows) => {
+    const own = new Set();
+    (ownRows || []).forEach((x) => {
+      own.add(`${x.member_id}:${x.person_kind}`);
+      own.add(`${normName(x.person_name)}:${x.person_kind}`);
+    });
+    return attPeople.filter((p) => {
+      const idKey = `${p.member_id}:${p.kind}`;
+      const nameKey = `${normName(cleanAttName(p))}:${p.kind}`;
+      if (p.kind === "parent" && driverNames.has(normName(cleanAttName(p)))) return false;
+      if (claimedEverywhere.has(idKey) || claimedEverywhere.has(nameKey)) return false;
+      if (own.has(idKey) || own.has(nameKey)) return false;
+      return true;
+    }).map(optJSON).join("");
+  };
+  // What the signed-in parent is already driving for this event, if
+  // anything — a parent driving a car or a van can't post another ride.
+  const myDrivingVan = (t.event_vans || []).find((v) => v.driver_user_id === ME.id);
+  const myDrivingCar = (t.carpools || []).find((c) => c.driver_user_id === ME.id);
   const poolOpts = poolUsers.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
   const vanDriverOpts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
     .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
@@ -2129,7 +2172,9 @@ async function renderTravel() {
   <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div></div>
 
   <div class="card"><h3>Carpools</h3>
-  ${ME.role !== "student" ? `
+  ${ME.role !== "student" ? (ME.role === "parent" && (myDrivingCar || myDrivingVan)
+    ? `<p class="sub">You're already driving for this event${myDrivingVan ? ` — team van ${esc(myDrivingVan.name)}` : " — your car is posted below"} — so you can't post another ride.</p>`
+    : `
   <div class="grid3">
     ${MENTOR()
       ? `<div class="field"><label>Driver name *</label><select id="cp-driver-sel">${poolOpts || '<option value="">No available parents</option>'}</select></div>`
@@ -2144,8 +2189,8 @@ async function renderTravel() {
     <div class="field"><label>Make <span class="hint">(optional)</span></label><input id="cp-vmake" placeholder="Honda"></div>
     <div class="field"><label>Model <span class="hint">(optional)</span></label><input id="cp-vmodel" placeholder="Odyssey"></div>
   </div>
-  ${MENTOR() && !poolOpts ? '<p class="sub">No parents available to assign — every parent account is already driving for this event, or no parent accounts exist yet.</p>' : ""}
-  <button class="btn small" id="cp-add">Post ride</button>` : ""}
+  ${MENTOR() && !poolOpts ? '<p class="sub">No parents available to assign — every parent account is already driving a car or a van for this event, or no parent accounts exist yet.</p>' : ""}
+  <button class="btn small" id="cp-add">Post ride</button>`) : ""}
   <div id="cp-list" style="margin-top:10px">
   ${t.carpools.map((c) => `
     <div class="card" id="cp-card-${c.id}"><div class="row"><b>${esc(c.driver_name)}</b>
@@ -2158,18 +2203,11 @@ async function renderTravel() {
     ${c.waitlist.length ? `<div>Waitlist: ${c.waitlist.map((x) =>
       `<span class="pill amber">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : ""}
     ${(() => {
-      const onRide = new Set();
-      [...c.claims, ...c.waitlist].forEach((x) => {
-        onRide.add(`${x.member_id}:${x.person_kind}`);
-        onRide.add(`${normName(x.person_name)}:${x.person_kind}`);
-      });
-      const cpsOpts = attPeople.filter((p) =>
-        !onRide.has(`${p.member_id}:${p.kind}`)
-        && !onRide.has(`${normName(p.name.replace(/ \((student|parent)\)$/, ""))}:${p.kind}`)).map(optJSON).join("");
+      const cpsOpts = claimOptsFor([...c.claims, ...c.waitlist]);
       return cpsOpts
         ? `<div class="row" style="margin-top:6px"><select id="cps-${c.id}">${cpsOpts}</select>
       <button class="btn small" data-claim="${c.id}">Claim seat</button></div>`
-        : `<div class="sub" style="margin-top:6px">Everyone attending is already on this ride.</div>`;
+        : `<div class="sub" style="margin-top:6px">Everyone attending is already driving or seated on another ride.</div>`;
     })()}
     </div>`).join("") || '<p class="sub">No carpools posted for this event yet.</p>'}
   </div></div>
@@ -2193,18 +2231,11 @@ async function renderTravel() {
     ${v.waitlist.length ? `<div>Waitlist: ${v.waitlist.map((x) =>
       `<span class="pill amber">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : ""}
     ${(() => {
-      const onRideV = new Set();
-      [...v.claims, ...v.waitlist].forEach((x) => {
-        onRideV.add(`${x.member_id}:${x.person_kind}`);
-        onRideV.add(`${normName(x.person_name)}:${x.person_kind}`);
-      });
-      const vpsOpts = attPeople.filter((p) =>
-        !onRideV.has(`${p.member_id}:${p.kind}`)
-        && !onRideV.has(`${normName(p.name.replace(/ \\((student|parent)\\)$/, ""))}:${p.kind}`)).map(optJSON).join("");
+      const vpsOpts = claimOptsFor([...v.claims, ...v.waitlist]);
       return vpsOpts
         ? `<div class="row" style="margin-top:6px"><select id="vps-${v.id}">${vpsOpts}</select>
       <button class="btn small" data-vclaim="${v.id}">Claim seat</button></div>`
-        : `<div class="sub" style="margin-top:6px">Everyone attending is already riding in this van.</div>`;
+        : `<div class="sub" style="margin-top:6px">Everyone attending is already driving or seated on another ride.</div>`;
     })()}
     </div>`).join("") || '<p class="sub">No team vans going to this event yet — designate a driver who RSVP\'d going, and set the van\'s seats.</p>'}
   </div></div>

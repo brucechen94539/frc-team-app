@@ -3129,6 +3129,63 @@ def _own_member_id(u):
     return _self_rsvp_scope(u)[0] if u else None
 
 
+def _event_driver_names(db, eid):
+    """Normalized names of everyone driving for this event: carpool
+    drivers, plus designated drivers of vans with passenger seats
+    (a seatless van is tools-only, so its designee is not driving
+    riders). Takes a raw db connection — callers inside _lock must
+    not go through q_* (which re-locks)."""
+    names = set()
+    for r in db.execute("SELECT driver_name FROM carpools WHERE event_id=?",
+                        (eid,)):
+        if r["driver_name"]:
+            names.add(_norm_name(r["driver_name"]))
+    for r in db.execute(
+            "SELECT u.name FROM team_vans v JOIN users u"
+            " ON u.id = v.driver_user_id WHERE v.seats IS NOT NULL"
+            " AND v.driver_user_id IS NOT NULL"):
+        if r["name"]:
+            names.add(_norm_name(r["name"]))
+    return names
+
+
+def _is_event_driver(db, eid, person_kind, person_name):
+    """True if this person is driving for the event. Only parents
+    drive, so a student name never matches, even if it coincides."""
+    if person_kind != "parent" or not person_name:
+        return False
+    return _norm_name(person_name) in _event_driver_names(db, eid)
+
+
+def _claim_matches(row, member_id, person_kind, person_name):
+    if row["person_kind"] != person_kind:
+        return False
+    if (member_id and row["member_id"]
+            and row["member_id"] == member_id):
+        return True
+    return bool(person_name and row["person_name"]
+                and _norm_name(row["person_name"]) == _norm_name(person_name))
+
+
+def _has_claimed_seat(db, eid, member_id, person_kind, person_name):
+    """True if this person already holds a CLAIMED seat on any vehicle
+    for the event — any carpool or any van. Waitlisted rows don't
+    count: a waitlisted person has no seat yet and may still grab an
+    open seat elsewhere."""
+    for r in db.execute(
+            "SELECT cc.member_id, cc.person_kind, cc.person_name"
+            " FROM carpool_claims cc JOIN carpools c ON c.id = cc.carpool_id"
+            " WHERE c.event_id=? AND cc.status='claimed'", (eid,)):
+        if _claim_matches(r, member_id, person_kind, person_name):
+            return True
+    for r in db.execute(
+            "SELECT member_id, person_kind, person_name FROM van_claims"
+            " WHERE event_id=? AND status='claimed'", (eid,)):
+        if _claim_matches(r, member_id, person_kind, person_name):
+            return True
+    return False
+
+
 @app.route("/api/carpools", methods=["POST"])
 def api_carpool_create():
     # Students claim seats; only parents/mentors/admins may define rides.
@@ -3166,6 +3223,20 @@ def api_carpool_create():
         " person_kind='parent' AND status='going'", (b["event_id"],))}
     if driver_name not in going_parents:
         return err("the driver must RSVP as attending for this event first")
+    # One vehicle per driver per event: a parent already driving a
+    # carpool can't post a second one, and a parent driving a team
+    # van with seats can't also drive a carpool — the van would stop
+    # being eligible for the event the moment the carpool appeared.
+    # (The going check above already ran, so a seated van driver here
+    # is an event-eligible van driver.)
+    if q_one("SELECT id FROM carpools WHERE event_id=? AND"
+             " driver_user_id=?", (b["event_id"], driver_uid)):
+        return err("that parent is already driving a carpool for"
+                   " this event")
+    if q_one("SELECT id FROM team_vans WHERE driver_user_id=? AND"
+             " seats IS NOT NULL", (driver_uid,)):
+        return err("that parent is already driving a team van with"
+                   " seats for this event")
     veh_in = b.get("vehicle") or {}
     vehicle = {k: str(veh_in.get(k) or "").strip()
                for k in ("plate", "color", "model", "make")
@@ -3230,6 +3301,16 @@ def api_carpool_patch(cid):
             " person_kind='parent' AND status='going'", (c["event_id"],))}
         if drv["name"] not in going_parents:
             return err("the driver must RSVP as attending for this event first")
+        if drv["id"] != c.get("driver_user_id"):
+            if q_one("SELECT id FROM carpools WHERE event_id=? AND"
+                     " driver_user_id=? AND id!=?",
+                     (c["event_id"], drv["id"], cid)):
+                return err("that parent is already driving a carpool"
+                           " for this event")
+            if q_one("SELECT id FROM team_vans WHERE driver_user_id=?"
+                     " AND seats IS NOT NULL", (drv["id"],)):
+                return err("that parent is already driving a team van"
+                           " with seats for this event")
         sets.append("driver_user_id=?")
         args.append(drv["id"])
         sets.append("driver_name=?")
@@ -3290,6 +3371,18 @@ def api_carpool_claim(cid):
                 (cid, b["person_name"], b.get("person_kind"))).fetchone()
         if dup:
             return err("already on this ride — claimed or waitlisted", 409)
+        # A driver can't also be a rider: not in their own car, and
+        # not in anyone else's — they're already driving for the event.
+        if _is_event_driver(db, c["event_id"], b.get("person_kind"),
+                            b["person_name"]):
+            return err("drivers can't claim a seat — they're driving"
+                       " for this event", 403)
+        # One seat per person per event, across every vehicle: a seat
+        # already claimed on another carpool or a van blocks this one.
+        if _has_claimed_seat(db, c["event_id"], b.get("member_id"),
+                             b.get("person_kind"), b["person_name"]):
+            return err("already has a seat for this event — on another"
+                       " car or van", 409)
         taken = db.execute(
             "SELECT COUNT(*) n FROM carpool_claims"
             " WHERE carpool_id=? AND status='claimed'", (cid,)).fetchone()["n"]
@@ -3322,6 +3415,9 @@ def api_carpool_claim_delete(clid):
                 "SELECT person_name, person_kind FROM carpool_claims"
                 " WHERE carpool_id=? AND status='claimed'",
                 (cl["carpool_id"],))}
+            ev_row = db.execute("SELECT event_id FROM carpools WHERE id=?",
+                                (cl["carpool_id"],)).fetchone()
+            eid = ev_row["event_id"] if ev_row else None
             for nxt in db.execute(
                     "SELECT * FROM carpool_claims WHERE carpool_id=? AND"
                     " status='waitlisted' ORDER BY created_at, id",
@@ -3329,6 +3425,13 @@ def api_carpool_claim_delete(clid):
                 if ((nxt["member_id"], nxt["person_kind"]) in claimed_ids
                         or (nxt["person_name"], nxt["person_kind"]) in claimed_names):
                     continue  # stale duplicate: never promote into a second seat
+                if eid is not None and (
+                        _is_event_driver(db, eid, nxt["person_kind"],
+                                         nxt["person_name"])
+                        or _has_claimed_seat(db, eid, nxt["member_id"],
+                                             nxt["person_kind"],
+                                             nxt["person_name"])):
+                    continue  # driving, or already seated on another vehicle
                 db.execute("UPDATE carpool_claims SET status='claimed' WHERE id=?",
                            (nxt["id"],))
                 promoted = dict(nxt)
@@ -3740,6 +3843,14 @@ def api_van_claim(vid):
         if dup:
             return err("already riding in this van — claimed or waitlisted",
                        409)
+        if _is_event_driver(db, b["event_id"], b.get("person_kind"),
+                            b["person_name"]):
+            return err("drivers can't claim a seat — they're driving"
+                       " for this event", 403)
+        if _has_claimed_seat(db, b["event_id"], b.get("member_id"),
+                             b.get("person_kind"), b["person_name"]):
+            return err("already has a seat for this event — on another"
+                       " car or van", 409)
         taken = db.execute(
             "SELECT COUNT(*) n FROM van_claims WHERE van_id=? AND"
             " event_id=? AND status='claimed'",
@@ -3780,6 +3891,13 @@ def api_van_claim_delete(clid):
                 if ((nxt["member_id"], nxt["person_kind"]) in claimed_ids
                         or (nxt["person_name"], nxt["person_kind"]) in claimed_names):
                     continue
+                if (_is_event_driver(db, cl["event_id"], nxt["person_kind"],
+                                     nxt["person_name"])
+                        or _has_claimed_seat(db, cl["event_id"],
+                                             nxt["member_id"],
+                                             nxt["person_kind"],
+                                             nxt["person_name"])):
+                    continue  # driving, or already seated on another vehicle
                 db.execute("UPDATE van_claims SET status='claimed' WHERE id=?",
                            (nxt["id"],))
                 promoted = dict(nxt)

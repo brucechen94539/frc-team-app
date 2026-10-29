@@ -9,6 +9,41 @@ _None right now._
 
 ## Fixed
 
+### Seat picker offered drivers and already-seated riders; Post Ride pool ignored van drivers (2026-10-28)
+- **Reported:** Bruce (screenshot) — on Jessica Ting's car card, the
+  Claim seat dropdown offered Jessica herself (the driver), and a
+  rider already seated on one ride still appeared in every other
+  ride's picker; a van that had become available with seats did not
+  change the Post Ride driver pool.
+- **Root cause:** each card's picker filtered only that vehicle's own
+  claims/waitlist, so drivers and riders seated on other vehicles
+  stayed in the list; the mentor driver pool filtered only carpool
+  drivers, never van drivers; and the server had no cross-vehicle
+  guard at all — a forged claim could seat a driver or double-seat a
+  rider, and a carpool posted for a van driver silently knocked that
+  van out of the event (the travel endpoint hides a van whose driver
+  is also driving a carpool).
+- **Fix:** one seat per person per event, across every vehicle, in
+  the UI and on the server. The seat pickers (carpool and van) now
+  exclude everyone driving for the event (carpool or van driver,
+  including the card's own driver) and everyone already holding a
+  claimed seat on any car or van; a person waitlisted on one ride
+  can still grab an open seat on another (they hold no seat yet).
+  The Post Ride pool is recomputed from each render's travel data
+  and now also excludes eligible van drivers, and a parent already
+  driving a car or van for the event sees a note instead of the Post
+  Ride form. Server-side: claiming as a driver is 403, claiming
+  while already seated elsewhere is 409, posting (or reassigning)
+  a carpool to a parent already driving a carpool or a seated van
+  for the event is rejected, and waitlist promotion skips riders
+  who have since become drivers or been seated elsewhere (verified:
+  a waitlisted rider who took a van seat was skipped and the next
+  rider promoted). Verified by API and in Chromium: a car card whose
+  driver, van driver, and two riders were all taken offered only the
+  one unseated attendee, and the Post Ride pool showed no available
+  parents while both parent accounts were driving.
+  (commit TBD)
+
 ### Logged-out sign-up submit yanked the visitor to the login page (2026-10-26)
 - **Symptom:** after submitting a sign-up (link request or name-only
   application) as a logged-out visitor, the page jumped to login

@@ -439,6 +439,24 @@ well as in the UI.
   parent-posted and mentor-assigned rides. (Mentors used to be exempt
   and could post any driver name; team vehicles now live in Team vans
   instead.)
+- **One vehicle per driver per event:** a parent already driving a
+  carpool can't post (or be reassigned) a second one, and a parent
+  driving a team van with seats can't also drive a carpool — the van
+  would stop being eligible for the event. The mentor Post Ride pool
+  therefore excludes carpool drivers *and* eligible van drivers, and
+  is recomputed from each render's travel data, so a van becoming
+  eligible immediately removes its driver from the pool. A parent
+  already driving for the event sees a note instead of the Post Ride
+  form.
+- **One seat per person per event, across every vehicle:** a driver
+  can never claim a seat (not their own car, not anyone else's, not
+  a van — they're already driving), and a person already holding a
+  claimed seat on any car or van is not offered on any other ride's
+  picker and is rejected server-side (403 for a driver, 409 for an
+  already-seated rider). A person merely waitlisted on one ride may
+  still take an open seat on another; if they do, waitlist promotion
+  on the first ride skips them (and promotes the next rider) rather
+  than seating them twice.
 - **Edit and remove:** the driver-owner or a mentor/admin can edit a
   ride later (seats, departure point/time, return plan, notes, plate,
   color, make, model) or remove the car from the pool. Editing keeps
@@ -454,7 +472,9 @@ well as in the UI.
   spot the car.
 - **One row per person per carpool:** a person already claimed or
   waitlisted on a ride cannot claim it again (409). Releasing a seat
-  promotes the first waitlisted person who doesn't already hold a seat.
+  promotes the first waitlisted person who doesn't already hold a seat
+  on any vehicle or drive for the event (see the one-seat-per-event
+  rule above).
   Databases with pre-existing duplicates are collapsed on server boot
   (earliest claimed row kept, else earliest waitlisted row).
 - **Clean slate (2026-10-28):** when the driver-account model shipped,
