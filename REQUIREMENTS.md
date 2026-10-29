@@ -424,11 +424,29 @@ well as in the UI.
 
 ### Carpools
 
-- Only **parents, mentors, and admins** can define a ride (driver name,
+- Only **parents, mentors, and admins** can define a ride (driver,
   seats, departure point/time, return plan). Students cannot post rides.
-- A **parent** offering a ride must be attending themselves: the driver
-  named on the ride must have a parent RSVP = going for that event.
-  Mentors/admins may also post team vehicles or coordinate rides.
+- **The driver is always an account, never free text**
+  (`carpools.driver_user_id`). A parent posting a ride sees the Driver
+  name field grayed out and auto-filled with their own name — the
+  server takes the driver from the session and ignores any driver name
+  in the request, so nobody can post as someone else. A mentor/admin
+  picks the driver from a **free pool of parent accounts** — parents
+  not disabled and not already driving for that event (a parent
+  without an account must be created in Team accounts first).
+- A **driver must be attending themselves**: the driver's account name
+  must have a parent RSVP = going for that event — the same rule for
+  parent-posted and mentor-assigned rides. (Mentors used to be exempt
+  and could post any driver name; team vehicles now live in Team vans
+  instead.)
+- **Edit and remove:** the driver-owner or a mentor/admin can edit a
+  ride later (seats, departure point/time, return plan, notes, plate,
+  color, make, model) or remove the car from the pool. Editing keeps
+  the riders; removing a car releases its claims and waitlist with it.
+  A mentor editing may also reassign the driver to another parent in
+  the pool (who must also RSVP going); a parent editing their own car
+  keeps themselves as driver. Seats can't be lowered below the riders
+  already claimed.
 - Anyone attending can claim a seat; claims beyond capacity go to the
   carpool waitlist and auto-promote when a seat is released.
 - Drivers may optionally add vehicle details — **license plate, color,
@@ -439,6 +457,10 @@ well as in the UI.
   promotes the first waitlisted person who doesn't already hold a seat.
   Databases with pre-existing duplicates are collapsed on server boot
   (earliest claimed row kept, else earliest waitlisted row).
+- **Clean slate (2026-10-28):** when the driver-account model shipped,
+  every posted ride and claim was wiped once at boot (marker-gated, so
+  rides posted after the wipe are never touched) to avoid mixing old
+  free-text drivers with the new account drivers.
 
 ### Tools & equipment
 

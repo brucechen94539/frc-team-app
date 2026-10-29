@@ -2067,6 +2067,16 @@ async function renderTravel() {
   }
   const t = await GET(`/api/events/${travelEventId}/travel`);
   const ev = t.event;
+  // Mentor driver pool: parent accounts (not disabled) not already
+  // driving for this event. Parents never see it — their driver is
+  // themselves, auto-filled and grayed out below.
+  let poolUsers = [];
+  if (MENTOR()) {
+    const allUsers = await GET("/api/users").catch(() => []);
+    const taken = new Set((t.carpools || []).map((c) => c.driver_user_id).filter(Boolean));
+    poolUsers = allUsers.filter((u) => u.role === "parent" && !u.disabled && !taken.has(u.id));
+  }
+  const poolOpts = poolUsers.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
   const vans = await GET("/api/team-vans").catch(() => []);
   const people = personOptions();
   const popts = people.map((p) =>
@@ -2103,7 +2113,9 @@ async function renderTravel() {
   <div class="card"><h3>Carpools</h3>
   ${ME.role !== "student" ? `
   <div class="grid3">
-    <div class="field"><label>Driver name *</label><input id="cp-driver"></div>
+    ${MENTOR()
+      ? `<div class="field"><label>Driver name *</label><select id="cp-driver-sel">${poolOpts || '<option value="">No available parents</option>'}</select></div>`
+      : `<div class="field"><label>Driver name</label><input id="cp-driver" disabled value="${esc(ME.name)}"><span class="hint">You, auto-filled</span></div>`}
     <div class="field"><label>Seats *</label><input id="cp-seats" inputmode="numeric" placeholder="4"></div>
     <div class="field"><label>Departure point</label><input id="cp-from" placeholder="School lot"></div>
     <div class="field"><label>Departure time</label><input id="cp-dt" placeholder="Thu 3:30 PM"></div>
@@ -2114,12 +2126,14 @@ async function renderTravel() {
     <div class="field"><label>Make <span class="hint">(optional)</span></label><input id="cp-vmake" placeholder="Honda"></div>
     <div class="field"><label>Model <span class="hint">(optional)</span></label><input id="cp-vmodel" placeholder="Odyssey"></div>
   </div>
+  ${MENTOR() && !poolOpts ? '<p class="sub">No parents available to assign — every parent account is already driving for this event, or no parent accounts exist yet.</p>' : ""}
   <button class="btn small" id="cp-add">Post ride</button>` : ""}
   <div id="cp-list" style="margin-top:10px">
   ${t.carpools.map((c) => `
-    <div class="card"><div class="row"><b>${esc(c.driver_name)}</b>
+    <div class="card" id="cp-card-${c.id}"><div class="row"><b>${esc(c.driver_name)}</b>
       ${vehicleTip(c.vehicle) ? `<span class="pill" title="${esc(vehicleTip(c.vehicle))}">\u{1F697} vehicle</span>` : ""}
-      <span class="pill ${c.seats_open ? "green" : "red"}">${c.seats_open} of ${c.seats} seats open</span></div>
+      <span class="pill ${c.seats_open ? "green" : "red"}">${c.seats_open} of ${c.seats} seats open</span>
+      ${MENTOR() || c.driver_user_id === ME.id ? `<button class="btn small ghost" data-cpedit="${c.id}">Edit</button><button class="btn small ghost" data-cpdel="${c.id}">Remove</button>` : ""}</div>
     <div class="sub">${esc(c.depart_from || "")} · ${esc(c.depart_time || "")} · Return: ${esc(c.return_info || "—")}</div>
     <div>Riders: ${c.claims.map((x) =>
       `<span class="pill">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="release">✕</a></span>`).join("") || '<span class="sub">none yet</span>'}</div>
@@ -2207,18 +2221,85 @@ async function renderTravel() {
   });
   const cpAdd = $("cp-add");
   if (cpAdd) cpAdd.addEventListener("click", async () => {
-    if (!$("cp-driver").value.trim() || !$("cp-seats").value.trim())
-      return toast("Driver name and seats are required.");
+    const seats = parseInt($("cp-seats").value, 10);
+    if (!seats || seats < 1) return toast("Seats are required.");
+    const body = {event_id: travelEventId, seats,
+      depart_from: $("cp-from").value.trim(), depart_time: $("cp-dt").value.trim(),
+      return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim(),
+      vehicle: {plate: $("cp-vplate").value.trim(), color: $("cp-vcolor").value.trim(),
+        make: $("cp-vmake").value.trim(), model: $("cp-vmodel").value.trim()}};
+    // Parents post as themselves (the server fills the driver from
+    // the session); mentors pick a parent from the free pool.
+    if (MENTOR()) {
+      const duid = $("cp-driver-sel") ? $("cp-driver-sel").value : "";
+      if (!duid) return toast("Pick a driver from the parent pool.");
+      body.driver_user_id = +duid;
+    }
     try {
-      await POST("/api/carpools", {event_id: travelEventId,
-        driver_name: $("cp-driver").value.trim(), seats: parseInt($("cp-seats").value, 10),
-        depart_from: $("cp-from").value.trim(), depart_time: $("cp-dt").value.trim(),
-        return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim(),
-        vehicle: {plate: $("cp-vplate").value.trim(), color: $("cp-vcolor").value.trim(),
-          make: $("cp-vmake").value.trim(), model: $("cp-vmodel").value.trim()}});
+      await POST("/api/carpools", body);
       toast("Ride posted."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   });
+  // Edit / remove a car: the driver-owner or a mentor. Edit swaps the
+  // card for a pre-filled form (driver grayed out for a parent owner,
+  // pool dropdown for a mentor, current driver kept selectable).
+  v.querySelectorAll("[data-cpedit]").forEach((b) => b.addEventListener("click", () => {
+    const c = (t.carpools || []).find((x) => x.id === +b.dataset.cpedit);
+    if (!c) return;
+    const card = $("cp-card-" + c.id);
+    const veh = c.vehicle || {};
+    const driverField = MENTOR()
+      ? (() => {
+        const taken = new Set((t.carpools || []).map((x) => x.driver_user_id).filter(Boolean));
+        const opts = poolUsers.filter((u) => u.id === c.driver_user_id || !taken.has(u.id));
+        if (c.driver_user_id && !opts.some((u) => u.id === c.driver_user_id))
+          opts.unshift({id: c.driver_user_id, name: c.driver_name});
+        return `<div class="field"><label>Driver name *</label><select id="ep-driver-${c.id}">${
+          opts.map((u) => `<option value="${u.id}"${u.id === c.driver_user_id ? " selected" : ""}>${esc(u.name)}</option>`).join("")}</select></div>`;
+      })()
+      : `<div class="field"><label>Driver name</label><input id="ep-driver-${c.id}" disabled value="${esc(c.driver_name)}"></div>`;
+    card.innerHTML = `<div class="grid3">
+      ${driverField}
+      <div class="field"><label>Seats *</label><input id="ep-seats-${c.id}" inputmode="numeric" value="${c.seats}"></div>
+      <div class="field"><label>Departure point</label><input id="ep-from-${c.id}" value="${esc(c.depart_from || "")}"></div>
+      <div class="field"><label>Departure time</label><input id="ep-dt-${c.id}" value="${esc(c.depart_time || "")}"></div>
+      <div class="field"><label>Return plan</label><input id="ep-ret-${c.id}" value="${esc(c.return_info || "")}"></div>
+      <div class="field"><label>Notes</label><input id="ep-notes-${c.id}" value="${esc(c.notes || "")}"></div>
+      <div class="field"><label>License plate</label><input id="ep-vplate-${c.id}" value="${esc(veh.plate || "")}"></div>
+      <div class="field"><label>Color</label><input id="ep-vcolor-${c.id}" value="${esc(veh.color || "")}"></div>
+      <div class="field"><label>Make</label><input id="ep-vmake-${c.id}" value="${esc(veh.make || "")}"></div>
+      <div class="field"><label>Model</label><input id="ep-vmodel-${c.id}" value="${esc(veh.model || "")}"></div>
+    </div>
+    <div class="row" style="margin-top:6px"><button class="btn small" id="ep-save-${c.id}">Save</button><button class="btn small ghost" id="ep-cancel-${c.id}">Cancel</button></div>`;
+    $("ep-cancel-" + c.id).addEventListener("click", () => renderTravel());
+    $("ep-save-" + c.id).addEventListener("click", async () => {
+      const seats = parseInt($("ep-seats-" + c.id).value, 10);
+      if (!seats || seats < 1) return toast("Seats are required.");
+      const body = {seats,
+        depart_from: $("ep-from-" + c.id).value.trim(), depart_time: $("ep-dt-" + c.id).value.trim(),
+        return_info: $("ep-ret-" + c.id).value.trim(), notes: $("ep-notes-" + c.id).value.trim(),
+        vehicle: {plate: $("ep-vplate-" + c.id).value.trim(), color: $("ep-vcolor-" + c.id).value.trim(),
+          make: $("ep-vmake-" + c.id).value.trim(), model: $("ep-vmodel-" + c.id).value.trim()}};
+      if (MENTOR()) {
+        const duid = $("ep-driver-" + c.id).value;
+        if (duid) body.driver_user_id = +duid;
+      }
+      try {
+        await PATCH(`/api/carpools/${c.id}`, body);
+        toast("Ride updated."); renderTravel();
+      } catch (e) { toast("Error: " + e.message); }
+    });
+  }));
+  v.querySelectorAll("[data-cpdel]").forEach((b) => b.addEventListener("click", async () => {
+    const c = (t.carpools || []).find((x) => x.id === +b.dataset.cpdel);
+    if (!c) return;
+    const riders = c.claims.length + c.waitlist.length;
+    if (!confirm(`Remove this car from the pool?${riders ? ` ${riders} rider(s) will be released.` : ""}`)) return;
+    try {
+      await DEL(`/api/carpools/${c.id}`);
+      toast("Car removed from the pool."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
   v.querySelectorAll("[data-claim]").forEach((b) => b.addEventListener("click", async () => {
     const p = JSON.parse($("cps-" + b.dataset.claim).value.replace(/&#39;/g, "'"));
     try {

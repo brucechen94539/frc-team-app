@@ -135,6 +135,8 @@ def _migrate(db):
             db.execute("ALTER TABLE rooms ADD COLUMN beds TEXT")
         if "vehicle" not in car_cols:
             db.execute("ALTER TABLE carpools ADD COLUMN vehicle TEXT")
+        if "driver_user_id" not in car_cols:
+            db.execute("ALTER TABLE carpools ADD COLUMN driver_user_id INTEGER")
         if "season" not in event_cols:
             db.execute("ALTER TABLE events ADD COLUMN season TEXT")
         if "totp_secret" not in user_cols:
@@ -293,6 +295,19 @@ def _migrate(db):
             db.execute("UPDATE tasks SET assignees=? WHERE id=?",
                        (json.dumps([r["assignee"]]), r["id"]))
         _dedupe_carpool_claims(db)
+        # 2026-10-28: carpool model change (driver accounts, edit/remove).
+        # Clear every posted ride so the pool restarts clean instead of
+        # mixing old free-text drivers with the new account drivers.
+        # Marker-gated: runs once, so rides posted after the wipe are
+        # never touched. Claims go with their cars.
+        wiped = db.execute(
+            "SELECT value FROM meta WHERE key='carpools_wiped_2026_10_28'"
+            ).fetchone() is not None
+        if not wiped:
+            db.execute("DELETE FROM carpool_claims")
+            db.execute("DELETE FROM carpools")
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)",
+                       ("carpools_wiped_2026_10_28", "1"))
         db.commit()
         db.commit()
 
@@ -3037,33 +3052,130 @@ def _own_member_id(u):
 @app.route("/api/carpools", methods=["POST"])
 def api_carpool_create():
     # Students claim seats; only parents/mentors/admins may define rides.
-    if current_user()["role"] == "student":
+    me = current_user()
+    if me["role"] == "student":
         return err("parents, mentors and admins only", 403)
     b = request.get_json(force=True)
-    if not b.get("event_id") or not b.get("driver_name"):
-        return err("event_id and driver_name required")
-    if not b.get("seats"):
+    if not b.get("event_id"):
+        return err("event_id required")
+    try:
+        seats = int(b.get("seats") or 0)
+    except (TypeError, ValueError):
+        return err("seats must be a number")
+    if seats < 1:
         return err("seats required")
-    # A parent offering a ride must be attending themselves (RSVP 'going');
-    # mentors/admins may also post team vehicles or coordinate rides.
-    if current_user()["role"] == "parent":
-        going_parents = {r["person_name"] for r in q_all(
-            "SELECT person_name FROM rsvps WHERE event_id=? AND"
-            " person_kind='parent' AND status='going'", (b["event_id"],))}
-        if b["driver_name"].strip() not in going_parents:
-            return err("the driver must RSVP as attending for this event first")
+    # Driver resolution — the driver is always an account, never free
+    # text, so the car stays editable by its owner:
+    # - a parent posts as themselves: the driver is the session user
+    #   (grayed out and auto-filled in the form); any driver_name in
+    #   the request is ignored, so nobody can post as someone else.
+    # - a mentor/admin picks a parent account from the free pool.
+    if me["role"] == "parent":
+        driver_uid, driver_name = me["id"], me["name"]
+    else:
+        drv = q_one("SELECT id, name, role FROM users WHERE id=?",
+                    (b.get("driver_user_id"),)) if b.get("driver_user_id") else None
+        if not drv or drv["role"] != "parent":
+            return err("pick a parent account as the driver")
+        driver_uid, driver_name = drv["id"], drv["name"]
+    # A driver must be attending themselves (RSVP 'going'). The rule
+    # used to check the typed driver name; now it checks the resolved
+    # account's name — same discipline, applied to the driver.
+    going_parents = {r["person_name"] for r in q_all(
+        "SELECT person_name FROM rsvps WHERE event_id=? AND"
+        " person_kind='parent' AND status='going'", (b["event_id"],))}
+    if driver_name not in going_parents:
+        return err("the driver must RSVP as attending for this event first")
     veh_in = b.get("vehicle") or {}
     vehicle = {k: str(veh_in.get(k) or "").strip()
                for k in ("plate", "color", "model", "make")
                if str(veh_in.get(k) or "").strip()}
     cid = execute(
-        """INSERT INTO carpools (event_id, driver_name, seats, depart_from,
-           depart_time, return_info, notes, vehicle, sample)
-           VALUES (?,?,?,?,?,?,?,?,0)""",
-        (b["event_id"], b["driver_name"], int(b["seats"]), b.get("depart_from"),
+        """INSERT INTO carpools (event_id, driver_name, driver_user_id,
+           seats, depart_from, depart_time, return_info, notes, vehicle,
+           sample)
+           VALUES (?,?,?,?,?,?,?,?,?,0)""",
+        (b["event_id"], driver_name, driver_uid, seats, b.get("depart_from"),
          b.get("depart_time"), b.get("return_info"), b.get("notes"),
          json.dumps(vehicle) if vehicle else None))
     return jsonify(q_one("SELECT * FROM carpools WHERE id=?", (cid,))), 201
+
+
+@app.route("/api/carpools/<int:cid>", methods=["PATCH"])
+def api_carpool_patch(cid):
+    c = q_one("SELECT * FROM carpools WHERE id=?", (cid,))
+    if not c:
+        return err("carpool not found", 404)
+    me = current_user()
+    # Owner (the driver account) or a mentor/admin may edit. Old rows
+    # with no driver account are mentor-only.
+    if me["role"] not in MENTOR_ROLES and c.get("driver_user_id") != me["id"]:
+        return err("only the driver or a mentor can edit this car", 403)
+    b = request.get_json(force=True)
+    sets, args = [], []
+    if "seats" in b:
+        try:
+            seats = int(b["seats"])
+        except (TypeError, ValueError):
+            return err("seats must be a number")
+        if seats < 1:
+            return err("seats required")
+        claimed = q_one("SELECT COUNT(*) n FROM carpool_claims"
+                        " WHERE carpool_id=? AND status='claimed'",
+                        (cid,))["n"]
+        if seats < claimed:
+            return err("seats can't go below the riders already claimed")
+        sets.append("seats=?")
+        args.append(seats)
+    for col in ("depart_from", "depart_time", "return_info", "notes"):
+        if col in b:
+            sets.append(f"{col}=?")
+            args.append(b[col])
+    if "vehicle" in b:
+        veh_in = b["vehicle"] or {}
+        vehicle = {k: str(veh_in.get(k) or "").strip()
+                   for k in ("plate", "color", "model", "make")
+                   if str(veh_in.get(k) or "").strip()}
+        sets.append("vehicle=?")
+        args.append(json.dumps(vehicle) if vehicle else None)
+    # Driver reassignment is mentor-only; a parent editing their own
+    # car keeps themselves as driver (any driver field sent is ignored).
+    if me["role"] in MENTOR_ROLES and b.get("driver_user_id"):
+        drv = q_one("SELECT id, name, role FROM users WHERE id=?",
+                    (b["driver_user_id"],))
+        if not drv or drv["role"] != "parent":
+            return err("pick a parent account as the driver")
+        going_parents = {r["person_name"] for r in q_all(
+            "SELECT person_name FROM rsvps WHERE event_id=? AND"
+            " person_kind='parent' AND status='going'", (c["event_id"],))}
+        if drv["name"] not in going_parents:
+            return err("the driver must RSVP as attending for this event first")
+        sets.append("driver_user_id=?")
+        args.append(drv["id"])
+        sets.append("driver_name=?")
+        args.append(drv["name"])
+    if not sets:
+        return err("nothing to update")
+    execute(f"UPDATE carpools SET {', '.join(sets)} WHERE id=?",
+            (*args, cid))
+    return jsonify(q_one("SELECT * FROM carpools WHERE id=?", (cid,)))
+
+
+@app.route("/api/carpools/<int:cid>", methods=["DELETE"])
+def api_carpool_delete(cid):
+    c = q_one("SELECT * FROM carpools WHERE id=?", (cid,))
+    if not c:
+        return err("carpool not found", 404)
+    me = current_user()
+    if me["role"] not in MENTOR_ROLES and c.get("driver_user_id") != me["id"]:
+        return err("only the driver or a mentor can remove this car", 403)
+    with _lock:
+        db = get_db()
+        n = db.execute("DELETE FROM carpool_claims WHERE carpool_id=?",
+                       (cid,)).rowcount
+        db.execute("DELETE FROM carpools WHERE id=?", (cid,))
+        db.commit()
+    return jsonify({"deleted": cid, "claims_removed": n})
 
 
 @app.route("/api/carpools/<int:cid>/claims", methods=["POST"])

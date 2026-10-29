@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS carpools (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id     INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   driver_name  TEXT NOT NULL,
+  driver_user_id INTEGER,      -- the driver account (owner); NULL on old rows
   seats        INTEGER NOT NULL,
   depart_from  TEXT, depart_time TEXT, return_info TEXT, notes TEXT,
   vehicle      TEXT,               -- JSON {plate, color, model, make} (optional)
