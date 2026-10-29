@@ -362,35 +362,48 @@ and `can't make it` do not count as attending.
   **Going** covers every day. Event capacity is checked **per day**:
   a partial attending only Day 1 does not occupy a Day 3 spot, and
   if any covered day is full the whole RSVP waitlists.
-- **Per-day rides:** Travel and Tracking have **day tabs**; rides,
-  seats, drivers, and ride status are for the selected day, while
-  tools and hotel rooms stay per-trip. A carpool lists the days it
-  runs (default every day); a rider claims **one seat per person per
-  day** across every vehicle, so riding Car A out Day 1 and Car B
-  back Day 3 is allowed and a same-day seat elsewhere blocks a
-  second claim that day. A driver must be attending on every day
-  their car runs — 'going', or (multi-day only) a partial covering
-  that day — and a driver on Day 1 may ride as a passenger on Day
-  3 if they aren't driving that day. Waitlist promotion is per-day:
-  freeing a Day 1 seat promotes a Day 1 waitlist row, never a Day 3
-  one. Team vans have a **per-day driver override** (mentors set a
-  different parent to drive the van on one day, or back to the
-  designated driver); van eligibility for a day still requires that
-  day's driver to be attending that day and not driving a carpool
-  that day. Check-ins are **per person per day**, so a 3-day trip
-  credits each day separately (the day is required on multi-day
-  events). NULL/empty day sets mean "all days" throughout, so
-  pre-multi-day data (single-day events, old claims and check-ins)
-  keeps working untouched.
-- **Room status:** the Hotel assignments section has a Room status
-  pane mirroring Ride status: every student RSVP'd going or partial
-  for the trip, with a green pill for their room (label + actual
-  room number once set), amber "requested — awaiting placement"
-  for a pending rooming request, or amber "needs room" otherwise.
-  Parents appear only when they are a room parent for a room
-  (they don't take a room slot, so unlisted parents are not shown
-  as needing a room). Rooms stay per-trip, so the pane lists all
-  trip attendees on every day tab, not just that day's riders.
+- **Per-day rides:** Travel shows one **collapsible section per
+  trip day** (Day 1 open, the rest closed, with Expand/Collapse all),
+  each with a **carpool table** and a **van table** for that day;
+  Tracking keeps day tabs. Tools and hotel rooms stay per-trip. A
+  carpool lists the days it runs (default every day); a rider claims
+  **one seat per person per day** across every vehicle, so riding
+  Car A out Day 1 and Car B back Day 3 is allowed and a same-day
+  seat elsewhere blocks a second claim that day. A driver must be
+  attending on every day their car runs — 'going', or (multi-day
+  only) a partial covering that day — and a driver on Day 1 may
+  ride as a passenger on Day 3 if they aren't driving that day.
+  Waitlist promotion is per-day: freeing a Day 1 seat promotes a
+  Day 1 waitlist row, never a Day 3 one. Team vans have a **per-day
+  driver override** (mentors set a different parent to drive the van
+  on one day, or back to the designated driver); van eligibility for
+  a day still requires that day's driver to be attending that day
+  and not driving a carpool that day. Check-ins are **per person
+  per day**, so a 3-day trip credits each day separately (the day is
+  required on multi-day events). NULL/empty day sets mean "all days"
+  throughout, so pre-multi-day data (single-day events, old claims
+  and check-ins) keeps working untouched.
+- **Day tables (Travel layout):** a carpool table row is one car —
+  Car/Driver (driver, vehicle make/model/color, departure, return,
+  notes), Riders (claimed + waitlisted), Seats (open/total),
+  Actions (claim picker, Edit/Remove). A van table row mirrors it,
+  plus the per-day driver control for mentors. Below each day's
+  tables, a **gap line** lists only who still **needs a ride** that
+  day (waitlisted counts as needing one); placed riders and drivers
+  are not repeated. **Tooltips are used sparingly:** vehicle
+  make/model/color are visible text and only the license plate
+  hides behind a hover tooltip, so nothing decision-relevant is
+  hover-only. **Single-day events** get one carpool table and one
+  van table with no day sections, and **no hotel section at all**
+  unless a hotel block already exists — a day trip needs no rooms.
+- **Room status (gap lines):** the Hotel assignments section shows
+  one **rooms table** (Room with label, actual room number, beds and
+  capacity; Occupants; Room parent; Actions with Place and
+  Volunteer controls) plus two gap lines — who still **needs a
+  room**, and whose request is **awaiting placement**. Placed
+  students already show in the table, so they are not listed twice.
+  Rooms stay per-trip, so the table and gap lines cover all trip
+  attendees, not just one day's riders.
 - **RSVP deadlines are enforced on the server, not just by hiding the
   buttons:** once an event's deadline passes, non-mentors get a 403
   filing an RSVP (the UI hides their picker and shows an "RSVP closed"
@@ -584,14 +597,13 @@ stay per-trip.
   it has seats AND its designated driver RSVP'd going for that event
   AND that driver isn't already driving a carpool for the same event
   — otherwise the van is tools-only for the event. Eligible vans show
-  as ride cards with seats, riders, waitlist, and claim/release,
+  as table rows with seats, riders, waitlist, and claim/release,
   mirroring carpools (capacity → waitlist → auto-promote).
-- **Ride status pane:** Travel shows every RSVP'd going/partial
-  person for the event with a bubble — **'needs ride'**, **'ride on
-  XYZ's car'**, **'ride in team van XYZ'**, or **'driving'** for
-  drivers. Waitlisted riders count as needing a ride (no seat yet).
-  'Needs ride' means not on any posted ride; a parent driving
-  themselves without posting a carpool still shows as needing one.
+- **Needs-a-ride gap line:** under each day's rides tables, Travel
+  lists only the attendees who still **need a ride** that day.
+  Waitlisted riders count as needing a ride (no seat yet). 'Needs
+  ride' means not on any posted ride; a parent driving themselves
+  without posting a carpool still shows as needing one.
 
 ### Hotels & room parents
 

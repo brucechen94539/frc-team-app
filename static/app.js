@@ -70,7 +70,8 @@ let eventCalMode = false, eventCalCursor = "";
 let openRsvpLists = new Set();  // event ids whose RSVP list is expanded
 let toolsListCollapsed = false;  // Tool sign-up list in Travel, across renders
 let trackEventId = null, travelEventId = null;
-let travelDay = null, trackDay = null;  // selected trip day (YYYY-MM-DD)
+let trackDay = null;  // selected Tracking trip day (YYYY-MM-DD)
+let openTravelDays = new Set(), openTravelDaysEvent = null;  // Travel day sections left open
 let currentView = "events";
 
 /* Multi-day trips: an event's days are [date .. end_date] inclusive,
@@ -2130,92 +2131,127 @@ async function renderTravel() {
       '<div class="card"><h2>Travel &amp; Logistics</h2><p class="sub">Create an event first.</p></div>';
     return;
   }
-  // Day tabs: the travel payload is FOR one day (rides, seats,
-  // drivers, ride status). The event's days come from the events
-  // list (which carries end_date); the server defaults to Day 1.
+  // Day tables: rides are grouped by trip day, one collapsible
+  // section per day, each with a carpool table and a van table.
+  // The travel payload is per day, so one fetch per day; tools,
+  // hotel, all_carpools, and all_attendees are per-trip and identical
+  // in every payload, so the first payload carries them.
   const ev0 = events.find((e) => e.id === travelEventId);
   const evDays = ev0 ? eventDays(ev0) : [];
-  if (!evDays.includes(travelDay)) travelDay = evDays.length ? evDays[0] : null;
-  const t = await GET(`/api/events/${travelEventId}/travel${travelDay ? `?day=${travelDay}` : ""}`);
-  const ev = t.event;
-  if (t.day) travelDay = t.day;
-  // Mentor driver pool: parent accounts (not disabled) not already
-  // driving for this event — neither a carpool nor an eligible team
-  // van. The pool is recomputed from this render's travel data, so
-  // the moment a van becomes eligible (seats + RSVP'd driver) its
-  // driver drops out of Post Ride. Parents never see it — their
-  // driver is themselves, auto-filled and grayed out below. allUsers
-  // is kept for the van driver dropdown (a van's driver is a global
-  // designation, not per-event).
-  let poolUsers = [];
-  let allUsers = [];
-  if (MENTOR()) {
-    allUsers = await GET("/api/users").catch(() => []);
-    const taken = new Set((t.carpools || []).map((c) => c.driver_user_id).filter(Boolean));
-    const vanTaken = new Set((t.event_vans || []).map((v) => v.driver_user_id).filter(Boolean));
-    poolUsers = allUsers.filter((u) => u.role === "parent" && !u.disabled && !taken.has(u.id) && !vanTaken.has(u.id));
+  const multi = evDays.length > 1;
+  const dayPayloads = [];
+  if (multi) {
+    const parts = await Promise.all(evDays.map((ds) =>
+      GET(`/api/events/${travelEventId}/travel?day=${ds}`)));
+    parts.forEach((p, i) => dayPayloads.push({day: evDays[i], t: p}));
+  } else {
+    const p = await GET(`/api/events/${travelEventId}/travel`);
+    dayPayloads.push({day: p.day || evDays[0] || null, t: p});
   }
-  // Seat picker filter, shared by carpools and vans: a rider choice
-  // excludes everyone driving for this event (carpool or van driver
-  // — including the driver of the very card being filled) and
-  // everyone already holding a CLAIMED seat on any vehicle for this
-  // event. The caller's own-vehicle waitlist is passed in as well,
-  // so a waitlisted rider isn't offered their own ride twice; a
-  // person waitlisted elsewhere can still grab an open seat here
-  // (they hold no seat yet), and the server skips them on promotion
-  // if they have since been seated elsewhere.
-  const driverNames = new Set([
-    ...(t.carpools || []).map((c) => normName(c.driver_name)),
-    ...(t.event_vans || []).map((v) => normName(v.driver_name))]);
-  const claimedEverywhere = new Set();
-  const collectClaimed = (claims) => (claims || []).forEach((x) => {
-    claimedEverywhere.add(`${x.member_id}:${x.person_kind}`);
-    claimedEverywhere.add(`${normName(x.person_name)}:${x.person_kind}`);
-  });
-  (t.carpools || []).forEach((c) => collectClaimed(c.claims));
-  (t.event_vans || []).forEach((v) => collectClaimed(v.claims));
+  const t = dayPayloads[0].t;
+  const ev = t.event;
+  // Day-section open state: Day 1 open, the rest closed; reset when
+  // the picked event changes. Toggling a section flips visibility
+  // only — it never re-renders, so in-progress forms survive.
+  if (openTravelDaysEvent !== travelEventId) {
+    openTravelDaysEvent = travelEventId;
+    openTravelDays = new Set(multi ? [evDays[0]] : []);
+  }
+  const dayCars = (ds) => (dayPayloads.find((d) => d.day === ds) || {}).t?.carpools || [];
+  const dayVans = (ds) => (dayPayloads.find((d) => d.day === ds) || {}).t?.event_vans || [];
+  const allDayCars = dayPayloads.flatMap((d) => d.t.carpools || []);
+  const allDayVans = dayPayloads.flatMap((d) => d.t.event_vans || []);
+  // Mentor driver pool, per set of days: parent accounts (not
+  // disabled) not already driving a carpool or an eligible van on
+  // any of those days. Parents never see it — their driver is
+  // themselves, auto-filled and grayed out below. allUsers is kept
+  // for the van driver dropdowns (a van's driver is a global
+  // designation, not per-event).
+  let allUsers = [];
+  if (MENTOR()) allUsers = await GET("/api/users").catch(() => []);
+  const poolForDays = (days) => {
+    const taken = new Set();
+    days.forEach((ds) => {
+      dayCars(ds).forEach((c) => taken.add(c.driver_user_id));
+      dayVans(ds).forEach((vv) => taken.add(vv.driver_user_id));
+    });
+    return allUsers.filter((u) => u.role === "parent" && !u.disabled && !taken.has(u.id));
+  };
+  const poolOptsFor = (days, keepId) => {
+    const opts = poolForDays(days);
+    if (keepId && !opts.some((u) => u.id === keepId)) {
+      const cur = allUsers.find((u) => u.id === keepId);
+      if (cur) opts.unshift(cur);
+    }
+    return opts.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
+  };
+  // Days the signed-in parent already drives on (car or van) — used
+  // for the Post Ride note, which updates as day boxes change.
+  const myDrivingDays = (evDays.length ? evDays : [dayPayloads[0].day]).filter((ds) =>
+    dayCars(ds).some((c) => c.driver_user_id === ME.id)
+    || dayVans(ds).some((vv) => vv.driver_user_id === ME.id));
+  const vanDriverOpts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
+    .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
+  const vans = await GET("/api/team-vans").catch(() => []);
+  const optJSON = (p) =>
+    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`;
+  // Seat picker filter, per day: a rider choice excludes everyone
+  // driving that day (carpool or van driver — including the driver
+  // of the very row being filled) and everyone already holding a
+  // CLAIMED seat on any vehicle that day. The row's own waitlist is
+  // passed in as well, so a waitlisted rider isn't offered their own
+  // ride twice; a person waitlisted elsewhere can still grab an open
+  // seat here (they hold no seat yet), and the server skips them on
+  // promotion if they have since been seated elsewhere.
   const cleanAttName = (p) => p.name.replace(/ \((student|parent)\)$/, "");
-  const claimOptsFor = (ownRows) => {
+  const claimOptsForDay = (dp, ownRows) => {
+    const driverNames = new Set([
+      ...dp.t.carpools.map((c) => normName(c.driver_name)),
+      ...dp.t.event_vans.map((v) => normName(v.driver_name))]);
+    const claimed = new Set();
+    const collect = (claims) => (claims || []).forEach((x) => {
+      claimed.add(`${x.member_id}:${x.person_kind}`);
+      claimed.add(`${normName(x.person_name)}:${x.person_kind}`);
+    });
+    dp.t.carpools.forEach((c) => collect(c.claims));
+    dp.t.event_vans.forEach((v) => collect(v.claims));
     const own = new Set();
     (ownRows || []).forEach((x) => {
       own.add(`${x.member_id}:${x.person_kind}`);
       own.add(`${normName(x.person_name)}:${x.person_kind}`);
     });
+    const attPeople = (dp.t.attendees || []).map((a) => ({member_id: a.member_id,
+      kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
     return attPeople.filter((p) => {
       const idKey = `${p.member_id}:${p.kind}`;
       const nameKey = `${normName(cleanAttName(p))}:${p.kind}`;
       if (p.kind === "parent" && driverNames.has(normName(cleanAttName(p)))) return false;
-      if (claimedEverywhere.has(idKey) || claimedEverywhere.has(nameKey)) return false;
+      if (claimed.has(idKey) || claimed.has(nameKey)) return false;
       if (own.has(idKey) || own.has(nameKey)) return false;
       return true;
     }).map(optJSON).join("");
   };
-  // What the signed-in parent is already driving for this event, if
-  // anything — a parent driving a car or a van can't post another ride.
-  const myDrivingVan = (t.event_vans || []).find((v) => v.driver_user_id === ME.id);
-  const myDrivingCar = (t.carpools || []).find((c) => c.driver_user_id === ME.id);
-  const poolOpts = poolUsers.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
-  const vanDriverOpts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
-    .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
-  const vans = await GET("/api/team-vans").catch(() => []);
-  const people = personOptions();
-  const popts = people.map((p) =>
-    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`).join("");
-  // Travel lists pull dynamically from this event's attendees (RSVP going/partial).
-  const attPeople = (t.attendees || []).map((a) => ({member_id: a.member_id,
-    kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
-  const optJSON = (p) =>
-    `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.name)}</option>`;
-  const attOpts = attPeople.map(optJSON).join("");
-  const attParents = attPeople.filter((p) => p.kind === "parent").map(optJSON).join("");
-  const attStudents = (t.attendees || []).filter((a) => a.person_kind === "student");
-  const students = attStudents.map((a) =>
-    `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
-  const studentNames = attStudents.map((a) =>
-    chipButton(a.person_name, a.person_name)).join("");
+  // Ride status per attendee for one day (RSVP going/partial):
+  // claimed on a carpool or van, driving, or still needing a ride.
+  // Waitlisted counts as needing a ride — no seat yet. The status
+  // panes are gone; only the gap (needs a ride) is shown now, under
+  // each day's tables.
+  const onRide = (claims, a) => (claims || []).some((x) =>
+    (x.member_id && x.member_id === a.member_id && x.person_kind === a.person_kind) ||
+    (normName(x.person_name) === normName(a.person_name) && x.person_kind === a.person_kind));
+  const rideStatusFor = (dp, a) => {
+    for (const c of dp.t.carpools || [])
+      if (onRide(c.claims, a)) return `ride on ${c.driver_name}'s car`;
+    for (const vv of dp.t.event_vans || [])
+      if (onRide(vv.claims, a)) return `ride in team van ${vv.name}`;
+    if ((dp.t.carpools || []).some((c) => normName(c.driver_name) === normName(a.person_name))) return "driving";
+    if ((dp.t.event_vans || []).some((vv) => normName(vv.driver_name) === normName(a.person_name))) return "driving";
+    return "needs ride";
+  };
+  const needsRideFor = (dp) => (dp.t.attendees || []).filter((a) => rideStatusFor(dp, a) === "needs ride");
   // Hotel rooms are per-trip, not per-day: the hotel section (place
-  // dropdown, room-parent volunteers, room status) uses everyone
-  // attending the trip, not just this day's riders.
+  // dropdown, room-parent volunteers, room status gaps) uses everyone
+  // attending the trip, not just one day's riders.
   const allAtt = t.all_attendees || t.attendees || [];
   const allAttStudents = allAtt.filter((a) => a.person_kind === "student");
   const allStudents = allAttStudents.map((a) =>
@@ -2224,52 +2260,105 @@ async function renderTravel() {
     chipButton(a.person_name, a.person_name)).join("");
   const allAttParents = allAtt.filter((a) => a.person_kind === "parent").map((a) =>
     ({member_id: a.member_id, kind: "parent", name: `${a.person_name} (parent)`})).map(optJSON).join("");
-  // Ride status per attendee (RSVP going/partial): claimed on a
-  // carpool or van, driving, or still needing a ride. Waitlisted
-  // counts as needing a ride — no seat yet. Matching mirrors the
-  // carpool cards: member id + kind, or name + kind.
-  const onRide = (claims, a) => (claims || []).some((x) =>
-    (x.member_id && x.member_id === a.member_id && x.person_kind === a.person_kind) ||
-    (normName(x.person_name) === normName(a.person_name) && x.person_kind === a.person_kind));
-  const rideStatus = (a) => {
-    for (const c of t.carpools || [])
-      if (onRide(c.claims, a)) return {label: `ride on ${c.driver_name}'s car`, cls: "green"};
-    for (const v of t.event_vans || [])
-      if (onRide(v.claims, a)) return {label: `ride in team van ${v.name}`, cls: "green"};
-    if ((t.carpools || []).some((c) => normName(c.driver_name) === normName(a.person_name))) return {label: "driving", cls: ""};
-    if ((t.event_vans || []).some((v) => normName(v.driver_name) === normName(a.person_name))) return {label: "driving", cls: ""};
-    return {label: "needs ride", cls: "amber"};
-  };
   // Mentor vehicle dropdown for a tool row: event carpools + team
   // vans, with the row's current vehicle preselected. Tools are
   // per-trip, so the dropdown uses every car in the trip
-  // (all_carpools), not just the ones running on the selected day.
-  const allCars = t.all_carpools || t.carpools || [];
+  // (all_carpools), not just the ones running on one day.
+  const allCars = t.all_carpools || allDayCars;
   const vehOptsFor = (x) => {
     const cur = x.vehicle_type ? `${x.vehicle_type}:${x.vehicle_id}` : "";
     const opts = [
       ...allCars.map((c) => ({v: `carpool:${c.id}`, l: `${c.driver_name}'s car`})),
-      ...vans.map((v) => ({v: `van:${v.id}`, l: `\u{1F69A} Team van: ${v.name}`}))];
+      ...vans.map((vv) => ({v: `van:${vv.id}`, l: `\u{1F69A} Team van: ${vv.name}`}))];
     return opts.map((o) => `<option value="${o.v}"${o.v === cur ? " selected" : ""}>${esc(o.l)}</option>`).join("");
   };
-  v.innerHTML = `
-  <div class="card"><h2>Travel &amp; Logistics</h2>
-  <p class="sub">Carpools, tool sign-up, and hotel assignments — organized per event.</p>
-  <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div>
-  ${evDays.length > 1 ? `<div class="bubbles" style="margin-top:8px"><span class="sub">Trip day:</span>
-    ${evDays.map((ds) => `<button class="bubble ${ds === travelDay ? "active" : ""}" data-tday="${ds}">${dayLabel(ds)}</button>`).join("")}</div>
-    <p class="sub">Rides, seats, and drivers below are for ${dayLabel(travelDay)}. Tools and hotel rooms are for the whole trip.</p>` : ""}</div>
-
-  <div class="card"><h3>Carpools${evDays.length > 1 ? ` — ${dayLabel(travelDay)}` : ""}</h3>
-  ${ME.role !== "student" ? (ME.role === "parent" && (myDrivingCar || myDrivingVan)
-    ? `<p class="sub">You're already driving for this ${evDays.length > 1 ? "day" : "event"}${myDrivingVan ? ` — team van ${esc(myDrivingVan.name)}` : " — your car is posted below"} — so you can't post another ride.</p>`
-    : `
-  ${evDays.length > 1 ? `<div class="row" style="margin-bottom:8px"><span class="sub">Days this car runs:</span>
+  // One table row per car. Driver cell carries everything a rider
+  // needs at a glance: driver, vehicle (visible make/model/color,
+  // plate only as a hover tooltip), departure, return, notes.
+  const carRow = (dp, c) => {
+    const dayKey = dp.day || "all";
+    const riders = c.claims.map((x) =>
+      `<span class="pill">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="release">✕</a></span>`).join("")
+      || '<span class="sub">none yet</span>';
+    const wait = c.waitlist.length ? `<div style="margin-top:4px">Waitlist: ${c.waitlist.map((x) =>
+      `<span class="pill amber">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : "";
+    const cpsOpts = claimOptsForDay(dp, [...c.claims, ...c.waitlist]);
+    const claimCell = cpsOpts
+      ? `<div class="row"><select id="cps-${c.id}-${dayKey}">${cpsOpts}</select>
+        <button class="btn small" data-claim="${c.id}" data-claimday="${dp.day || ""}">Claim seat</button></div>`
+      : `<span class="sub">Everyone attending is already driving or seated on another ride.</span>`;
+    const editCell = (MENTOR() || c.driver_user_id === ME.id)
+      ? `<div class="row" style="margin-top:4px"><button class="btn small ghost" data-cpedit="${c.id}" data-cpday="${dp.day || ""}">Edit</button><button class="btn small ghost" data-cpdel="${c.id}" data-cpday="${dp.day || ""}">Remove</button></div>` : "";
+    return `<tr id="cp-row-${c.id}-${dayKey}"><td><b>${esc(c.driver_name)}</b>${vehicleLine(c.vehicle)}
+      <div class="sub">${esc(c.depart_from || "")} · ${esc(c.depart_time || "")} · Return: ${esc(c.return_info || "—")}</div>
+      ${c.notes ? `<div class="sub">${esc(c.notes)}</div>` : ""}
+      ${multi ? `<div class="sub">Runs: ${(c.days && c.days.length ? c.days.map(dayLabel).join(", ") : "every day")}</div>` : ""}</td>
+      <td>${riders}${wait}</td>
+      <td><span class="pill ${c.seats_open ? "green" : "red"}">${c.seats_open} of ${c.seats} open</span></td>
+      <td>${claimCell}${editCell}</td></tr>`;
+  };
+  const vanRow = (dp, vv) => {
+    const dayKey = dp.day || "all";
+    const riders = vv.claims.map((x) =>
+      `<span class="pill">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="release">✕</a></span>`).join("")
+      || '<span class="sub">none yet</span>';
+    const wait = vv.waitlist.length ? `<div style="margin-top:4px">Waitlist: ${vv.waitlist.map((x) =>
+      `<span class="pill amber">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : "";
+    const vpsOpts = claimOptsForDay(dp, [...vv.claims, ...vv.waitlist]);
+    const claimCell = vpsOpts
+      ? `<div class="row"><select id="vps-${vv.id}-${dayKey}">${vpsOpts}</select>
+        <button class="btn small" data-vclaim="${vv.id}" data-vday="${dp.day || ""}">Claim seat</button></div>`
+      : `<span class="sub">Everyone attending is already driving or seated on another ride.</span>`;
+    const dayDriverCell = (MENTOR() && multi) ? (() => {
+      const designated = allUsers.find((u) => u.id === vv.designated_driver_user_id);
+      const opts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
+        .map((u) => `<option value="${u.id}"${vv.day_driver_override && u.id === vv.driver_user_id ? " selected" : ""}>${esc(u.name)}</option>`).join("");
+      return `<div class="row" style="margin-top:4px"><span class="sub">Driver for ${dayLabel(dp.day)}:</span>
+        <select id="vd-${vv.id}-${dayKey}"><option value=""${!vv.day_driver_override ? " selected" : ""}>Designated: ${esc(designated ? designated.name : "none")}</option>${opts}</select>
+        <button class="btn small" data-vdaydriver="${vv.id}" data-vday="${dp.day || ""}">Set day driver</button></div>`;
+    })() : "";
+    return `<tr id="vr-row-${vv.id}-${dayKey}"><td><b>\u{1F69A} Team van ${esc(vv.name)}</b>
+      <div class="sub">driven by ${esc(vv.driver_name)}${vv.day_driver_override ? " (day driver)" : ""}</div></td>
+      <td>${riders}${wait}</td>
+      <td><span class="pill ${vv.seats_open ? "green" : "red"}">${vv.seats_open} of ${vv.seats} open</span></td>
+      <td>${claimCell}${dayDriverCell}</td></tr>`;
+  };
+  const ridesTables = (dp) => {
+    const needs = needsRideFor(dp);
+    const needsLine = (dp.t.attendees || []).length
+      ? (needs.length
+        ? `<p class="sub">Needs a ride: ${needs.map((a) => esc(a.person_name)).join(", ")}</p>`
+        : `<p class="sub">Everyone has a ride for this day.</p>`)
+      : `<p class="sub">Nobody RSVP'd yet.</p>`;
+    return `
+    <h4>Carpools</h4>
+    ${dp.t.carpools.length
+      ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Car / Driver</th><th>Riders</th><th>Seats</th><th>Actions</th></tr></thead><tbody>${dp.t.carpools.map((c) => carRow(dp, c)).join("")}</tbody></table></div>`
+      : '<p class="sub">No carpools posted for this day yet.</p>'}
+    <h4>Team van rides</h4>
+    <p class="sub">A van takes riders only with seats set and a driver attending that day who isn't driving a carpool that day.</p>
+    ${dp.t.event_vans.length
+      ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Van / Driver</th><th>Riders</th><th>Seats</th><th>Actions</th></tr></thead><tbody>${dp.t.event_vans.map((vv) => vanRow(dp, vv)).join("")}</tbody></table></div>`
+      : '<p class="sub">No team vans going to this day yet — designate a driver who RSVP\'d going, and set the van\'s seats.</p>'}
+    ${needsLine}`;
+  };
+  const daySection = (dp, idx) => `
+  <div class="card"><h3><button class="btn small ghost" data-tdaysec="${dp.day}">${openTravelDays.has(dp.day) ? "▾" : "▸"}</button> Day ${idx + 1} · ${dayLabel(dp.day)}</h3>
+  <div id="tday-body-${dp.day}" class="${openTravelDays.has(dp.day) ? "" : "hidden"}">${ridesTables(dp)}</div></div>`;
+  // Post Ride lives in its own card now (trip-level, not per-day):
+  // the days the car runs are picked with checkboxes, and the driver
+  // pool + the already-driving note refresh as those boxes change,
+  // so a parent driving Day 1 only can still post a Day-3-only ride.
+  const postRideCard = (ME.role === "student" ? "" : `
+  <div class="card"><h3>Post a ride</h3>
+  <p class="sub" id="cp-driving-note"></p>
+  <div id="cp-form-wrap">
+  ${multi ? `<div class="row" style="margin-bottom:8px"><span class="sub">Days this car runs:</span>
     ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="cp-day" data-day="${ds}" checked> ${dayLabel(ds)}</label>`).join("")}
     <span class="sub">(all checked = every day)</span></div>` : ""}
   <div class="grid3">
     ${MENTOR()
-      ? `<div class="field"><label>Driver name *</label><select id="cp-driver-sel">${poolOpts || '<option value="">No available parents</option>'}</select></div>`
+      ? `<div class="field"><label>Driver name *</label><select id="cp-driver-sel"></select></div>`
       : `<div class="field"><label>Driver name</label><input id="cp-driver" disabled value="${esc(ME.name)}"><span class="hint">You, auto-filled</span></div>`}
     <div class="field"><label>Seats *</label><input id="cp-seats" inputmode="numeric" placeholder="4"></div>
     <div class="field"><label>Departure point</label><input id="cp-from" placeholder="School lot"></div>
@@ -2281,65 +2370,19 @@ async function renderTravel() {
     <div class="field"><label>Make <span class="hint">(optional)</span></label><input id="cp-vmake" placeholder="Honda"></div>
     <div class="field"><label>Model <span class="hint">(optional)</span></label><input id="cp-vmodel" placeholder="Odyssey"></div>
   </div>
-  ${MENTOR() && !poolOpts ? '<p class="sub">No parents available to assign — every parent account is already driving a car or a van for this event, or no parent accounts exist yet.</p>' : ""}
-  <button class="btn small" id="cp-add">Post ride</button>`) : ""}
-  <div id="cp-list" style="margin-top:10px">
-  ${t.carpools.map((c) => `
-    <div class="card" id="cp-card-${c.id}"><div class="row"><b>${esc(c.driver_name)}</b>
-      ${vehicleTip(c.vehicle) ? `<span class="pill" title="${esc(vehicleTip(c.vehicle))}">\u{1F697} vehicle</span>` : ""}
-      <span class="pill ${c.seats_open ? "green" : "red"}">${c.seats_open} of ${c.seats} seats open</span>
-      ${MENTOR() || c.driver_user_id === ME.id ? `<button class="btn small ghost" data-cpedit="${c.id}">Edit</button><button class="btn small ghost" data-cpdel="${c.id}">Remove</button>` : ""}</div>
-    <div class="sub">${esc(c.depart_from || "")} · ${esc(c.depart_time || "")} · Return: ${esc(c.return_info || "—")}
-      ${evDays.length > 1 ? `· Runs: ${(c.days && c.days.length ? c.days.map(dayLabel).join(", ") : "every day")}` : ""}</div>
-    <div>Riders: ${c.claims.map((x) =>
-      `<span class="pill">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="release">✕</a></span>`).join("") || '<span class="sub">none yet</span>'}</div>
-    ${c.waitlist.length ? `<div>Waitlist: ${c.waitlist.map((x) =>
-      `<span class="pill amber">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : ""}
-    ${(() => {
-      const cpsOpts = claimOptsFor([...c.claims, ...c.waitlist]);
-      return cpsOpts
-        ? `<div class="row" style="margin-top:6px"><select id="cps-${c.id}">${cpsOpts}</select>
-      <button class="btn small" data-claim="${c.id}">Claim seat</button></div>`
-        : `<div class="sub" style="margin-top:6px">Everyone attending is already driving or seated on another ride.</div>`;
-    })()}
-    </div>`).join("") || '<p class="sub">No carpools posted for this event yet.</p>'}
-  </div></div>
+  <p class="sub hidden" id="cp-nopool">No parents available to assign — every parent account is already driving a car or a van on the picked days, or no parent accounts exist yet.</p>
+  <button class="btn small" id="cp-add">Post ride</button></div></div>`);
+  v.innerHTML = `
+  <div class="card"><h2>Travel &amp; Logistics</h2>
+  <p class="sub">${multi ? "Each trip day expands to its own rides tables. Tools and hotel rooms are for the whole trip." : "Carpools, tool sign-up, and hotel assignments — organized per event."}</p>
+  <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div>
+  ${multi ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" id="td-expand-all">Expand all days</button><button class="btn small ghost" id="td-collapse-all">Collapse all days</button></div>` : ""}</div>
 
-  <div class="card"><h3>Ride status${evDays.length > 1 ? ` — ${dayLabel(travelDay)}` : ""}</h3>
-  <p class="sub">Everyone RSVP'd going or partial for ${evDays.length > 1 ? "this day" : "this event"}, and whether they have a ride.</p>
-  <div class="row" style="flex-wrap:wrap">${(t.attendees || []).map((a) => {
-    const r = rideStatus(a);
-    return `<span class="pill ${r.cls}">${esc(a.person_name)} · ${r.label}</span>`;
-  }).join("") || '<span class="sub">Nobody RSVP\'d yet.</span>'}</div></div>
+  ${postRideCard}
 
-  <div class="card"><h3>Team van rides${evDays.length > 1 ? ` — ${dayLabel(travelDay)}` : ""}</h3>
-  <p class="sub">Vans going to this ${evDays.length > 1 ? "day" : "event"} — a van takes riders only with seats set and a driver attending that day who isn't driving a carpool that day.</p>
-  <div id="vr-list">
-  ${(t.event_vans || []).map((v) => `
-    <div class="card" id="vr-card-${v.id}"><div class="row"><b>\u{1F69A} Team van ${esc(v.name)}</b>
-      <span class="sub">driven by ${esc(v.driver_name)}${v.day_driver_override ? " (day driver)" : ""}</span>
-      <span class="pill ${v.seats_open ? "green" : "red"}">${v.seats_open} of ${v.seats} seats open</span></div>
-    ${MENTOR() && evDays.length > 1 ? (() => {
-      const designated = allUsers.find((u) => u.id === v.designated_driver_user_id);
-      const opts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
-        .map((u) => `<option value="${u.id}"${v.day_driver_override && u.id === v.driver_user_id ? " selected" : ""}>${esc(u.name)}</option>`).join("");
-      return `<div class="row" style="margin-top:6px"><span class="sub">Driver for ${dayLabel(travelDay)}:</span>
-      <select id="vd-${v.id}"><option value=""${!v.day_driver_override ? " selected" : ""}>Designated: ${esc(designated ? designated.name : "none")}</option>${opts}</select>
-      <button class="btn small" data-vdaydriver="${v.id}">Set day driver</button></div>`;
-    })() : ""}
-    <div>Riders: ${v.claims.map((x) =>
-      `<span class="pill">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="release">✕</a></span>`).join("") || '<span class="sub">none yet</span>'}</div>
-    ${v.waitlist.length ? `<div>Waitlist: ${v.waitlist.map((x) =>
-      `<span class="pill amber">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : ""}
-    ${(() => {
-      const vpsOpts = claimOptsFor([...v.claims, ...v.waitlist]);
-      return vpsOpts
-        ? `<div class="row" style="margin-top:6px"><select id="vps-${v.id}">${vpsOpts}</select>
-      <button class="btn small" data-vclaim="${v.id}">Claim seat</button></div>`
-        : `<div class="sub" style="margin-top:6px">Everyone attending is already driving or seated on another ride.</div>`;
-    })()}
-    </div>`).join("") || '<p class="sub">No team vans going to this event yet — designate a driver who RSVP\'d going, and set the van\'s seats.</p>'}
-  </div></div>
+  ${multi
+    ? dayPayloads.map((dp, i) => daySection(dp, i)).join("")
+    : `<div class="card"><h3>Carpools</h3>${ridesTables(dayPayloads[0])}</div>`}
 
   <div class="card"><h3>Team vans</h3>
   <p class="sub">Team-owned vans can haul tools too, alongside parent drivers. A van takes student riders only with a designated parent driver and seats set — the driver must RSVP going for each event the van serves.</p>
@@ -2353,7 +2396,7 @@ async function renderTravel() {
   <div style="margin-top:8px">
   ${vans.map((vn) => {
     const dn = (allUsers.find((u) => u.id === vn.driver_user_id) || {}).name
-      || ((t.event_vans || []).find((v) => v.id === vn.id) || {}).driver_name || "";
+      || (allDayVans.find((vv) => vv.id === vn.id) || {}).driver_name || "";
     return `<div class="row" id="tv-row-${vn.id}" style="margin:6px 0"><span><b>${esc(vn.name)}</b>${vn.notes ? ` <span class="sub">${esc(vn.notes)}</span>` : ""}${dn ? ` <span class="sub">driven by ${esc(dn)}</span>` : ""}${vn.seats ? ` <span class="pill">${vn.seats} seats</span>` : ` <span class="sub">tools-only</span>`}</span>
     ${MENTOR() ? `<button class="btn small ghost" data-tvedit="${vn.id}">Edit</button><button class="btn small ghost" data-tvdel="${vn.id}">Delete</button>` : ""}</div>`;
   }).join("") || '<p class="sub">No team vans yet.</p>'}
@@ -2378,7 +2421,7 @@ async function renderTravel() {
     <span class="sub">${t.tools.length} tool(s)</span>
   </div>
   <div id="tl-list" class="${toolsListCollapsed ? "hidden" : ""}">
-  ${t.tools.length ? `<table class="acct" style="margin-top:8px"><thead><tr><th>Tool</th><th>Amount</th><th>Vehicle</th><th>Actions</th></tr></thead>
+  ${t.tools.length ? `<div style="overflow-x:auto"><table class="acct" style="margin-top:8px"><thead><tr><th>Tool</th><th>Amount</th><th>Vehicle</th><th>Actions</th></tr></thead>
   <tbody>${t.tools.map((x) => {
     // Assignment status, at a glance: red when the tool is still in
     // the pool (no vehicle), green once it rides in a car or van. A
@@ -2386,10 +2429,10 @@ async function renderTravel() {
     let veh = '<span class="pill red">Unassigned</span>';
     if (x.vehicle_type === "carpool") {
       const c = allCars.find((c) => c.id === x.vehicle_id);
-      veh = c ? `<span class="pill green">${esc(c.driver_name)}'s car</span>${vehicleTip(c.vehicle) ? ` <span class="pill" title="${esc(vehicleTip(c.vehicle))}">\u{1F697} vehicle</span>` : ""}` : '<span class="pill red">Unassigned</span>';
+      veh = c ? `<span class="pill green">${esc(c.driver_name)}'s car</span>${vehicleLine(c.vehicle)}` : '<span class="pill red">Unassigned</span>';
     } else if (x.vehicle_type === "van") {
-      const v = vans.find((v) => v.id === x.vehicle_id);
-      veh = v ? `<span class="pill green">\u{1F69A} Team van ${esc(v.name)}</span>` : '<span class="pill red">Unassigned</span>';
+      const vv = vans.find((vv) => vv.id === x.vehicle_id);
+      veh = vv ? `<span class="pill green">\u{1F69A} Team van ${esc(vv.name)}</span>` : '<span class="pill red">Unassigned</span>';
     }
     // Actions: mentors assign anywhere + manage the pool; parents
     // only their own vehicles (assign unassigned, release their own);
@@ -2398,8 +2441,8 @@ async function renderTravel() {
     const ownVehicles = [
       ...allCars.filter((c) => c.driver_user_id === ME.id)
         .map((c) => ({type: "carpool", id: c.id, label: `${c.driver_name}'s car`})),
-      ...vans.filter((v) => v.driver_user_id === ME.id)
-        .map((v) => ({type: "van", id: v.id, label: `Team van ${v.name}`}))];
+      ...vans.filter((vv) => vv.driver_user_id === ME.id)
+        .map((vv) => ({type: "van", id: vv.id, label: `Team van ${vv.name}`}))];
     const ownsThis = !!x.vehicle_type && ownVehicles.some((o) => o.type === x.vehicle_type && o.id === x.vehicle_id);
     if (MENTOR()) {
       const opts = vehOptsFor(x);
@@ -2419,12 +2462,12 @@ async function renderTravel() {
       }
     }
     return `<tr id="tl-row-${x.id}"><td><b>${esc(x.name)}</b>${x.notes ? `<div class="sub">${esc(x.notes)}</div>` : ""}</td><td>\u00d7${x.qty}</td><td>${veh}</td><td>${acts || '<span class="sub">—</span>'}</td></tr>`;
-  }).join("")}</tbody></table>` : '<p class="sub">Nothing listed yet.</p>'}
+  }).join("")}</tbody></table></div>` : '<p class="sub">Nothing listed yet.</p>'}
   </div>
   <p id="tl-collapsed-note" class="sub ${toolsListCollapsed && t.tools.length ? "" : "hidden"}" style="margin-top:8px">Tool list collapsed — ${t.tools.length} tool(s) hidden.</p>
   </div>
 
-  <div class="card"><h3>Hotel assignments</h3>
+  ${(t.hotel || multi) ? `<div class="card"><h3>Hotel assignments</h3>
   ${t.hotel ? hotelHTML(t.hotel, allStudents, allAttParents, allStudentNames, allAttStudents, allAtt) : `
     <p class="sub">No hotel block for this event. Add one for remote tournaments:</p>
     <div class="grid3 mo">
@@ -2436,13 +2479,25 @@ async function renderTravel() {
     <div class="field mo"><label>Notes <span class="hint">(room block details)</span></label>
       <textarea id="h-notes"></textarea></div>
     <button class="btn small mo" id="h-add">Save hotel block</button>`}
-  </div>`;
+  </div>` : ""}`;
   v.querySelectorAll("[data-ev]").forEach((b) => b.addEventListener("click", () => {
     travelEventId = parseInt(b.dataset.ev, 10); savePlace(); pendingBeds = []; renderTravel();
   }));
-  v.querySelectorAll("[data-tday]").forEach((b) => b.addEventListener("click", () => {
-    travelDay = b.dataset.tday; renderTravel();
+  // Day-section toggles: flip visibility only, never re-render.
+  const setDaySection = (ds, open) => {
+    if (open) openTravelDays.add(ds); else openTravelDays.delete(ds);
+    const body = $("tday-body-" + ds);
+    if (body) body.classList.toggle("hidden", !open);
+    const btn = v.querySelector(`[data-tdaysec="${ds}"]`);
+    if (btn) btn.textContent = open ? "▾" : "▸";
+  };
+  v.querySelectorAll("[data-tdaysec]").forEach((b) => b.addEventListener("click", () => {
+    setDaySection(b.dataset.tdaysec, !openTravelDays.has(b.dataset.tdaysec));
   }));
+  const _tde = $("td-expand-all");
+  if (_tde) _tde.addEventListener("click", () => evDays.forEach((ds) => setDaySection(ds, true)));
+  const _tdc = $("td-collapse-all");
+  if (_tdc) _tdc.addEventListener("click", () => evDays.forEach((ds) => setDaySection(ds, false)));
   const hb = $("h-add");
   if (hb) hb.addEventListener("click", async () => {
     if (!$("h-name").value.trim()) return toast("Hotel name is required.");
@@ -2451,6 +2506,43 @@ async function renderTravel() {
       check_out: $("h-out").value, notes: $("h-notes").value.trim()});
     toast("Hotel block saved."); renderTravel();
   });
+  // Post Ride state: the driver pool (mentors) and the already-driving
+  // note (parents) follow the checked days, so a Day-1 driver can
+  // still post for Day 3 by unchecking Day 1.
+  const refreshPostRide = () => {
+    const dayBoxes = [...document.querySelectorAll("input.cp-day")];
+    const days = dayBoxes.length
+      ? dayBoxes.filter((x) => x.checked).map((x) => x.dataset.day)
+      : (evDays.length ? evDays : [dayPayloads[0].day]);
+    if (MENTOR()) {
+      const sel = $("cp-driver-sel");
+      if (sel) {
+        const keep = sel.value ? +sel.value : null;
+        sel.innerHTML = poolOptsFor(days, keep) || '<option value="">No available parents</option>';
+        if (keep && [...sel.options].some((o) => +o.value === keep)) sel.value = String(keep);
+        const nopool = $("cp-nopool");
+        if (nopool) nopool.classList.toggle("hidden", !!poolForDays(days).length);
+      }
+    } else if (ME.role === "parent") {
+      const mine = myDrivingDays.filter((ds) => days.includes(ds));
+      const note = $("cp-driving-note"), wrap = $("cp-form-wrap");
+      if (!days.length) {
+        if (note) note.textContent = "Pick at least one day for the ride.";
+        if (wrap) wrap.classList.add("hidden");
+      } else if (mine.length === days.length) {
+        if (note) note.textContent = `You're already driving for ${days.length > 1 ? "these days" : "this day"}${mine.length ? ` (${mine.map(dayLabel).join(", ")})` : ""} — so you can't post another ride for them.`;
+        if (wrap) wrap.classList.add("hidden");
+      } else {
+        if (note) note.textContent = mine.length
+          ? `You're already driving on ${mine.map(dayLabel).join(", ")} — posting with ${mine.length > 1 ? "those days" : "that day"} checked will fail; uncheck ${mine.length > 1 ? "them" : "it"} to post for the other days.`
+          : "";
+        if (wrap) wrap.classList.remove("hidden");
+      }
+    }
+  };
+  document.querySelectorAll("input.cp-day").forEach((box) =>
+    box.addEventListener("change", refreshPostRide));
+  refreshPostRide();
   const cpAdd = $("cp-add");
   if (cpAdd) cpAdd.addEventListener("click", async () => {
     const seats = parseInt($("cp-seats").value, 10);
@@ -2480,26 +2572,28 @@ async function renderTravel() {
       toast("Ride posted."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   });
-  // Edit / remove a car: the driver-owner or a mentor. Edit swaps the
-  // card for a pre-filled form (driver grayed out for a parent owner,
-  // pool dropdown for a mentor, current driver kept selectable).
+  // Edit / remove a car: the driver-owner or a mentor. Edit inserts a
+  // pre-filled form row under that day's table row (driver grayed out
+  // for a parent owner, pool dropdown for a mentor, current driver
+  // kept selectable); the pool follows the form's day boxes, like
+  // Post Ride above.
   v.querySelectorAll("[data-cpedit]").forEach((b) => b.addEventListener("click", () => {
-    const c = (t.carpools || []).find((x) => x.id === +b.dataset.cpedit);
+    const day = b.dataset.cpday || "";
+    const c = allDayCars.find((x) => x.id === +b.dataset.cpedit);
     if (!c) return;
-    const card = $("cp-card-" + c.id);
+    const row = $("cp-row-" + c.id + "-" + (day ? dayPayloads.find((d) => d.day === day)?.day || "all" : "all"))
+      || document.querySelector(`[id^="cp-row-${c.id}-"]`);
+    if (!row) return;
+    const prev = $("cp-edit-" + c.id);
+    if (prev) prev.remove();
     const veh = c.vehicle || {};
-    const driverField = MENTOR()
-      ? (() => {
-        const taken = new Set((t.carpools || []).map((x) => x.driver_user_id).filter(Boolean));
-        const opts = poolUsers.filter((u) => u.id === c.driver_user_id || !taken.has(u.id));
-        if (c.driver_user_id && !opts.some((u) => u.id === c.driver_user_id))
-          opts.unshift({id: c.driver_user_id, name: c.driver_name});
-        return `<div class="field"><label>Driver name *</label><select id="ep-driver-${c.id}">${
-          opts.map((u) => `<option value="${u.id}"${u.id === c.driver_user_id ? " selected" : ""}>${esc(u.name)}</option>`).join("")}</select></div>`;
-      })()
+    const tr = document.createElement("tr");
+    tr.id = "cp-edit-" + c.id;
+    const driverField = () => MENTOR()
+      ? `<div class="field"><label>Driver name *</label><select id="ep-driver-${c.id}"></select></div>`
       : `<div class="field"><label>Driver name</label><input id="ep-driver-${c.id}" disabled value="${esc(c.driver_name)}"></div>`;
-    card.innerHTML = `<div class="grid3">
-      ${driverField}
+    tr.innerHTML = `<td colspan="4"><div class="grid3">
+      ${driverField()}
       <div class="field"><label>Seats *</label><input id="ep-seats-${c.id}" inputmode="numeric" value="${c.seats}"></div>
       <div class="field"><label>Departure point</label><input id="ep-from-${c.id}" value="${esc(c.depart_from || "")}"></div>
       <div class="field"><label>Departure time</label><input id="ep-dt-${c.id}" value="${esc(c.depart_time || "")}"></div>
@@ -2510,10 +2604,24 @@ async function renderTravel() {
       <div class="field"><label>Make</label><input id="ep-vmake-${c.id}" value="${esc(veh.make || "")}"></div>
       <div class="field"><label>Model</label><input id="ep-vmodel-${c.id}" value="${esc(veh.model || "")}"></div>
     </div>
-    ${evDays.length > 1 ? `<div class="row" style="margin-top:6px"><span class="sub">Days this car runs:</span>
+    ${multi ? `<div class="row" style="margin-top:6px"><span class="sub">Days this car runs:</span>
       ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="ep-day" data-day="${ds}"${!c.days || !c.days.length || c.days.includes(ds) ? " checked" : ""}> ${dayLabel(ds)}</label>`).join("")}</div>` : ""}
-    <div class="row" style="margin-top:6px"><button class="btn small" id="ep-save-${c.id}">Save</button><button class="btn small ghost" id="ep-cancel-${c.id}">Cancel</button></div>`;
-    $("ep-cancel-" + c.id).addEventListener("click", () => renderTravel());
+    <div class="row" style="margin-top:6px"><button class="btn small" id="ep-save-${c.id}">Save</button><button class="btn small ghost" id="ep-cancel-${c.id}">Cancel</button></div></td>`;
+    row.after(tr);
+    const refreshEditPool = () => {
+      if (!MENTOR()) return;
+      const sel = $("ep-driver-" + c.id);
+      if (!sel) return;
+      const boxes = [...tr.querySelectorAll("input.ep-day")];
+      const days = boxes.length ? boxes.filter((x) => x.checked).map((x) => x.dataset.day) : evDays;
+      const keep = sel.value ? +sel.value : c.driver_user_id;
+      sel.innerHTML = poolOptsFor(days, c.driver_user_id);
+      if ([...sel.options].some((o) => +o.value === keep)) sel.value = String(keep);
+    };
+    refreshEditPool();
+    tr.querySelectorAll("input.ep-day").forEach((box) =>
+      box.addEventListener("change", refreshEditPool));
+    $("ep-cancel-" + c.id).addEventListener("click", () => tr.remove());
     $("ep-save-" + c.id).addEventListener("click", async () => {
       const seats = parseInt($("ep-seats-" + c.id).value, 10);
       if (!seats || seats < 1) return toast("Seats are required.");
@@ -2526,7 +2634,7 @@ async function renderTravel() {
         const duid = $("ep-driver-" + c.id).value;
         if (duid) body.driver_user_id = +duid;
       }
-      const epBoxes = [...document.querySelectorAll(`#cp-card-${c.id} input.ep-day`)];
+      const epBoxes = [...tr.querySelectorAll("input.ep-day")];
       if (epBoxes.length) {
         const days = epBoxes.filter((x) => x.checked).map((x) => x.dataset.day);
         if (!days.length) return toast("Pick at least one day for the ride.");
@@ -2539,9 +2647,9 @@ async function renderTravel() {
     });
   }));
   v.querySelectorAll("[data-cpdel]").forEach((b) => b.addEventListener("click", async () => {
-    const c = (t.carpools || []).find((x) => x.id === +b.dataset.cpdel);
+    const c = allDayCars.find((x) => x.id === +b.dataset.cpdel);
     if (!c) return;
-    const riders = c.claims.length + c.waitlist.length;
+    const riders = (c.claims || []).length + (c.waitlist || []).length;
     if (!confirm(`Remove this car from the pool?${riders ? ` ${riders} rider(s) will be released.` : ""}`)) return;
     try {
       const r = await DEL(`/api/carpools/${c.id}`);
@@ -2549,10 +2657,13 @@ async function renderTravel() {
     } catch (e) { toast("Error: " + e.message); }
   }));
   v.querySelectorAll("[data-claim]").forEach((b) => b.addEventListener("click", async () => {
-    const p = JSON.parse($("cps-" + b.dataset.claim).value.replace(/&#39;/g, "'"));
+    const day = b.dataset.claimday || null;
+    const sel = $("cps-" + b.dataset.claim + "-" + (day || "all"));
+    if (!sel) return;
+    const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
     try {
       const r = await POST(`/api/carpools/${b.dataset.claim}/claims`, {
-        member_id: p.member_id, person_kind: p.kind, day: travelDay,
+        member_id: p.member_id, person_kind: p.kind, day,
         person_name: p.name.replace(/ \((student|parent)\)$/, "")});
       toast(r.status === "waitlisted" ? "Car is full — added to the waitlist." : "Seat claimed.");
       renderTravel();
@@ -2656,12 +2767,17 @@ async function renderTravel() {
     } catch (e) { toast("Error: " + e.message); }
   });
   // Team van rides: claim a seat / release, mirroring carpool seats.
+  // Each row is day-scoped: the claim and the day driver carry the
+  // row's day, since a van's riders and driver differ per day.
   v.querySelectorAll("[data-vclaim]").forEach((b) => b.addEventListener("click", async () => {
-    const p = JSON.parse($("vps-" + b.dataset.vclaim).value.replace(/&#39;/g, "'"));
+    const day = b.dataset.vday || null;
+    const sel = $("vps-" + b.dataset.vclaim + "-" + (day || "all"));
+    if (!sel) return;
+    const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
     try {
       const r = await POST(`/api/vans/${b.dataset.vclaim}/claims`, {
         event_id: travelEventId, member_id: p.member_id, person_kind: p.kind,
-        day: travelDay,
+        day,
         person_name: p.name.replace(/ \((student|parent)\)$/, "")});
       toast(r.status === "waitlisted" ? "Van is full — added to the waitlist." : "Seat claimed.");
       renderTravel();
@@ -2674,12 +2790,13 @@ async function renderTravel() {
     renderTravel();
   }));
   // Per-day van driver: mentors pick a different parent to drive the
-  // van on this day, or back to the designated driver (blank).
+  // van on that day, or back to the designated driver (blank).
   v.querySelectorAll("[data-vdaydriver]").forEach((b) => b.addEventListener("click", async () => {
-    const sel = $("vd-" + b.dataset.vdaydriver);
+    const day = b.dataset.vday || null;
+    const sel = $("vd-" + b.dataset.vdaydriver + "-" + (day || "all"));
     try {
       await POST(`/api/vans/${b.dataset.vdaydriver}/day-driver`, {
-        event_id: travelEventId, day: travelDay,
+        event_id: travelEventId, day,
         driver_user_id: sel.value ? +sel.value : null});
       toast("Day driver saved."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
@@ -2819,7 +2936,7 @@ async function renderTravel() {
     const mates = $("rq-mates");
     if (!mates) return;
     const kept = chipValues("rq-mates");
-    mates.innerHTML = (attStudents || [])
+    mates.innerHTML = (allAttStudents || [])
       .filter((a) => a.member_id !== mid)
       .map((a) => chipButton(a.person_name, a.person_name)).join("");
     mates.querySelectorAll(".bubble").forEach((b) => {
@@ -2841,6 +2958,20 @@ function vehicleTip(v) {
   const mm = [v.make, v.model].filter(Boolean).join(" ");
   if (mm) parts.push(mm);
   return parts.join(" · ");
+}
+
+// Vehicle detail, tooltip-wise: what a rider needs to decide (make,
+// model, color) is visible text; only the license plate — the least
+// decision-relevant detail — hides behind a hover tooltip, so nothing
+// essential is hover-only (and nothing is lost on phones, where hover
+// doesn't exist).
+function vehicleLine(v) {
+  if (!v) return "";
+  const mm = [v.make, v.model].filter(Boolean).join(" ");
+  const vis = [v.color, mm].filter(Boolean).join(" · ");
+  if (!vis && !v.plate) return "";
+  const tip = v.plate ? ` title="Plate ${esc(v.plate)}"` : "";
+  return `<div class="sub"${tip}>\u{1F697} ${esc(vis || "vehicle")}</div>`;
 }
 
 function bedSummary(beds) {
@@ -2892,42 +3023,28 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents, allAtt) 
       ? `<button class="btn small ghost" data-reqdel="${q.id}">${MENTOR() ? "Remove" : "Withdraw"}</button>` : ""}
     </div>`).join("") || '<span class="sub">No requests yet.</span>'}
   </div>`;
-  // Room status, mirroring Ride status: every student RSVP'd going
-  // or partial for the trip (per-trip, not per-day), and whether
-  // they have a room. Placed = green with the room label (+ actual
-  // room number once set); a pending request = amber awaiting
-  // placement; no request and no room = amber needs room. Parents
-  // are shown only when they are a room parent for a room (they
-  // don't take a room slot themselves, so unlisted parents are not
-  // "needing a room" — that would be noise, not a gap).
+  // Room status, as gap lines under the table (not a pill per
+  // attendee — placed students already show in the table, so listing
+  // everyone twice was noise): who still needs a room, and whose
+  // request is still awaiting placement. Rooms are per-trip, so this
+  // uses everyone attending the trip.
   const roomAtt = allAtt || attStudents || [];
   const roomOf = (memberId) => (h.rooms || []).find((r) =>
     (r.occupants || []).some((o) => o.member_id === memberId));
-  const roomParentOf = (a) => (h.rooms || []).find((r) =>
-    (r.parent_member_id && r.parent_member_id === a.member_id)
-    || (r.parent_name && normName(r.parent_name) === normName(a.person_name)));
-  const roomStatus = (a) => {
-    if (a.person_kind === "parent") {
-      const r = roomParentOf(a);
-      return r ? {label: `room parent: ${r.label}`, cls: ""} : null;
-    }
-    const r = roomOf(a.member_id);
-    if (r) return {label: `${r.label}${r.room_number ? ` (#${r.room_number})` : ""}`, cls: "green"};
-    const req = (h.requests || []).find((q) => q.member_id === a.member_id);
-    if (req && req.status === "pending") return {label: "requested — awaiting placement", cls: "amber"};
-    return {label: "needs room", cls: "amber"};
-  };
-  const roomPills = roomAtt.map((a) => {
-    const r = roomStatus(a);
-    return r ? `<span class="pill ${r.cls}">${esc(a.person_name)} · ${r.label}</span>` : "";
-  }).join("");
+  const pendingReq = (memberId) => (h.requests || []).find((q) =>
+    q.member_id === memberId && q.status === "pending");
+  const needsRoom = roomAtt.filter((a) => a.person_kind === "student"
+    && !roomOf(a.member_id) && !pendingReq(a.member_id));
+  const awaiting = roomAtt.filter((a) => a.person_kind === "student"
+    && !roomOf(a.member_id) && pendingReq(a.member_id));
   return `
   <div class="sub"><b>${esc(h.name)}</b> · ${esc(h.address || "")} ·
     ${esc(h.check_in || "")} → ${esc(h.check_out || "")}</div>
   ${h.notes ? `<div class="sub">${esc(h.notes)}</div>` : ""}
   <h3>Room status</h3>
-  <p class="sub">Students RSVP'd going or partial for this trip, and whether they have a room; parents shown when they are a room parent.</p>
-  <div class="row" style="flex-wrap:wrap">${roomPills || '<span class="sub">Nobody RSV\'d yet.</span>'}</div>
+  <p class="sub">Who still needs a room for this trip, and whose request is still awaiting placement. Placed students and room parents show in the table below.</p>
+  <p class="sub">Needs a room: ${needsRoom.length ? needsRoom.map((a) => esc(a.person_name)).join(", ") : "everyone has a room."}</p>
+  <p class="sub">Requested — awaiting placement: ${awaiting.length ? awaiting.map((a) => esc(a.person_name)).join(", ") : "none."}</p>
   <h3>Rooms</h3>
   <p class="sub">The block is already booked. A room can have an adult <b>room parent</b> to check in, since students under 18 can't check in themselves — optional; senior rooms often go without. Parents can volunteer for a room below.</p>
   <div class="row mo" style="flex-wrap:wrap;gap:8px;align-items:center">
@@ -2941,29 +3058,28 @@ function hotelHTML(h, students, poptParents, studentNames, attStudents, allAtt) 
     <span id="bed-list"></span>
     <button class="btn small" id="rm-add">Add room</button>
     <span class="sub">Rooms are numbered automatically (Room #1, #2, …).</span></div>
+  ${h.rooms.length ? `<div style="overflow-x:auto"><table class="acct" style="margin-top:8px"><thead><tr><th>Room</th><th>Occupants</th><th>Room parent</th><th>Actions</th></tr></thead><tbody>
   ${h.rooms.map((r) => {
     const occ = r.occupants.map((o) =>
       `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${MENTOR() ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
-    return `<div class="card"><div class="row"><b>${esc(r.label)}</b>
-      ${r.room_number ? `<span class="sub">room #${esc(r.room_number)}</span>` : ""}
+    const parentCell = r.parent_name
+      ? `<span class="pill green">Room parent: ${esc(r.parent_name)}</span>
+         ${canVol ? `<button class="btn small ghost" data-rparentx="${r.id}">Remove</button>` : ""}`
+      : `<span class="pill gray">No room parent (optional)</span>`;
+    const volCell = (!r.parent_name && canVol) ? `<div class="row" style="margin-top:4px">
+      <select id="rp-${r.id}"><option value="">Volunteer as room parent…</option>${poptParents}</select>
+      <button class="btn small" data-rvol="${r.id}">Volunteer</button></div>` : "";
+    return `<tr><td><b>${esc(r.label)}</b>
+      ${r.room_number ? `<div class="sub">room #${esc(r.room_number)}</div>` : ""}
       ${MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}
-      <span class="pill ${r.occupants.length >= r.capacity ? "red" : "green"}">
-      ${r.occupants.length}/${r.capacity} beds</span></div>
-      ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}
-      <div>${occ || '<span class="sub">empty</span>'}</div>
-      <div class="row" style="margin-top:6px">
-        ${r.parent_name
-          ? `<span class="pill green">Room parent: ${esc(r.parent_name)}</span>
-             ${canVol ? `<button class="btn small ghost" data-rparentx="${r.id}">Remove</button>` : ""}`
-          : `<span class="pill gray">No room parent (optional)</span>`}
-      </div>
-      ${!r.parent_name && canVol ? `<div class="row" style="margin-top:6px">
-        <select id="rp-${r.id}"><option value="">Volunteer as room parent…</option>${poptParents}</select>
-        <button class="btn small" data-rvol="${r.id}">Volunteer</button></div>` : ""}
-      <div class="row mo" style="margin-top:6px"><select id="plc-${r.id}">
+      <div><span class="pill ${r.occupants.length >= r.capacity ? "red" : "green"}">${r.occupants.length}/${r.capacity} beds</span></div>
+      ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}</td>
+      <td>${occ || '<span class="sub">empty</span>'}</td>
+      <td>${parentCell}</td>
+      <td><div class="row mo"><select id="plc-${r.id}">
         <option value="">Place a student…</option>${students}</select>
-        <button class="btn small" data-place="${r.id}">Place</button></div></div>`;
-  }).join("")}
+        <button class="btn small" data-place="${r.id}">Place</button></div>${volCell}</td></tr>`;
+  }).join("")}</tbody></table></div>` : '<p class="sub">No rooms yet — add one above.</p>'}
   ${roomingBlock}`;
 }
 
