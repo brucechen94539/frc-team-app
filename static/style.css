@@ -92,6 +92,15 @@ body{
 .topbar h1 .logo-frc{
   color:var(--accent-text);
 }
+/* Team logo in the nav bar, next to the portal name: kept inline so
+   the heading still wraps naturally on narrow screens. The image is
+   the main site's logo (team9470.com), embedded in index.html as a
+   data URI — 256px, palette-quantized, ~15KB — because the push tool
+   only handles UTF-8 text and cannot ship a binary PNG. The portal
+   therefore does not depend on the main site being reachable. */
+.brand-logo{height:30px;width:auto;vertical-align:-7px;margin-right:8px}
+.brand-link{line-height:0}
+.brand-link:hover{opacity:.9}
 .tagline{margin:0 0 12px;font-size:12px;color:var(--muted);letter-spacing:.12em;
   text-transform:uppercase;font-weight:600}
 #nav{display:flex;flex-wrap:wrap;gap:8px}
