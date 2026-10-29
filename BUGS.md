@@ -9,6 +9,24 @@ _None right now._
 
 ## Fixed
 
+### Tool sign-up list: collapse/expand all + red/green assignment status (2026-10-28)
+- **Reported:** Bruce — "make collapse all/expand all for Tool
+  sign-up list" and "tools show red color when not assigned to
+  vehicle, green when assigned".
+- **Fix:** the Tool sign-up card in Travel now has Expand all /
+  Collapse all buttons (same pattern as the Events RSVP lists):
+  collapsing hides the table, shows a "Tool list collapsed — N
+  tool(s) hidden" note, keeps the Add tool form and CSV
+  import/export visible, and survives re-renders until expanded
+  again. The Vehicle column is now a status pill: red
+  "Unassigned" while a tool is in the pool, green with the car
+  driver's name or van name once assigned (a stale vehicle id
+  counts as unassigned). Verified in Chromium: collapse hides the
+  table and shows the note, expand restores it, the collapsed state
+  survives a re-render, and an unassigned tool shows a red pill
+  while an assigned one shows green.
+  (commit TBD)
+
 ### Seat picker offered drivers and already-seated riders; Post Ride pool ignored van drivers (2026-10-28)
 - **Reported:** Bruce (screenshot) — on Jessica Ting's car card, the
   Claim seat dropdown offered Jessica herself (the driver), and a
@@ -42,7 +60,7 @@ _None right now._
   driver, van driver, and two riders were all taken offered only the
   one unseated attendee, and the Post Ride pool showed no available
   parents while both parent accounts were driving.
-  (commit TBD)
+  (commit d4177151)
 
 ### Logged-out sign-up submit yanked the visitor to the login page (2026-10-26)
 - **Symptom:** after submitting a sign-up (link request or name-only

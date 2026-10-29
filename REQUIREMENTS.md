@@ -507,6 +507,16 @@ well as in the UI.
   Claim buttons, and claim/unclaim had no permission checks at all).
 - **One row = one vehicle, whole quantity.** Splitting a quantity
   across vehicles means two rows (e.g. ×6 and ×4).
+- **Assignment status at a glance:** the Vehicle column shows a red
+  **Unassigned** pill while a tool is still in the pool and a green
+  pill naming its car or van once assigned (a vehicle id pointing at
+  a deleted vehicle counts as unassigned).
+- **Collapse all / Expand all:** the Tool sign-up list has Expand
+  all and Collapse all buttons, mirroring the Events RSVP lists.
+  Collapsing hides the table and shows a "Tool list collapsed — N
+  tool(s) hidden" note; the Add tool form and CSV import/export stay
+  visible, and the collapsed state survives re-renders (e.g. after
+  adding a tool) until expanded again.
 - **CSV backup/import (mentors only):** `GET /api/events/<id>/tools.csv`
   exports Name, Qty, Notes, Vehicle (carpool driver name, or
   "Team van X", blank when unassigned) — the same columns the import

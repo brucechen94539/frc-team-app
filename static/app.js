@@ -68,6 +68,7 @@ let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
 let eventCalMode = false, eventCalCursor = "";
 let openRsvpLists = new Set();  // event ids whose RSVP list is expanded
+let toolsListCollapsed = false;  // Tool sign-up list in Travel, across renders
 let trackEventId = null, travelEventId = null;
 let currentView = "events";
 /* Sticky session: remember the tab + event so a reload returns the user to
@@ -2271,15 +2272,24 @@ async function renderTravel() {
     <input type="file" id="tl-import-file" accept=".csv" style="max-width:220px">
     <button class="btn small ghost" id="tl-import">Import CSV</button>
   </div>
+  <div class="row" style="margin-top:6px">
+    <button class="btn small ghost" id="tl-expand-all">Expand all</button>
+    <button class="btn small ghost" id="tl-collapse-all">Collapse all</button>
+    <span class="sub">${t.tools.length} tool(s)</span>
+  </div>
+  <div id="tl-list" class="${toolsListCollapsed ? "hidden" : ""}">
   ${t.tools.length ? `<table class="acct" style="margin-top:8px"><thead><tr><th>Tool</th><th>Amount</th><th>Vehicle</th><th>Actions</th></tr></thead>
   <tbody>${t.tools.map((x) => {
-    let veh = '<span class="sub">—</span>';
+    // Assignment status, at a glance: red when the tool is still in
+    // the pool (no vehicle), green once it rides in a car or van. A
+    // vehicle id pointing at a deleted vehicle counts as unassigned.
+    let veh = '<span class="pill red">Unassigned</span>';
     if (x.vehicle_type === "carpool") {
       const c = (t.carpools || []).find((c) => c.id === x.vehicle_id);
-      veh = c ? `${esc(c.driver_name)}'s car${vehicleTip(c.vehicle) ? ` <span class="pill" title="${esc(vehicleTip(c.vehicle))}">\u{1F697} vehicle</span>` : ""}` : '<span class="sub">—</span>';
+      veh = c ? `<span class="pill green">${esc(c.driver_name)}'s car</span>${vehicleTip(c.vehicle) ? ` <span class="pill" title="${esc(vehicleTip(c.vehicle))}">\u{1F697} vehicle</span>` : ""}` : '<span class="pill red">Unassigned</span>';
     } else if (x.vehicle_type === "van") {
       const v = vans.find((v) => v.id === x.vehicle_id);
-      veh = v ? `\u{1F69A} Team van ${esc(v.name)}` : '<span class="sub">—</span>';
+      veh = v ? `<span class="pill green">\u{1F69A} Team van ${esc(v.name)}</span>` : '<span class="pill red">Unassigned</span>';
     }
     // Actions: mentors assign anywhere + manage the pool; parents
     // only their own vehicles (assign unassigned, release their own);
@@ -2310,6 +2320,8 @@ async function renderTravel() {
     }
     return `<tr id="tl-row-${x.id}"><td><b>${esc(x.name)}</b>${x.notes ? `<div class="sub">${esc(x.notes)}</div>` : ""}</td><td>\u00d7${x.qty}</td><td>${veh}</td><td>${acts || '<span class="sub">—</span>'}</td></tr>`;
   }).join("")}</tbody></table>` : '<p class="sub">Nothing listed yet.</p>'}
+  </div>
+  <p id="tl-collapsed-note" class="sub ${toolsListCollapsed && t.tools.length ? "" : "hidden"}" style="margin-top:8px">Tool list collapsed — ${t.tools.length} tool(s) hidden.</p>
   </div>
 
   <div class="card"><h3>Hotel assignments</h3>
@@ -2434,6 +2446,21 @@ async function renderTravel() {
     renderTravel();
   }));
   if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  // Tool list collapse, mirroring the Events RSVP lists: the state
+  // lives in toolsListCollapsed so it survives renderTravel (e.g.
+  // after adding a tool), and the toggle only flips visibility —
+  // it never re-renders, so an in-progress edit or import file
+  // selection is not lost.
+  const setToolsList = (open) => {
+    toolsListCollapsed = !open;
+    const list = $("tl-list"), note = $("tl-collapsed-note");
+    if (list) list.classList.toggle("hidden", !open);
+    if (note) note.classList.toggle("hidden", open);
+  };
+  const _tle = $("tl-expand-all");
+  if (_tle) _tle.addEventListener("click", () => setToolsList(true));
+  const _tlc = $("tl-collapse-all");
+  if (_tlc) _tlc.addEventListener("click", () => setToolsList(false));
   const _tl = $("tl-add"); if (_tl) _tl.addEventListener("click", async () => {
     if (!$("tl-name").value.trim()) return toast("Tool name is required.");
     await POST("/api/tools", {event_id: travelEventId, name: $("tl-name").value.trim(),
