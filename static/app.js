@@ -1742,6 +1742,23 @@ async function renderEvents() {
       setRsvpList(parseInt(b.dataset.expand, 10), false)));
   v.querySelectorAll("[data-rsvp]").forEach((b) =>
     b.addEventListener("click", () => rsvpAction(b)));
+  // Partial-day gating: on a multi-day card, Going / Maybe / Can't
+  // make it only make sense with every day picked. While any day is
+  // unchecked, only Partial (multi-day) stays enabled, so a partial
+  // day pick can never land as a full 'going' on the logistics
+  // board. Single-day cards have no day boxes and are unaffected.
+  const syncRsvpButtons = (card) => {
+    const boxes = [...card.querySelectorAll("input.rp-day")];
+    if (!boxes.length) return;
+    const all = boxes.every((x) => x.checked);
+    card.querySelectorAll("button[data-rsvp]").forEach((btn) => {
+      const partial = btn.dataset.want === "partial";
+      btn.disabled = !all && !partial;
+      btn.title = (!all && !partial) ? "Check every day to enable this — or use Partial (multi-day)." : "";
+    });
+  };
+  v.querySelectorAll("input.rp-day").forEach((box) =>
+    box.addEventListener("change", () => syncRsvpButtons(box.closest(".card"))));
   v.querySelectorAll("[data-unrsvp]").forEach((b) =>
     b.addEventListener("click", async () => {
       try {
@@ -1863,18 +1880,21 @@ async function eventCard(e, ro = false) {
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant">Can't make it</button>
     </div>${eventDays(e).length > 1 ? `<div class="row" style="margin-top:6px"><span class="sub">Partial days:</span>
       ${eventDays(e).map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="rp-day" data-day="${ds}" checked> ${dayLabel(ds)}</label>`).join("")}
-      <span class="sub">(all checked = every day; only used for Partial)</span></div>` : ""}
+      <span class="sub">(all checked = every day; only used for Partial — unchecking a day leaves only Partial enabled)</span></div>` : ""}
     ${closed ? `<p class="sub">Deadline passed — mentor override: you can still RSVP for others.</p>` : ""}`;
   else pickerRow = `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
   const scope = selfScope();
   const row = (r) => {
     const pill = r.status === "going" ? "green" : r.status === "waitlisted" ? "amber"
       : r.status === "maybe" ? "blue" : r.status === "partial" ? "purple" : "gray";
+    // List labels read as attendance, not raw codes: going = full
+    // trip, can't make it = rejected from the trip.
+    const label = r.status === "going" ? "full" : r.status === "cant" ? "rejected" : r.status;
     const canRemove = !ro && (MENTOR() || (ME
       && ((r.person_kind === "student" && r.member_id === scope.student)
         || (r.person_kind === "parent" && scope.parents.includes(r.member_id)))));
     return `<div class="row" style="margin:4px 0">
-      <span class="pill ${pill}">${r.status}</span>
+      <span class="pill ${pill}">${label}</span>
       <span>${esc(r.person_name)} <span class="sub">(${r.person_kind})</span></span>
       ${r.status === "partial" && r.days && r.days.length && eventDays(e).length > 1
         ? `<span class="sub">${r.days.map(dayLabel).join(", ")}</span>` : ""}

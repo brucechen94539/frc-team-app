@@ -370,7 +370,14 @@ and `can't make it` do not count as attending.
   calendar shows the trip on every day. **Partial** now carries the
   days it covers (day checkboxes in the picker, all checked by
   default; an unspecified partial still means every day, as before).
-  **Going** covers every day. Event capacity is checked **per day**:
+  **Going** covers every day. While any day is unchecked, only
+  **Partial (multi-day)** stays enabled — Going / Maybe / Can't
+  make it are disabled until every day is checked again — so a
+  partial day pick can never land as a full 'going' on the
+  logistics board. The per-event RSVP list reads as attendance,
+  not raw codes: going shows **full**, maybe shows **maybe**,
+  partial shows **partial**, and can't make it shows **rejected**
+  (waitlisted unchanged). Event capacity is checked **per day**:
   a partial attending only Day 1 does not occupy a Day 3 spot, and
   if any covered day is full the whole RSVP waitlists.
 - **Per-day rides and rooms:** Travel shows one **collapsible
