@@ -117,6 +117,21 @@ let ME = null;          // logged-in user ({id,name,email,role}) or null
 let ME_AVATAR = null;   // logged-in user's photo data URL, or null for initials
 let SETUP = false;      // first run: no account has a password yet
 const MENTOR = () => !!(ME && (ME.role === "mentor" || ME.role === "admin"));
+// Own-only seats and beds (mirrors _may_act_for server-side): a
+// student only themself, a parent only their own linked children
+// (student seats) or themself (parent seats). Name-only rows
+// (member_id null, legacy) match by the caller's own account name.
+const ownSeat = (x) => {
+  if (!ME) return false;
+  if (ME.role === "student")
+    return (ME.links || []).some((l) => l.kind === "self" && l.member_id === x.member_id)
+      || (x.member_id == null && x.person_kind === "student" && normName(x.person_name) === normName(ME.name));
+  if (ME.role === "parent")
+    return (ME.links || []).some((l) => l.kind === "parent" && l.member_id === x.member_id)
+      || (x.member_id == null && x.person_kind === "parent" && normName(x.person_name) === normName(ME.name));
+  return false;
+};
+const canReleaseSeat = (x) => MENTOR() || ownSeat(x);
 
 /* Show only the nav this session may use; chip + logout when logged in. */
 function applyNav() {
@@ -2222,9 +2237,18 @@ async function renderTravel() {
     });
     const attPeople = (dp.t.attendees || []).map((a) => ({member_id: a.member_id,
       kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
+    // Non-mentors only ever see their own people in the picker: a
+    // student themself, a parent their linked children (as student
+    // riders) plus themself (as a parent rider).
+    const ownPeople = new Set();
+    if (ME && ME.role === "student")
+      (ME.links || []).filter((l) => l.kind === "self").forEach((l) => ownPeople.add(`${l.member_id}:student`));
+    if (ME && ME.role === "parent")
+      (ME.links || []).filter((l) => l.kind === "parent").forEach((l) => { ownPeople.add(`${l.member_id}:student`); ownPeople.add(`${l.member_id}:parent`); });
     return attPeople.filter((p) => {
       const idKey = `${p.member_id}:${p.kind}`;
       const nameKey = `${normName(cleanAttName(p))}:${p.kind}`;
+      if (!MENTOR() && !ownPeople.has(idKey)) return false;
       if (p.kind === "parent" && driverNames.has(normName(cleanAttName(p)))) return false;
       if (claimed.has(idKey) || claimed.has(nameKey)) return false;
       if (own.has(idKey) || own.has(nameKey)) return false;
@@ -2278,10 +2302,10 @@ async function renderTravel() {
   const carRow = (dp, c) => {
     const dayKey = dp.day || "all";
     const riders = c.claims.map((x) =>
-      `<span class="pill">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="release">✕</a></span>`).join("")
+      `<span class="pill">${esc(x.person_name)}${canReleaseSeat(x) ? ` <a href="#" data-unclaim="${x.id}" title="release">✕</a>` : ""}</span>`).join("")
       || '<span class="sub">none yet</span>';
     const wait = c.waitlist.length ? `<div style="margin-top:4px">Waitlist: ${c.waitlist.map((x) =>
-      `<span class="pill amber">${esc(x.person_name)} <a href="#" data-unclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : "";
+      `<span class="pill amber">${esc(x.person_name)}${canReleaseSeat(x) ? ` <a href="#" data-unclaim="${x.id}" title="remove">✕</a>` : ""}</span>`).join("")}</div>` : "";
     const cpsOpts = claimOptsForDay(dp, [...c.claims, ...c.waitlist]);
     const claimCell = cpsOpts
       ? `<div class="row"><select id="cps-${c.id}-${dayKey}">${cpsOpts}</select>
@@ -2300,10 +2324,10 @@ async function renderTravel() {
   const vanRow = (dp, vv) => {
     const dayKey = dp.day || "all";
     const riders = vv.claims.map((x) =>
-      `<span class="pill">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="release">✕</a></span>`).join("")
+      `<span class="pill">${esc(x.person_name)}${canReleaseSeat(x) ? ` <a href="#" data-vunclaim="${x.id}" title="release">✕</a>` : ""}</span>`).join("")
       || '<span class="sub">none yet</span>';
     const wait = vv.waitlist.length ? `<div style="margin-top:4px">Waitlist: ${vv.waitlist.map((x) =>
-      `<span class="pill amber">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : "";
+      `<span class="pill amber">${esc(x.person_name)}${canReleaseSeat(x) ? ` <a href="#" data-vunclaim="${x.id}" title="remove">✕</a>` : ""}</span>`).join("")}</div>` : "";
     const vpsOpts = claimOptsForDay(dp, [...vv.claims, ...vv.waitlist]);
     const claimCell = vpsOpts
       ? `<div class="row"><select id="vps-${vv.id}-${dayKey}">${vpsOpts}</select>
@@ -2348,8 +2372,14 @@ async function renderTravel() {
   // day's occupants and per-day capacity.
   const placeOptsForDay = (dp) => {
     const placed = placedIdsForDay(t.hotel, dp.day);
-    return (dp.t.attendees || []).filter((a) => a.person_kind === "student" && !placed.has(a.member_id))
-      .map((a) => `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
+    let list = (dp.t.attendees || []).filter((a) => a.person_kind === "student" && !placed.has(a.member_id));
+    // Parents only ever see their own student in the place picker;
+    // mentors see everyone attending that day.
+    if (!MENTOR() && ME && ME.role === "parent") {
+      const mine = new Set((ME.links || []).filter((l) => l.kind === "parent").map((l) => l.member_id));
+      list = list.filter((a) => mine.has(a.member_id));
+    }
+    return list.map((a) => `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
   };
   const roomsDaySection = (dp) => `
     <h4>Rooms</h4>
@@ -2867,14 +2897,23 @@ async function renderTravel() {
       toast(`Van deleted.${r.tools_unassigned ? ` ${r.tools_unassigned} tool(s) back in the pool.` : ""}${r.claims_removed ? ` ${r.claims_removed} rider(s) released.` : ""}`); renderTravel();
     }));
   v.querySelectorAll("[data-rvol]").forEach((b) => b.addEventListener("click", async () => {
-    // Room parents are per room, but the volunteer select is
-    // day-scoped (one rooms table per day) — read that day's select.
-    const day = b.dataset.rvolday || null;
-    const sel = $("rp-" + b.dataset.rvol + "-" + (day || "all"));
-    if (!sel || !sel.value) return toast("Pick which parent is volunteering.");
-    const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
+    // Parents volunteer only themselves (their button carries no
+    // picker); the server resolves the caller to their own linked
+    // member, so a crafted request can't volunteer someone else
+    // either. Mentors/admins pick a family from that day's select —
+    // room parents are per room, but the select is day-scoped (one
+    // rooms table per day).
+    let body;
+    if (b.dataset.rvolself) {
+      body = {};
+    } else {
+      const day = b.dataset.rvolday || null;
+      const sel = $("rp-" + b.dataset.rvol + "-" + (day || "all"));
+      if (!sel || !sel.value) return toast("Pick which parent is volunteering.");
+      body = {member_id: JSON.parse(sel.value.replace(/&#39;/g, "'")).member_id};
+    }
     try {
-      await POST(`/api/rooms/${b.dataset.rvol}/parent`, {member_id: p.member_id});
+      await POST(`/api/rooms/${b.dataset.rvol}/parent`, body);
       toast("Room parent set — thank you for volunteering!");
       renderTravel();
     } catch (e) { toast("Error: " + e.message); }
@@ -3094,26 +3133,43 @@ function roomsTableHTML(h, day, placeOpts, parentOpts, opts) {
   ${rooms.map((r) => {
     const occ = (r.occupants || []).filter((o) => occMatchesDay(o, day));
     const occPills = occ.map((o) =>
-      `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${MENTOR() ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
+      `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${canReleaseSeat({member_id: o.member_id, person_kind: "student"}) ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
+    // A parent may only remove their OWN assignment; mentors/admins
+    // may remove any. Own = a linked member id, or (legacy rows with
+    // no parent_member_id recorded) a linked member's parent_name.
+    const ownParent = ME && ME.role === "parent" && (ME.links || []).some((l) =>
+      l.kind === "parent" && (l.member_id === r.parent_member_id
+        || normName(l.parent_name) === normName(r.parent_name)));
+    const canRemoveParent = MENTOR() || ownParent;
     const parentCell = r.parent_name
       ? `<span class="pill green">Room parent: ${esc(r.parent_name)}</span>
-         ${canVol ? `<button class="btn small ghost" data-rparentx="${r.id}">Remove</button>` : ""}`
+         ${canRemoveParent ? `<button class="btn small ghost" data-rparentx="${r.id}">Remove</button>` : ""}`
       : `<span class="pill gray">No room parent (optional)</span>`;
-    const volCell = (!r.parent_name && canVol) ? `<div class="row" style="margin-top:4px">
+    // Parents volunteer only themselves, so their UI has no picker
+    // at all — just a button, and the server resolves the caller to
+    // their own linked member. Mentors/admins keep the family picker.
+    const volCell = (!r.parent_name && canVol) ? (ME.role === "parent"
+      ? `<div class="row" style="margin-top:4px"><button class="btn small" data-rvol="${r.id}" data-rvolday="${day || ""}" data-rvolself="1">Volunteer as room parent</button></div>`
+      : `<div class="row" style="margin-top:4px">
       <select id="rp-${r.id}-${dayKey}"><option value="">Volunteer as room parent…</option>${parentOpts}</select>
-      <button class="btn small" data-rvol="${r.id}" data-rvolday="${day || ""}">Volunteer</button></div>` : "";
+      <button class="btn small" data-rvol="${r.id}" data-rvolday="${day || ""}">Volunteer</button></div>`) : "";
     const editCell = (opts.showEdit && MENTOR()) ? `<div class="row" style="margin-top:4px"><button class="btn small ghost" data-roomedit="${r.id}" data-roomday="${day || ""}">Edit</button></div>` : "";
+    // Placement is mentors (anyone) or parents (own student only);
+    // students place nobody — they file a rooming request instead.
+    const canPlace = MENTOR() || (ME && ME.role === "parent");
+    const placeCell = canPlace ? `<div class="row"><select id="plc-${r.id}-${dayKey}">
+        <option value="">Place a student…</option>${placeOpts}</select>
+        <button class="btn small" data-place="${r.id}" data-placeday="${day || ""}">Place</button></div>`
+      : `<span class="sub">Placement is by a mentor or your parent.</span>`;
     return `<tr id="rm-row-${r.id}-${dayKey}"><td><b>${esc(r.label)}</b>
       ${r.room_number ? `<div class="sub">room #${esc(r.room_number)}</div>` : ""}
       ${opts.editableNumber && MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}
-      <div><span class="pill ${occ.length >= r.capacity ? "red" : "green"}">${occ.length}/${r.capacity} beds</span></div>
+      <div><span class="pill ${occ.length + (r.parent_name ? 1 : 0) >= r.capacity ? "red" : "green"}"${r.parent_name ? ' title="Includes the room parent\'s bed"' : ""}>${occ.length + (r.parent_name ? 1 : 0)}/${r.capacity} beds</span></div>
       ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}
       ${opts.showEdit ? `<div class="sub">Runs: ${(r.days && r.days.length ? r.days.map(dayLabel).join(", ") : "every day")}</div>` : ""}</td>
       <td>${occPills || '<span class="sub">empty</span>'}</td>
       <td>${parentCell}</td>
-      <td><div class="row mo"><select id="plc-${r.id}-${dayKey}">
-        <option value="">Place a student…</option>${placeOpts}</select>
-        <button class="btn small" data-place="${r.id}" data-placeday="${day || ""}">Place</button></div>${volCell}${editCell}</td></tr>`;
+      <td>${placeCell}${volCell}${editCell}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 }
 // Add-room form (bed builder + Add room). On a multi-day trip it

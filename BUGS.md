@@ -9,6 +9,47 @@ _None right now._
 
 ## Fixed
 
+### Room-parent volunteering, parent bed, and own-only seats/beds (2026-10-29)
+- **Reported:** Bruce — three reports in one thread: (1) a parent
+  should not be allowed to volunteer as room parent for any other
+  parent; (2) when a room parent is assigned, it takes away at least
+  1 spot; (3) students and parents should not be able to remove
+  occupants except for themselves — with the clarification that a
+  parent IS allowed to add/remove their own student in a carpool or
+  hotel room.
+- **Root cause:** (1) the room-parent POST took any member_id from
+  the picker and recorded that family's parent name, with no check
+  that a parent caller was volunteering themself. (2) room capacity
+  counted only student occupants; the assigned parent slept in the
+  room for free. (3) carpool and van claim POSTs and DELETEs had no
+  ownership check at all — anyone logged in could claim a seat for,
+  or release the seat of, anyone (the ✕ on every rider pill
+  rendered for every role), while room place/unplace were
+  mentor-only, so parents couldn't manage even their own child.
+  Two follow-on gaps surfaced while fixing: the login/verify
+  responses omitted the identity links, so the browser's own-only
+  pickers saw an empty link set and offered nobody; and the rooms
+  place cell carried the `.mo` class, which Travel strips for
+  non-mentors, so parents never saw the place select at all.
+- **Fix:** one own-only rule (`_may_act_for`, server-side, link
+  based) now gates every seat and bed: mentors/admins act for
+  anyone; students act only for themselves; parents act only for
+  their own linked children (or themselves as parent riders).
+  Room-parent POST/DELETE: a parent caller resolves to their own
+  linked member (a foreign member_id is 403); the parent UI has no
+  picker, just a self-volunteer button. Room capacity counts an
+  assigned parent as 1 bed every day the room runs (pill counts it,
+  with a tooltip). Room place opened to parents for their own
+  student (students still place nobody; they file rooming
+  requests); room unplace, carpool/van claim, and carpool/van
+  release all enforce the same rule. `_public_user` now attaches
+  links on every auth response, and the rooms place cell no longer
+  uses `.mo`. Verified by API (52 checks: all three bugs, the
+  parent-own-student allowance, and the mentor path) and browser
+  (13 checks: parent/student/mentor pickers and ✕ visibility,
+  including placing and removing one's own student in the UI).
+  (commit pending)
+
 ### RSVP spoofing via the name field (2026-10-28)
 - **Reported:** Bruce — RSVP should limit to self, with an error
   when spoofing happens.

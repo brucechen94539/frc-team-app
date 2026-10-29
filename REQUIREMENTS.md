@@ -542,6 +542,14 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   already claimed.
 - Anyone attending can claim a seat; claims beyond capacity go to the
   carpool waitlist and auto-promote when a seat is released.
+- **Own-only seats (carpools and vans):** a student claims/releases
+  only their own seat; a parent claims/releases only their own
+  student's seat (or their own seat as a parent rider). Nobody can
+  claim a seat for, or release the seat of, another family — the
+  pickers only ever offer the caller's own people, and the server
+  enforces it (`_may_act_for`) on every claim and release, so a
+  crafted request can't seat or unseat someone else's student.
+  Mentors/admins claim and release for anyone.
 - Drivers may optionally add vehicle details — **license plate, color,
   make, model** — shown on the ride card as a hover tooltip so riders can
   spot the car.
@@ -636,6 +644,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
 
 - **Families request** rooming (student + preferred roommates, chosen from
   attending students); **mentors finalize** by placing students into rooms.
+- **Own-only beds:** placing and removing follow the same rule as
+  seats — mentors/admins place or remove anyone; a **parent places
+  or removes only their own student** (the place picker offers only
+  their student); a **student removes only themself** and places
+  nobody (they file a rooming request instead). The server enforces
+  it on every place and unplace, and the ✕ on an occupant's pill
+  only ever renders for someone allowed to remove that occupant.
 - Only students attending the event can request a room, be listed as a
   preferred roommate, or be placed in a room. Preferred roommates may be
   'going' or 'partial' attendees.
@@ -661,6 +676,16 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   the parent to be **attending** (parent RSVP = going for that event).
 - The room parent recorded is always the family's parent, taken from the
   member record server-side.
+- **A parent volunteers only themself, never another parent:** the
+  parent UI has no family picker for this at all — just a "Volunteer
+  as room parent" button — and the server resolves the caller to
+  their own linked member (or rejects a member that isn't theirs).
+  Removing a room-parent assignment follows the same rule: a parent
+  removes only their own assignment; mentors/admins remove any.
+- **A room parent takes a bed:** an assigned room parent counts 1
+  against the room's capacity every day the room runs, so a 4-bed
+  room with a parent assigned holds at most 3 students. The capacity
+  pill counts the parent's bed (with a tooltip saying so).
 
 ## Data & hosting
 

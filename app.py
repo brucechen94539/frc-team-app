@@ -607,6 +607,13 @@ def _user_is_bif(uid):
 def _public_user(u):
     d = {k: u[k] for k in ("id", "name", "email", "role")}
     d["bif"] = _user_is_bif(u["id"])
+    # Identity links ride along on every auth-shaped user object, so
+    # the frontend's ME always knows who the caller may act for. The
+    # login/verify responses used to omit them, which left every
+    # own-only picker empty in the browser until something happened
+    # to re-fetch /api/auth/me — the server rules were right, but
+    # the UI silently showed parents and students nothing to pick.
+    d["links"] = _user_links_map([u["id"]]).get(u["id"], [])
     return d
 
 
@@ -3421,6 +3428,39 @@ def _own_member_id(u):
     return _self_rsvp_scope(u)[0] if u else None
 
 
+def _may_act_for(u, member_id, person_kind, person_name=None):
+    """Own-only rule for seats and beds: mentors/admins may act for
+    anyone; a student only for themself (kind 'student'); a parent
+    only for their own linked children — a child rides/sleeps as
+    'student' on the child's row, and the parent themself rides as
+    'parent' on that same row. Name-only rows (member_id None,
+    legacy) match by the caller's own account name. This is the
+    server enforcement behind every claim/place/release button:
+    the pickers are filtered too, but a crafted request can't
+    seat or unseat someone else's student."""
+    if not u:
+        return False
+    if u["role"] in ("mentor", "admin"):
+        return True
+    student_id, parent_ids = _self_rsvp_scope(u)
+    if member_id is not None:
+        try:
+            member_id = int(member_id)
+        except (TypeError, ValueError):
+            return False
+        if u["role"] == "student":
+            return person_kind == "student" and member_id == student_id
+        if u["role"] == "parent":
+            return member_id in parent_ids
+        return False
+    if person_name and _norm_name(person_name) == _norm_name(u["name"]):
+        if u["role"] == "student":
+            return person_kind == "student"
+        if u["role"] == "parent":
+            return person_kind == "parent"
+    return False
+
+
 def _claim_matches(row, member_id, person_kind, person_name):
     if row["person_kind"] != person_kind:
         return False
@@ -4043,6 +4083,13 @@ def api_carpool_claim(cid):
     b = request.get_json(force=True)
     if not b.get("person_name"):
         return err("person_name required")
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if not _may_act_for(u, b.get("member_id"), b.get("person_kind"),
+                        b.get("person_name")):
+        return err("you can only claim a seat for yourself or your own"
+                   " student", 403)
     ev = q_one("SELECT * FROM events WHERE id=?", (c["event_id"],))
     event_days = _event_days(ev) if ev else []
     # The day claimed: required on multi-day events (a seat is
@@ -4128,6 +4175,13 @@ def api_carpool_claim_delete(clid):
     cl = q_one("SELECT * FROM carpool_claims WHERE id=?", (clid,))
     if not cl:
         return err("claim not found", 404)
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if not _may_act_for(u, cl["member_id"], cl["person_kind"],
+                        cl["person_name"]):
+        return err("you can only release your own seat (or your own"
+                   " student's)", 403)
     with _lock:
         db = get_db()
         db.execute("DELETE FROM carpool_claims WHERE id=?", (clid,))
@@ -4519,6 +4573,13 @@ def api_van_claim(vid):
     b = request.get_json(force=True)
     if not b.get("event_id") or not b.get("person_name"):
         return err("event_id and person_name required")
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if not _may_act_for(u, b.get("member_id"), b.get("person_kind"),
+                        b.get("person_name")):
+        return err("you can only claim a seat for yourself or your own"
+                   " student", 403)
     if not v.get("seats"):
         return err("this van doesn't take riders — set its seats first")
     ev = q_one("SELECT * FROM events WHERE id=?", (b["event_id"],))
@@ -4618,6 +4679,13 @@ def api_van_claim_delete(clid):
     cl = q_one("SELECT * FROM van_claims WHERE id=?", (clid,))
     if not cl:
         return err("claim not found", 404)
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if not _may_act_for(u, cl["member_id"], cl["person_kind"],
+                        cl["person_name"]):
+        return err("you can only release your own seat (or your own"
+                   " student's)", 403)
     with _lock:
         db = get_db()
         db.execute("DELETE FROM van_claims WHERE id=?", (clid,))
@@ -4847,7 +4915,6 @@ def api_rooming_request_delete(qid):
 
 
 @app.route("/api/rooms/<int:rid>/occupants", methods=["POST"])
-@require_role("mentor", "admin")
 def api_room_place(rid):
     """Place a student in a room FOR ONE DAY, like a carpool seat:
     the day is required on multi-day events, defaulted to the one
@@ -4855,13 +4922,27 @@ def api_room_place(rid):
     be allocated for that day, the student must attend that day,
     and a student sleeps in at most one room per day. Placing in
     the same room for the same day twice is a no-op, not an error
-    (the old INSERT OR IGNORE behavior)."""
+    (the old INSERT OR IGNORE behavior). A room parent takes a bed:
+    an assigned parent counts 1 against capacity that day.
+    Placement is mentors/admins for anyone, and parents for their
+    own student only — students place nobody (they file a rooming
+    request, and a mentor or their parent places them)."""
     b = request.get_json(force=True)
     if not b.get("member_id"):
         return err("member_id required")
     rm = q_one("SELECT * FROM rooms WHERE id=?", (rid,))
     if not rm:
         return err("room not found", 404)
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] == "student":
+        return err("students can't place themselves in a room — file a"
+                   " rooming request, or ask a mentor or your parent",
+                   403)
+    if u["role"] == "parent" and not _may_act_for(
+            u, b["member_id"], "student"):
+        return err("you can only place your own student in a room", 403)
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (rm["hotel_id"],))
     ev = q_one("SELECT * FROM events WHERE id=?", (hotel["event_id"],))
     event_days = _event_days(ev) if ev else []
@@ -4913,8 +4994,17 @@ def api_room_place(rid):
         occ = db.execute(
             "SELECT day FROM room_occupants WHERE room_id=?",
             (rid,)).fetchall()
+        # A room parent takes a bed: the parent's spot counts
+        # against capacity every day the room runs, so a 4-bed room
+        # with a parent assigned holds at most 3 students that day.
+        # (Re-read inside the lock: the parent may have changed
+        # since the room row was fetched above.)
+        parent_takes = 1 if db.execute(
+            "SELECT parent_name FROM rooms WHERE id=?",
+            (rid,)).fetchone()["parent_name"] else 0
         if sum(1 for r in occ
-               if _occupant_day_matches(r["day"], day)) >= rm["capacity"]:
+               if _occupant_day_matches(r["day"], day)) \
+                + parent_takes >= rm["capacity"]:
             return err("room is full for that day", 409)
         db.execute(
             "INSERT INTO room_occupants (room_id, member_id, day)"
@@ -4927,12 +5017,20 @@ def api_room_place(rid):
 
 
 @app.route("/api/room_occupants/<int:oid>", methods=["DELETE"])
-@require_role("mentor", "admin")
 def api_room_unplace(oid):
+    """Remove an occupant: mentors/admins anyone; a student only
+    themself; a parent only their own student. Anyone else gets
+    403 — the ✕ on another student's pill is never a live action."""
     o = q_one("""SELECT o.*, r.hotel_id FROM room_occupants o
                  JOIN rooms r ON r.id = o.room_id WHERE o.id=?""", (oid,))
     if not o:
         return err("occupant not found", 404)
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if not _may_act_for(u, o["member_id"], "student"):
+        return err("you can only remove yourself (or your own student)"
+                   " from a room", 403)
     with _lock:
         db = get_db()
         db.execute("DELETE FROM room_occupants WHERE id=?", (oid,))
@@ -4957,7 +5055,11 @@ def api_room_parent(rid):
     """Room parent: the adult volunteer who checks the room in. Optional —
     senior rooms can go without. Only parents/mentors/admins may volunteer
     or remove; students are never allowed in this slot. The recorded name is
-    always the family's parent name, taken server-side."""
+    always the family's parent name, taken server-side. A parent may only
+    volunteer (or remove) THEMSELVES — never another parent: a parent
+    caller's member must be one of their own user_members 'parent'
+    links, resolved server-side from the session, never from a picker
+    value. Mentors/admins may assign any family."""
     u = current_user()
     if not u:
         return err("login required", 401)
@@ -4966,11 +5068,39 @@ def api_room_parent(rid):
     room = q_one("SELECT * FROM rooms WHERE id=?", (rid,))
     if not room:
         return err("room not found", 404)
+    _, parent_ids = _self_rsvp_scope(u)
     if request.method == "DELETE":
+        if u["role"] == "parent":
+            # Own assignment only: by linked member id, or — for
+            # legacy rows with no parent_member_id recorded — by
+            # matching the room parent's name to a linked member's
+            # parent_name.
+            own_names = {_norm_name(r["parent_name"]) for r in q_all(
+                "SELECT parent_name FROM members WHERE id IN (%s)"
+                % ",".join("?" * len(parent_ids)), tuple(parent_ids))} \
+                if parent_ids else set()
+            if room.get("parent_member_id") not in parent_ids and \
+                    _norm_name(room.get("parent_name")) not in own_names:
+                return err("you can only remove your own room-parent"
+                           " assignment", 403)
         execute("UPDATE rooms SET parent_member_id=NULL, parent_name=NULL"
                 " WHERE id=?", (rid,))
         return jsonify({"ok": True})
     b = request.get_json(force=True, silent=True) or {}
+    if u["role"] == "parent":
+        if b.get("member_id"):
+            if int(b["member_id"]) not in parent_ids:
+                return err("you can only volunteer yourself as room"
+                           " parent — you can't volunteer another parent",
+                           403)
+        else:
+            # No member picked (the parent UI has no picker): resolve
+            # to the caller's own first linked member row.
+            if not parent_ids:
+                return err("your account isn't linked to a student on"
+                           " the roster — ask a mentor to check your"
+                           " account name", 403)
+            b["member_id"] = sorted(parent_ids)[0]
     m = q_one("SELECT id, parent_name FROM members WHERE id=?",
               (b.get("member_id"),)) if b.get("member_id") else None
     pname = ((m["parent_name"] if m else "") or "").strip()
