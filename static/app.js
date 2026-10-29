@@ -80,6 +80,9 @@ let queueFilter = "pending";
 let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
 let eventCalMode = false, eventCalCursor = "";
+// Create-zone open state survives re-renders (filter/search keystrokes
+// rebuild the view); creation itself resets them to collapsed.
+let evCreateOpen = false, anCreateOpen = false;
 let openRsvpLists = new Set();  // event ids whose RSVP list is expanded
 let toolsListCollapsed = false;  // Tool sign-up list in Travel, across renders
 let trackEventId = null, travelEventId = null;
@@ -1673,34 +1676,41 @@ async function renderEvents() {
   v.innerHTML = `
   <div class="card"><h2>Announcements</h2>
     <div id="an-list"><span class="sub">Loading…</span></div>
-    <div class="mo" style="margin-top:12px">
-      <div class="field"><label>Title</label><input id="an-title"></div>
-      <div class="field"><label>Message</label><textarea id="an-body"></textarea></div>
-      <button class="btn small" id="an-post">Post announcement</button>
+    <div class="mo create-zone ${anCreateOpen ? "" : "collapsed"}" id="an-create-zone">
+      <button class="create-toggle" type="button" data-zone="an"><span class="ct-plus">${anCreateOpen ? "－" : "＋"}</span> Post announcement <span class="sub">Shown to everyone on this page</span></button>
+      <div class="create-body">
+        <div class="field"><label>Title</label><input id="an-title"></div>
+        <div class="field"><label>Message</label><textarea id="an-body"></textarea></div>
+        <button class="btn small" id="an-post">Post announcement</button>
+      </div>
     </div>
   </div>
   <div class="card"><h2>Events &amp; RSVPs</h2>
   <p class="sub">Mentors create events. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote.</p>
-  <h3 class="mo">Create event</h3>
-  <div class="grid3 mo">
-    <div class="field"><label>Title *</label><input id="e-title"></div>
-    <div class="field"><label>Type</label><select id="e-type">
-      ${types.map((t) => `<option value="${t}">${t[0].toUpperCase() + t.slice(1)}</option>`).join("")}</select></div>
-    <div class="field"><label>Date</label><input id="e-date" type="date"></div>
-    <div class="field"><label>End date <span class="hint">(multi-day trips)</span></label><input id="e-end" type="date"></div>
-    <div class="field"><label>Time</label><input id="e-time" placeholder="6:00 PM"></div>
-    <div class="field"><label>Location</label><input id="e-loc"></div>
-    <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label>
-      <input id="e-cap" inputmode="numeric"></div>
-    <div class="field"><label>RSVP deadline</label><input id="e-dead" type="date"></div>
-    <div class="field"><label>Repeat weekly <span class="hint">(weeks, 1 = once, max 12)</span></label>
-      <input id="e-repeat" inputmode="numeric" value="1"></div>
+  <div class="mo create-zone ${evCreateOpen ? "" : "collapsed"}" id="ev-create-zone">
+    <button class="create-toggle" type="button" data-zone="ev"><span class="ct-plus">${evCreateOpen ? "－" : "＋"}</span> Create event <span class="sub">Meeting, build, competition, outreach, or club</span></button>
+    <div class="create-body">
+      <div class="grid3 mo">
+        <div class="field"><label>Title *</label><input id="e-title"></div>
+        <div class="field"><label>Type</label><select id="e-type">
+          ${types.map((t) => `<option value="${t}">${t[0].toUpperCase() + t.slice(1)}</option>`).join("")}</select></div>
+        <div class="field"><label>Date</label><input id="e-date" type="date"></div>
+        <div class="field"><label>End date <span class="hint">(multi-day trips)</span></label><input id="e-end" type="date"></div>
+        <div class="field"><label>Time</label><input id="e-time" placeholder="6:00 PM"></div>
+        <div class="field"><label>Location</label><input id="e-loc"></div>
+        <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label>
+          <input id="e-cap" inputmode="numeric"></div>
+        <div class="field"><label>RSVP deadline</label><input id="e-dead" type="date"></div>
+        <div class="field"><label>Repeat weekly <span class="hint">(weeks, 1 = once, max 12)</span></label>
+          <input id="e-repeat" inputmode="numeric" value="1"></div>
+      </div>
+      <div class="field mo"><label>Notes</label><textarea id="e-notes"></textarea></div>
+      <div class="row mo"><button class="btn" id="e-create">Create event</button>
+        <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button>
+        <button class="btn ghost" id="e-workshop" type="button">Use workshop address</button></div>
+      <p class="sub mo hidden" id="e-clubnote">Club meets Mondays 4:00–5:05 PM and is only for BASIS Independent Fremont students.</p>
+    </div>
   </div>
-  <div class="field mo"><label>Notes</label><textarea id="e-notes"></textarea></div>
-  <div class="row mo"><button class="btn" id="e-create">Create event</button>
-    <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button>
-    <button class="btn ghost" id="e-workshop" type="button">Use workshop address</button></div>
-  <p class="sub mo hidden" id="e-clubnote">Club meets Mondays 4:00–5:05 PM and is only for BASIS Independent Fremont students.</p>
   <div class="row mo">
     <a class="btn ghost small" href="/api/events.csv">Export CSV</a>
     <button class="btn ghost small" id="e-import">Import CSV</button>
@@ -1742,6 +1752,16 @@ async function renderEvents() {
       renderEvents();
     }));
   renderAnnouncements();
+  // Create zones: the toggle button is the title row — clicking it
+  // expands or collapses the form, and the open state survives the
+  // re-renders that filtering and searching cause.
+  v.querySelectorAll(".create-toggle").forEach((b) =>
+    b.addEventListener("click", () => {
+      const zone = b.closest(".create-zone");
+      const open = !zone.classList.toggle("collapsed");
+      if (b.dataset.zone === "ev") evCreateOpen = open; else anCreateOpen = open;
+      b.querySelector(".ct-plus").textContent = open ? "－" : "＋";
+    }));
   const anPost = $("an-post");
   if (anPost) anPost.addEventListener("click", async () => {
     const title = $("an-title").value.trim();
@@ -1750,6 +1770,10 @@ async function renderEvents() {
       await POST("/api/announcements", {title, body: $("an-body").value.trim()});
       $("an-title").value = ""; $("an-body").value = "";
       toast("Announcement posted."); renderAnnouncements();
+      // Back to the collapsed form (this view does not re-render).
+      anCreateOpen = false;
+      const z = $("an-create-zone");
+      if (z) { z.classList.add("collapsed"); z.querySelector(".ct-plus").textContent = "＋"; }
     } catch (err) { toast("Error: " + err.message); }
   });
   const eImp = $("e-import");
@@ -1961,6 +1985,7 @@ async function createEvent() {
       }
     }
     toast(weeks > 1 && base.date ? `Created ${weeks} weekly events.` : "Event created.");
+    evCreateOpen = false;  // back to the collapsed form
     renderEvents();
   } catch (e) { toast("Error: " + e.message); }
 }

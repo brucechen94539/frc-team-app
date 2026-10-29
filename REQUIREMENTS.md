@@ -315,6 +315,16 @@ and `can't make it` do not count as attending.
   mentor picks a new date and saves. **Repeat weekly** on the create form
   (1–12 weeks) creates one event per week at +7-day intervals, shifting
   the deadline with the event; it only applies when a date is set.
+- **Creation reads differently from display:** the announcement form
+  and the event create form live in shaded **create zones** (secondary
+  surface + indigo left bar) instead of looking like another card, and
+  both start collapsed behind a toggle title ("＋ Create event",
+  "＋ Post announcement" — the toggle button is the title row).
+  Clicking expands the form; creating collapses it again (events via
+  the view re-render, announcements directly). An open zone stays open
+  across filter/search re-renders. Export CSV, Import CSV, and Archive
+  season stay visible outside the event create zone, and non-mentors
+  never see the zones (they are mentor-only blocks).
 - The Events view has a **List / Calendar** toggle: the calendar is a
   month grid (Sunday-first, prev/next/Today) over the filtered events,
   and clicking a title jumps to that event's card below. Every event card
