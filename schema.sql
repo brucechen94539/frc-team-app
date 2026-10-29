@@ -150,7 +150,10 @@ CREATE TABLE IF NOT EXISTS tools (
   name        TEXT NOT NULL,
   qty         INTEGER NOT NULL DEFAULT 1,
   notes       TEXT,
-  claimed_by  TEXT,                -- NULL = unclaimed
+  claimed_by  TEXT,                -- legacy display name; superseded by
+                                   -- vehicle_type/vehicle_id below
+  vehicle_type TEXT,               -- 'carpool' | 'van', NULL = unassigned
+  vehicle_id  INTEGER,
   claimed_at  TEXT,
   sample      INTEGER NOT NULL DEFAULT 0
 );
@@ -207,7 +210,20 @@ CREATE TABLE IF NOT EXISTS announcements (
 CREATE TABLE IF NOT EXISTS team_vans (
   id    INTEGER PRIMARY KEY AUTOINCREMENT,
   name  TEXT NOT NULL,
-  notes TEXT NOT NULL DEFAULT ''
+  notes TEXT NOT NULL DEFAULT '',
+  driver_user_id INTEGER,          -- designated parent driver (account)
+  seats INTEGER                    -- passenger seats; NULL = tools-only
+);
+
+CREATE TABLE IF NOT EXISTS van_claims (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  van_id      INTEGER NOT NULL REFERENCES team_vans(id) ON DELETE CASCADE,
+  event_id    INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  member_id   INTEGER REFERENCES members(id) ON DELETE SET NULL,
+  person_kind TEXT,
+  person_name TEXT NOT NULL,
+  status      TEXT NOT NULL,       -- claimed | waitlisted
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Link requests: a sign-up for an EXISTING student. The signer has no

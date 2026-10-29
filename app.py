@@ -124,6 +124,8 @@ def _migrate(db):
     event_cols = {r[1] for r in db.execute("PRAGMA table_info(events)")}
     member_cols = {r[1] for r in db.execute("PRAGMA table_info(members)")}
     lr_cols = {r[1] for r in db.execute("PRAGMA table_info(link_requests)")}
+    tool_cols = {r[1] for r in db.execute("PRAGMA table_info(tools)")}
+    van_cols = {r[1] for r in db.execute("PRAGMA table_info(team_vans)")}
     with _lock:
         if "parent_member_id" not in room_cols:
             db.execute("ALTER TABLE rooms ADD COLUMN parent_member_id INTEGER")
@@ -137,6 +139,24 @@ def _migrate(db):
             db.execute("ALTER TABLE carpools ADD COLUMN vehicle TEXT")
         if "driver_user_id" not in car_cols:
             db.execute("ALTER TABLE carpools ADD COLUMN driver_user_id INTEGER")
+        if "vehicle_type" not in tool_cols:
+            db.execute("ALTER TABLE tools ADD COLUMN vehicle_type TEXT")
+        if "vehicle_id" not in tool_cols:
+            db.execute("ALTER TABLE tools ADD COLUMN vehicle_id INTEGER")
+        if "driver_user_id" not in van_cols:
+            db.execute("ALTER TABLE team_vans ADD COLUMN driver_user_id INTEGER")
+        if "seats" not in van_cols:
+            db.execute("ALTER TABLE team_vans ADD COLUMN seats INTEGER")
+        db.execute("""CREATE TABLE IF NOT EXISTS van_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            van_id INTEGER NOT NULL REFERENCES team_vans(id)
+                ON DELETE CASCADE,
+            event_id INTEGER NOT NULL REFERENCES events(id)
+                ON DELETE CASCADE,
+            member_id INTEGER REFERENCES members(id) ON DELETE SET NULL,
+            person_kind TEXT, person_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
         if "season" not in event_cols:
             db.execute("ALTER TABLE events ADD COLUMN season TEXT")
         if "totp_secret" not in user_cols:
@@ -295,6 +315,39 @@ def _migrate(db):
             db.execute("UPDATE tasks SET assignees=? WHERE id=?",
                        (json.dumps([r["assignee"]]), r["id"]))
         _dedupe_carpool_claims(db)
+        # 2026-10-28: tools point at vehicles by id now, not by driver
+        # name. One-time migration from the old claimed_by strings:
+        # match an event carpool driver first, else a van name. Names
+        # that match nothing (including every carpool wiped by the
+        # driver-account clean slate) fall back to unassigned — the
+        # tool returns to the pool instead of pointing at a ghost.
+        migrated = db.execute(
+            "SELECT value FROM meta WHERE key='tools_vehicle_ids_2026_10_28'"
+            ).fetchone() is not None
+        if not migrated:
+            for t in db.execute(
+                    "SELECT id, event_id, claimed_by FROM tools"
+                    " WHERE claimed_by IS NOT NULL AND claimed_by != ''"
+                    " AND vehicle_type IS NULL"):
+                car = db.execute(
+                    "SELECT id, driver_name FROM carpools WHERE event_id=?",
+                    (t["event_id"],)).fetchall()
+                match = [c for c in car
+                         if _norm_name(c["driver_name"]) == _norm_name(t["claimed_by"])]
+                if match:
+                    db.execute("UPDATE tools SET vehicle_type='carpool',"
+                               " vehicle_id=? WHERE id=?",
+                               (match[0]["id"], t["id"]))
+                    continue
+                vans = db.execute("SELECT id, name FROM team_vans").fetchall()
+                vmatch = [v for v in vans
+                          if _norm_name(v["name"]) == _norm_name(t["claimed_by"])]
+                if vmatch:
+                    db.execute("UPDATE tools SET vehicle_type='van',"
+                               " vehicle_id=? WHERE id=?",
+                               (vmatch[0]["id"], t["id"]))
+            db.execute("INSERT INTO meta (key, value) VALUES (?,?)",
+                       ("tools_vehicle_ids_2026_10_28", "1"))
         # 2026-10-28: carpool model change (driver accounts, edit/remove).
         # Clear every posted ride so the pool restarts clean instead of
         # mixing old free-text drivers with the new account drivers.
@@ -2816,6 +2869,33 @@ def api_travel(eid):
         c["claims"] = [x for x in claims if x["status"] == "claimed"]
         c["waitlist"] = [x for x in claims if x["status"] == "waitlisted"]
         c["seats_open"] = max(0, c["seats"] - len(c["claims"]))
+    # Team vans going to this event: seats set, a designated parent
+    # driver who RSVP'd going for this event, and that driver not
+    # already driving a carpool for the same event. Driverless or
+    # seatless vans stay tools-only and never appear here.
+    going_parents = {r["person_name"] for r in q_all(
+        "SELECT person_name FROM rsvps WHERE event_id=? AND"
+        " person_kind='parent' AND status='going'", (eid,))}
+    car_driver_uids = {c["driver_user_id"] for c in carpools
+                       if c.get("driver_user_id")}
+    event_vans = []
+    for v in q_all("SELECT * FROM team_vans ORDER BY name"):
+        if not v.get("seats") or not v.get("driver_user_id"):
+            continue
+        if v["driver_user_id"] in car_driver_uids:
+            continue
+        drv = q_one("SELECT name FROM users WHERE id=?",
+                    (v["driver_user_id"],))
+        if not drv or drv["name"] not in going_parents:
+            continue
+        claims = q_all("SELECT * FROM van_claims WHERE van_id=? AND"
+                       " event_id=? ORDER BY created_at, id",
+                       (v["id"], eid))
+        v["driver_name"] = drv["name"]
+        v["claims"] = [x for x in claims if x["status"] == "claimed"]
+        v["waitlist"] = [x for x in claims if x["status"] == "waitlisted"]
+        v["seats_open"] = max(0, v["seats"] - len(v["claims"]))
+        event_vans.append(v)
     tools = q_all("SELECT * FROM tools WHERE event_id=? ORDER BY id", (eid,))
     hotel = q_one("SELECT * FROM hotels WHERE event_id=?", (eid,))
     if hotel:
@@ -2841,7 +2921,7 @@ def api_travel(eid):
         "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
         " AND parent_name != ''") if m["parent_name"]})
     return jsonify({"event": ev, "carpools": carpools, "tools": tools,
-                    "parent_names": parent_names,
+                    "parent_names": parent_names, "event_vans": event_vans,
                     "hotel": hotel, "attendees": attendees})
 
 
@@ -3173,9 +3253,14 @@ def api_carpool_delete(cid):
         db = get_db()
         n = db.execute("DELETE FROM carpool_claims WHERE carpool_id=?",
                        (cid,)).rowcount
+        # Tools riding in this car go back to the pool, not to a ghost.
+        tu = db.execute("UPDATE tools SET vehicle_type=NULL, vehicle_id=NULL,"
+                        " claimed_at=NULL WHERE vehicle_type='carpool'"
+                        " AND vehicle_id=?", (cid,)).rowcount
         db.execute("DELETE FROM carpools WHERE id=?", (cid,))
         db.commit()
-    return jsonify({"deleted": cid, "claims_removed": n})
+    return jsonify({"deleted": cid, "claims_removed": n,
+                    "tools_unassigned": tu})
 
 
 @app.route("/api/carpools/<int:cid>/claims", methods=["POST"])
@@ -3265,39 +3350,246 @@ def api_tool_create():
     return jsonify(q_one("SELECT * FROM tools WHERE id=?", (tid,))), 201
 
 
-@app.route("/api/tools/<int:tid>/claim", methods=["POST"])
-def api_tool_claim(tid):
-    """Tools are hauled by parent drivers (a parent driver with a
-    carpool for this event — not a student) or by a team van."""
-    b = request.get_json(force=True)
-    if not b.get("claimed_by"):
-        return err("claimed_by required")
+@app.route("/api/tools/<int:tid>", methods=["PATCH"])
+@require_role("mentor", "admin")
+def api_tool_patch(tid):
     t = q_one("SELECT * FROM tools WHERE id=?", (tid,))
     if not t:
         return err("tool not found", 404)
-    van_names = {_norm_name(r["name"]) for r in q_all(
-        "SELECT name FROM team_vans")}
-    if _norm_name(b["claimed_by"]) in van_names:
-        pass
-    else:
-        parent_drivers = {_norm_name(r["person_name"]) for r in q_all(
-            "SELECT person_name FROM rsvps WHERE event_id=? AND"
-            " person_kind='parent' AND status IN ('going','partial')",
-            (t["event_id"],))}
-        parent_drivers |= {_norm_name(m["parent_name"]) for m in q_all(
-            "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
-            " AND parent_name != ''")}
-        car_drivers = {_norm_name(c["driver_name"]) for c in q_all(
-            "SELECT driver_name FROM carpools WHERE event_id=?",
-            (t["event_id"],))}
-        if (_norm_name(b["claimed_by"]) not in parent_drivers
-                or _norm_name(b["claimed_by"]) not in car_drivers):
-            return err("tools are hauled by parent drivers or team vans —"
-                       " pick a parent driver with a carpool for this"
-                       " event, or a team van")
-    execute("UPDATE tools SET claimed_by=?, claimed_at=datetime('now') WHERE id=?",
-            (b["claimed_by"], tid))
+    b = request.get_json(force=True)
+    sets, args = [], []
+    if "name" in b:
+        if not (b["name"] or "").strip():
+            return err("name is required")
+        sets.append("name=?")
+        args.append(b["name"].strip())
+    if "qty" in b:
+        try:
+            qty = int(b["qty"])
+        except (TypeError, ValueError):
+            return err("qty must be a number")
+        if qty < 1:
+            return err("qty must be 1 or more")
+        sets.append("qty=?")
+        args.append(qty)
+    if "notes" in b:
+        sets.append("notes=?")
+        args.append(b["notes"])
+    if not sets:
+        return err("nothing to update")
+    execute(f"UPDATE tools SET {', '.join(sets)} WHERE id=?",
+            (*args, tid))
     return jsonify(q_one("SELECT * FROM tools WHERE id=?", (tid,)))
+
+
+@app.route("/api/tools/<int:tid>", methods=["DELETE"])
+@require_role("mentor", "admin")
+def api_tool_delete(tid):
+    if not q_one("SELECT * FROM tools WHERE id=?", (tid,)):
+        return err("tool not found", 404)
+    execute("DELETE FROM tools WHERE id=?", (tid,))
+    return jsonify({"deleted": tid})
+
+
+def _owns_vehicle(me, vehicle_type, vehicle_id):
+    """True if this parent drives the vehicle: their own carpool, or a
+    team van they are designated to drive. Mentors are handled by the
+    caller, not here."""
+    if vehicle_type == "carpool":
+        c = q_one("SELECT driver_user_id FROM carpools WHERE id=?",
+                  (vehicle_id,))
+        return c is not None and c["driver_user_id"] == me["id"]
+    if vehicle_type == "van":
+        v = q_one("SELECT driver_user_id FROM team_vans WHERE id=?",
+                  (vehicle_id,))
+        return v is not None and v["driver_user_id"] == me["id"]
+    return False
+
+
+@app.route("/api/tools/<int:tid>/assign", methods=["POST"])
+def api_tool_assign(tid):
+    """Assign a tool to a vehicle going to the event: an event carpool
+    or a team van, by id — never by driver name. Mentors may assign
+    any vehicle; a parent may only load a vehicle they drive, and only
+    a mentor may move a tool off someone else's vehicle. Students
+    cannot assign."""
+    t = q_one("SELECT * FROM tools WHERE id=?", (tid,))
+    if not t:
+        return err("tool not found", 404)
+    me = current_user()
+    if me["role"] == "student":
+        return err("students can't assign tools", 403)
+    b = request.get_json(force=True)
+    vt, vid = b.get("vehicle_type"), b.get("vehicle_id")
+    if vt == "carpool":
+        veh = q_one("SELECT * FROM carpools WHERE id=?", (vid,))
+        if not veh or veh["event_id"] != t["event_id"]:
+            return err("that carpool is not going to this event")
+    elif vt == "van":
+        # Vans are team equipment: any van may haul for any event, at
+        # mentor discretion. (Passenger rides are stricter — a van
+        # takes riders only with a designated, RSVP'd driver.)
+        veh = q_one("SELECT * FROM team_vans WHERE id=?", (vid,))
+        if not veh:
+            return err("team van not found")
+    else:
+        return err("vehicle_type must be carpool or van")
+    if me["role"] not in MENTOR_ROLES:
+        if t.get("vehicle_type") and not _owns_vehicle(
+                me, t["vehicle_type"], t["vehicle_id"]):
+            return err("only a mentor can move a tool off another"
+                       " vehicle", 403)
+        if not _owns_vehicle(me, vt, vid):
+            return err("parents can only load a vehicle they drive", 403)
+    execute("UPDATE tools SET vehicle_type=?, vehicle_id=?,"
+            " claimed_at=datetime('now') WHERE id=?", (vt, vid, tid))
+    return jsonify(q_one("SELECT * FROM tools WHERE id=?", (tid,)))
+
+
+@app.route("/api/tools/<int:tid>/release", methods=["POST"])
+def api_tool_release(tid):
+    """Send a tool back to the pool. Mentors may release any tool; a
+    parent only one on a vehicle they drive. Releasing an unassigned
+    tool is a no-op success."""
+    t = q_one("SELECT * FROM tools WHERE id=?", (tid,))
+    if not t:
+        return err("tool not found", 404)
+    me = current_user()
+    if me["role"] == "student":
+        return err("students can't release tools", 403)
+    if (t.get("vehicle_type") and me["role"] not in MENTOR_ROLES
+            and not _owns_vehicle(me, t["vehicle_type"], t["vehicle_id"])):
+        return err("only a mentor or the vehicle's driver can release"
+                   " this tool", 403)
+    execute("UPDATE tools SET vehicle_type=NULL, vehicle_id=NULL,"
+            " claimed_at=NULL WHERE id=?", (tid,))
+    return jsonify(q_one("SELECT * FROM tools WHERE id=?", (tid,)))
+
+
+@app.route("/api/events/<int:eid>/tools.csv")
+@require_role("mentor", "admin")
+def api_tools_csv(eid):
+    """Tools export: the same columns the tools import accepts, so a
+    pool round-trips through a spreadsheet. Vehicle is the display
+    name (carpool driver, or 'Team van X'), blank when unassigned."""
+    if not q_one("SELECT * FROM events WHERE id=?", (eid,)):
+        return err("event not found", 404)
+    import csv
+    import io
+    tools = q_all("SELECT * FROM tools WHERE event_id=? ORDER BY id",
+                  (eid,))
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Name", "Qty", "Notes", "Vehicle"])
+    for x in tools:
+        veh = ""
+        if x.get("vehicle_type") == "carpool":
+            c = q_one("SELECT driver_name FROM carpools WHERE id=?",
+                      (x["vehicle_id"],))
+            veh = c["driver_name"] if c else ""
+        elif x.get("vehicle_type") == "van":
+            v = q_one("SELECT name FROM team_vans WHERE id=?",
+                      (x["vehicle_id"],))
+            veh = f"Team van {v['name']}" if v else ""
+        w.writerow([x["name"], x["qty"], x["notes"] or "", veh])
+    return app.response_class(buf.getvalue(), mimetype="text/csv",
+                              headers={"Content-Disposition":
+                                       f"attachment; filename=tools-{eid}.csv"})
+
+
+@app.route("/api/events/<int:eid>/tools/import", methods=["POST"])
+@require_role("mentor", "admin")
+def api_tools_import(eid):
+    """Tools import: upsert by name (case-insensitive), never deletes.
+    A vehicle name that matches an event carpool driver or a van
+    assigns the row; an unmatched vehicle leaves the row unassigned
+    and is reported. Only columns present in the file overwrite on
+    update, so an export without a Notes column keeps existing notes.
+    Single-step (unlike roster/events preview-confirm) because nothing
+    here deletes — the summary is the confirmation record."""
+    if not q_one("SELECT * FROM events WHERE id=?", (eid,)):
+        return err("event not found", 404)
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return err("no file uploaded", 400)
+    try:
+        headers, rows = _csv_read(f)
+    except ValueError as e:
+        return err(str(e), 400)
+    known = {"name", "qty", "quantity", "amount", "notes", "vehicle"}
+    if not (set(headers) & known):
+        return err("no recognized columns — is this the right file?"
+                   " Export CSV gives you the template.", 400)
+    car_by_name = {_norm_name(c["driver_name"]): c["id"] for c in q_all(
+        "SELECT id, driver_name FROM carpools WHERE event_id=?", (eid,))}
+    van_by_name = {_norm_name(v["name"]): v["id"] for v in q_all(
+        "SELECT id, name FROM team_vans")}
+    existing = {_norm_name(r["name"]): r for r in q_all(
+        "SELECT * FROM tools WHERE event_id=?", (eid,))}
+    added = updated = 0
+    skipped = []
+    unmatched_vehicles = []
+    for line, row in rows:
+        name = (row.get("name") or "").strip()
+        if not name:
+            skipped.append(f"line {line}: no name")
+            continue
+        qty = None
+        if "qty" in headers or "quantity" in headers or "amount" in headers:
+            raw = (row.get("qty") or row.get("quantity")
+                   or row.get("amount") or "").strip()
+            if raw:
+                try:
+                    qty = int(raw)
+                except ValueError:
+                    skipped.append(f"line {line} ({name}): bad qty")
+                    continue
+                if qty < 1:
+                    skipped.append(f"line {line} ({name}): qty must be 1+")
+                    continue
+        vt = vid = None
+        veh_raw = (row.get("vehicle") or "").strip() if "vehicle" in headers else ""
+        if veh_raw:
+            vname = veh_raw
+            if vname.lower().startswith("team van "):
+                vname = vname[len("team van "):].strip()
+            if _norm_name(vname) in car_by_name:
+                vt, vid = "carpool", car_by_name[_norm_name(vname)]
+            elif _norm_name(vname) in van_by_name:
+                vt, vid = "van", van_by_name[_norm_name(vname)]
+            else:
+                unmatched_vehicles.append(name)
+        key = _norm_name(name)
+        if key in existing:
+            sets, args = [], []
+            if qty is not None:
+                sets.append("qty=?")
+                args.append(qty)
+            if "notes" in headers:
+                sets.append("notes=?")
+                args.append((row.get("notes") or "").strip())
+            if vt:
+                sets.append("vehicle_type=?")
+                args.append(vt)
+                sets.append("vehicle_id=?")
+                args.append(vid)
+                sets.append("claimed_at=datetime('now')")
+            if sets:
+                execute(f"UPDATE tools SET {', '.join(sets)} WHERE id=?",
+                        (*args, existing[key]["id"]))
+            updated += 1
+        else:
+            nid = execute(
+                "INSERT INTO tools (event_id, name, qty, notes,"
+                " vehicle_type, vehicle_id, sample) VALUES (?,?,?,?,?,?,0)",
+                (eid, name, qty if qty is not None else 1,
+                 (row.get("notes") or "").strip() if "notes" in headers else "",
+                 vt, vid))
+            existing[key] = {"id": nid}
+            added += 1
+    return jsonify({"added": added, "updated": updated,
+                    "skipped": skipped,
+                    "vehicles_unmatched": unmatched_vehicles})
 
 
 @app.route("/api/team-vans", methods=["GET", "POST"])
@@ -3310,22 +3602,190 @@ def api_team_vans():
     b = request.get_json(force=True, silent=True) or {}
     if not (b.get("name") or "").strip():
         return err("name is required")
-    vid = execute("INSERT INTO team_vans (name, notes) VALUES (?,?)",
-                  (b["name"].strip(), (b.get("notes") or "").strip()))
+    driver_uid = None
+    if b.get("driver_user_id"):
+        drv = q_one("SELECT id, role FROM users WHERE id=?",
+                    (b["driver_user_id"],))
+        if not drv or drv["role"] != "parent":
+            return err("the van driver must be a parent account")
+        driver_uid = drv["id"]
+    seats = None
+    if b.get("seats") not in (None, ""):
+        try:
+            seats = int(b["seats"])
+        except (TypeError, ValueError):
+            return err("seats must be a number")
+        if seats < 1:
+            return err("seats must be 1 or more")
+    vid = execute("INSERT INTO team_vans (name, notes, driver_user_id,"
+                  " seats) VALUES (?,?,?,?)",
+                  (b["name"].strip(), (b.get("notes") or "").strip(),
+                   driver_uid, seats))
     return jsonify(q_one("SELECT * FROM team_vans WHERE id=?", (vid,))), 201
+
+
+@app.route("/api/team-vans/<int:vid>", methods=["PATCH"])
+@require_role("mentor", "admin")
+def api_team_van_patch(vid):
+    v = q_one("SELECT * FROM team_vans WHERE id=?", (vid,))
+    if not v:
+        return err("team van not found", 404)
+    b = request.get_json(force=True)
+    sets, args = [], []
+    if "name" in b:
+        if not (b["name"] or "").strip():
+            return err("name is required")
+        sets.append("name=?")
+        args.append(b["name"].strip())
+    if "notes" in b:
+        sets.append("notes=?")
+        args.append(b["notes"])
+    if "driver_user_id" in b:
+        if b["driver_user_id"] in (None, ""):
+            sets.append("driver_user_id=?")
+            args.append(None)
+        else:
+            drv = q_one("SELECT id, role FROM users WHERE id=?",
+                        (b["driver_user_id"],))
+            if not drv or drv["role"] != "parent":
+                return err("the van driver must be a parent account")
+            sets.append("driver_user_id=?")
+            args.append(drv["id"])
+    if "seats" in b:
+        if b["seats"] in (None, ""):
+            sets.append("seats=?")
+            args.append(None)
+        else:
+            try:
+                seats = int(b["seats"])
+            except (TypeError, ValueError):
+                return err("seats must be a number")
+            if seats < 1:
+                return err("seats must be 1 or more")
+            sets.append("seats=?")
+            args.append(seats)
+    if not sets:
+        return err("nothing to update")
+    execute(f"UPDATE team_vans SET {', '.join(sets)} WHERE id=?",
+            (*args, vid))
+    return jsonify(q_one("SELECT * FROM team_vans WHERE id=?", (vid,)))
 
 
 @app.route("/api/team-vans/<int:vid>", methods=["DELETE"])
 @require_role("mentor", "admin")
 def api_team_van_delete(vid):
-    execute("DELETE FROM team_vans WHERE id=?", (vid,))
-    return jsonify({"deleted": vid})
+    if not q_one("SELECT * FROM team_vans WHERE id=?", (vid,)):
+        return err("team van not found", 404)
+    with _lock:
+        db = get_db()
+        tu = db.execute("UPDATE tools SET vehicle_type=NULL, vehicle_id=NULL,"
+                        " claimed_at=NULL WHERE vehicle_type='van'"
+                        " AND vehicle_id=?", (vid,)).rowcount
+        nc = db.execute("DELETE FROM van_claims WHERE van_id=?",
+                        (vid,)).rowcount
+        db.execute("DELETE FROM team_vans WHERE id=?", (vid,))
+        db.commit()
+    return jsonify({"deleted": vid, "tools_unassigned": tu,
+                    "claims_removed": nc})
 
 
-@app.route("/api/tools/<int:tid>/unclaim", methods=["POST"])
-def api_tool_unclaim(tid):
-    execute("UPDATE tools SET claimed_by=NULL, claimed_at=NULL WHERE id=?", (tid,))
-    return jsonify(q_one("SELECT * FROM tools WHERE id=?", (tid,)))
+@app.route("/api/vans/<int:vid>/claims", methods=["POST"])
+def api_van_claim(vid):
+    """A student (or parent) rides in a team van for an event. The van
+    takes riders only when it has seats AND a designated parent driver
+    who RSVP'd going for this event — and that driver isn't already
+    driving a carpool for the same event. Otherwise the van is
+    tools-only for the event. Capacity, waitlist, and dedupe mirror
+    carpool seats."""
+    v = q_one("SELECT * FROM team_vans WHERE id=?", (vid,))
+    if not v:
+        return err("team van not found", 404)
+    b = request.get_json(force=True)
+    if not b.get("event_id") or not b.get("person_name"):
+        return err("event_id and person_name required")
+    if not v.get("seats"):
+        return err("this van doesn't take riders — set its seats first")
+    drv = q_one("SELECT id, name FROM users WHERE id=?",
+                (v.get("driver_user_id"),)) if v.get("driver_user_id") else None
+    if not drv:
+        return err("this van has no designated driver yet")
+    going = {r["person_name"] for r in q_all(
+        "SELECT person_name FROM rsvps WHERE event_id=? AND"
+        " person_kind='parent' AND status='going'", (b["event_id"],))}
+    if drv["name"] not in going:
+        return err("the van's driver must RSVP as attending for this"
+                   " event first")
+    car_driver = q_one("SELECT id FROM carpools WHERE event_id=? AND"
+                       " driver_user_id=?", (b["event_id"], drv["id"]))
+    if car_driver:
+        return err("the van's driver is already driving a carpool for"
+                   " this event")
+    if not is_attending(b["event_id"], b.get("member_id"), b.get("person_kind")):
+        return err("only people attending this event can ride — RSVP"
+                   " as going first")
+    with _lock:
+        db = get_db()
+        if b.get("member_id"):
+            dup = db.execute(
+                "SELECT id FROM van_claims WHERE van_id=? AND event_id=?"
+                " AND member_id=? AND person_kind=?",
+                (vid, b["event_id"], b["member_id"],
+                 b.get("person_kind"))).fetchone()
+        else:
+            dup = db.execute(
+                "SELECT id FROM van_claims WHERE van_id=? AND event_id=?"
+                " AND member_id IS NULL AND person_name=? AND person_kind=?",
+                (vid, b["event_id"], b["person_name"],
+                 b.get("person_kind"))).fetchone()
+        if dup:
+            return err("already riding in this van — claimed or waitlisted",
+                       409)
+        taken = db.execute(
+            "SELECT COUNT(*) n FROM van_claims WHERE van_id=? AND"
+            " event_id=? AND status='claimed'",
+            (vid, b["event_id"])).fetchone()["n"]
+        status = "claimed" if taken < v["seats"] else "waitlisted"
+        cur = db.execute(
+            "INSERT INTO van_claims (van_id, event_id, member_id,"
+            " person_kind, person_name, status) VALUES (?,?,?,?,?,?)",
+            (vid, b["event_id"], b.get("member_id"), b.get("person_kind"),
+             b["person_name"], status))
+        db.commit()
+        clid = cur.lastrowid
+    return jsonify(q_one("SELECT * FROM van_claims WHERE id=?", (clid,))), 201
+
+
+@app.route("/api/van_claims/<int:clid>", methods=["DELETE"])
+def api_van_claim_delete(clid):
+    cl = q_one("SELECT * FROM van_claims WHERE id=?", (clid,))
+    if not cl:
+        return err("claim not found", 404)
+    with _lock:
+        db = get_db()
+        db.execute("DELETE FROM van_claims WHERE id=?", (clid,))
+        promoted = None
+        if cl["status"] == "claimed":
+            claimed_ids = {(r["member_id"], r["person_kind"]) for r in db.execute(
+                "SELECT member_id, person_kind FROM van_claims"
+                " WHERE van_id=? AND event_id=? AND status='claimed'",
+                (cl["van_id"], cl["event_id"]))}
+            claimed_names = {(r["person_name"], r["person_kind"]) for r in db.execute(
+                "SELECT person_name, person_kind FROM van_claims"
+                " WHERE van_id=? AND event_id=? AND status='claimed'",
+                (cl["van_id"], cl["event_id"]))}
+            for nxt in db.execute(
+                    "SELECT * FROM van_claims WHERE van_id=? AND event_id=?"
+                    " AND status='waitlisted' ORDER BY created_at, id",
+                    (cl["van_id"], cl["event_id"])):
+                if ((nxt["member_id"], nxt["person_kind"]) in claimed_ids
+                        or (nxt["person_name"], nxt["person_kind"]) in claimed_names):
+                    continue
+                db.execute("UPDATE van_claims SET status='claimed' WHERE id=?",
+                           (nxt["id"],))
+                promoted = dict(nxt)
+                break
+        db.commit()
+    return jsonify({"deleted": clid, "promoted": promoted})
 
 
 @app.route("/api/hotels", methods=["POST"])

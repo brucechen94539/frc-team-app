@@ -2069,14 +2069,19 @@ async function renderTravel() {
   const ev = t.event;
   // Mentor driver pool: parent accounts (not disabled) not already
   // driving for this event. Parents never see it — their driver is
-  // themselves, auto-filled and grayed out below.
+  // themselves, auto-filled and grayed out below. allUsers is kept
+  // for the van driver dropdown (a van's driver is a global
+  // designation, not per-event).
   let poolUsers = [];
+  let allUsers = [];
   if (MENTOR()) {
-    const allUsers = await GET("/api/users").catch(() => []);
+    allUsers = await GET("/api/users").catch(() => []);
     const taken = new Set((t.carpools || []).map((c) => c.driver_user_id).filter(Boolean));
     poolUsers = allUsers.filter((u) => u.role === "parent" && !u.disabled && !taken.has(u.id));
   }
   const poolOpts = poolUsers.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
+  const vanDriverOpts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
+    .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
   const vans = await GET("/api/team-vans").catch(() => []);
   const people = personOptions();
   const popts = people.map((p) =>
@@ -2089,22 +2094,35 @@ async function renderTravel() {
   const attOpts = attPeople.map(optJSON).join("");
   const attParents = attPeople.filter((p) => p.kind === "parent").map(optJSON).join("");
   const attStudents = (t.attendees || []).filter((a) => a.person_kind === "student");
-  const knownParents = new Set([
-    ...(t.attendees || []).filter((a) => a.person_kind === "parent")
-      .map((a) => normName(a.person_name)),
-    ...(t.parent_names || []).map((n) => normName(n))]);
-  const parentDrivers = (t.carpools || []).filter((c) =>
-    knownParents.has(normName(c.driver_name)));
-  const driverOpts = parentDrivers.map((c) => {
-    const v = vehicleTip(c.vehicle);
-    return `<option value="${esc(c.driver_name)}">${esc(v ? `${c.driver_name} · ${v}` : c.driver_name)}</option>`;
-  }).join("");
-  const vanOpts = vans.map((vn) => `<option value="${esc(vn.name)}">\u{1F69A} Team van: ${esc(vn.name)}</option>`).join("");
-  const vanNames = new Set(vans.map((vn) => normName(vn.name)));
   const students = attStudents.map((a) =>
     `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
   const studentNames = attStudents.map((a) =>
     chipButton(a.person_name, a.person_name)).join("");
+  // Ride status per attendee (RSVP going/partial): claimed on a
+  // carpool or van, driving, or still needing a ride. Waitlisted
+  // counts as needing a ride — no seat yet. Matching mirrors the
+  // carpool cards: member id + kind, or name + kind.
+  const onRide = (claims, a) => (claims || []).some((x) =>
+    (x.member_id && x.member_id === a.member_id && x.person_kind === a.person_kind) ||
+    (normName(x.person_name) === normName(a.person_name) && x.person_kind === a.person_kind));
+  const rideStatus = (a) => {
+    for (const c of t.carpools || [])
+      if (onRide(c.claims, a)) return {label: `ride on ${c.driver_name}'s car`, cls: "green"};
+    for (const v of t.event_vans || [])
+      if (onRide(v.claims, a)) return {label: `ride in team van ${v.name}`, cls: "green"};
+    if ((t.carpools || []).some((c) => normName(c.driver_name) === normName(a.person_name))) return {label: "driving", cls: ""};
+    if ((t.event_vans || []).some((v) => normName(v.driver_name) === normName(a.person_name))) return {label: "driving", cls: ""};
+    return {label: "needs ride", cls: "amber"};
+  };
+  // Mentor vehicle dropdown for a tool row: event carpools + team
+  // vans, with the row's current vehicle preselected.
+  const vehOptsFor = (x) => {
+    const cur = x.vehicle_type ? `${x.vehicle_type}:${x.vehicle_id}` : "";
+    const opts = [
+      ...(t.carpools || []).map((c) => ({v: `carpool:${c.id}`, l: `${c.driver_name}'s car`})),
+      ...vans.map((v) => ({v: `van:${v.id}`, l: `\u{1F69A} Team van: ${v.name}`}))];
+    return opts.map((o) => `<option value="${o.v}"${o.v === cur ? " selected" : ""}>${esc(o.l)}</option>`).join("");
+  };
   v.innerHTML = `
   <div class="card"><h2>Travel &amp; Logistics</h2>
   <p class="sub">Carpools, tool sign-up, and hotel assignments — organized per event.</p>
@@ -2156,44 +2174,112 @@ async function renderTravel() {
     </div>`).join("") || '<p class="sub">No carpools posted for this event yet.</p>'}
   </div></div>
 
+  <div class="card"><h3>Ride status</h3>
+  <p class="sub">Everyone RSVP'd going or partial for this event, and whether they have a ride.</p>
+  <div class="row" style="flex-wrap:wrap">${(t.attendees || []).map((a) => {
+    const r = rideStatus(a);
+    return `<span class="pill ${r.cls}">${esc(a.person_name)} · ${r.label}</span>`;
+  }).join("") || '<span class="sub">Nobody RSVP\'d yet.</span>'}</div></div>
+
+  <div class="card"><h3>Team van rides</h3>
+  <p class="sub">Vans going to this event — a van takes riders only with seats set and a designated parent driver who RSVP'd going.</p>
+  <div id="vr-list">
+  ${(t.event_vans || []).map((v) => `
+    <div class="card" id="vr-card-${v.id}"><div class="row"><b>\u{1F69A} Team van ${esc(v.name)}</b>
+      <span class="sub">driven by ${esc(v.driver_name)}</span>
+      <span class="pill ${v.seats_open ? "green" : "red"}">${v.seats_open} of ${v.seats} seats open</span></div>
+    <div>Riders: ${v.claims.map((x) =>
+      `<span class="pill">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="release">✕</a></span>`).join("") || '<span class="sub">none yet</span>'}</div>
+    ${v.waitlist.length ? `<div>Waitlist: ${v.waitlist.map((x) =>
+      `<span class="pill amber">${esc(x.person_name)} <a href="#" data-vunclaim="${x.id}" title="remove">✕</a></span>`).join("")}</div>` : ""}
+    ${(() => {
+      const onRideV = new Set();
+      [...v.claims, ...v.waitlist].forEach((x) => {
+        onRideV.add(`${x.member_id}:${x.person_kind}`);
+        onRideV.add(`${normName(x.person_name)}:${x.person_kind}`);
+      });
+      const vpsOpts = attPeople.filter((p) =>
+        !onRideV.has(`${p.member_id}:${p.kind}`)
+        && !onRideV.has(`${normName(p.name.replace(/ \\((student|parent)\\)$/, ""))}:${p.kind}`)).map(optJSON).join("");
+      return vpsOpts
+        ? `<div class="row" style="margin-top:6px"><select id="vps-${v.id}">${vpsOpts}</select>
+      <button class="btn small" data-vclaim="${v.id}">Claim seat</button></div>`
+        : `<div class="sub" style="margin-top:6px">Everyone attending is already riding in this van.</div>`;
+    })()}
+    </div>`).join("") || '<p class="sub">No team vans going to this event yet — designate a driver who RSVP\'d going, and set the van\'s seats.</p>'}
+  </div></div>
+
   <div class="card"><h3>Team vans</h3>
-  <p class="sub">Team-owned vans can haul tools too, alongside parent drivers.</p>
+  <p class="sub">Team-owned vans can haul tools too, alongside parent drivers. A van takes student riders only with a designated parent driver and seats set — the driver must RSVP going for each event the van serves.</p>
   <div class="row mo">
     <input id="tv-name" placeholder="Van name *" style="flex:1;min-width:160px">
-    <input id="tv-notes" placeholder="Notes (capacity, keys…)" style="flex:1;min-width:120px">
+    <input id="tv-notes" placeholder="Notes (keys…)" style="flex:1;min-width:120px">
+    <select id="tv-driver" style="flex:1;min-width:160px"><option value="">Driver: none yet</option>${vanDriverOpts}</select>
+    <input id="tv-seats" placeholder="Seats" inputmode="numeric" style="max-width:70px">
     <button class="btn small" id="tv-add">Add van</button>
   </div>
   <div style="margin-top:8px">
-  ${vans.map((vn) => `<div class="row" style="margin:6px 0"><span><b>${esc(vn.name)}</b>${vn.notes ? ` <span class="sub">${esc(vn.notes)}</span>` : ""}</span>
-    ${MENTOR() ? `<button class="btn small ghost" data-tvdel="${vn.id}">Delete</button>` : ""}</div>`).join("") || '<p class="sub">No team vans yet.</p>'}
+  ${vans.map((vn) => {
+    const dn = (allUsers.find((u) => u.id === vn.driver_user_id) || {}).name
+      || ((t.event_vans || []).find((v) => v.id === vn.id) || {}).driver_name || "";
+    return `<div class="row" id="tv-row-${vn.id}" style="margin:6px 0"><span><b>${esc(vn.name)}</b>${vn.notes ? ` <span class="sub">${esc(vn.notes)}</span>` : ""}${dn ? ` <span class="sub">driven by ${esc(dn)}</span>` : ""}${vn.seats ? ` <span class="pill">${vn.seats} seats</span>` : ` <span class="sub">tools-only</span>`}</span>
+    ${MENTOR() ? `<button class="btn small ghost" data-tvedit="${vn.id}">Edit</button><button class="btn small ghost" data-tvdel="${vn.id}">Delete</button>` : ""}</div>`;
+  }).join("") || '<p class="sub">No team vans yet.</p>'}
   </div></div>
 
   <div class="card"><h3>Tool sign-up</h3>
-  <p class="sub">Mentors list what the event needs; parent drivers and team vans claim what they'll haul.</p>
+  <p class="sub">Mentors list what the event needs; tools ride in event carpools and team vans. Every tool starts unassigned until a mentor or its vehicle's driver confirms it.</p>
   <div class="row mo">
     <input id="tl-name" placeholder="Tool or gear needed *" style="flex:2;min-width:160px">
     <input id="tl-qty" placeholder="Qty" inputmode="numeric" style="max-width:70px">
     <input id="tl-notes" placeholder="Notes" style="flex:1;min-width:120px">
     <button class="btn small" id="tl-add">Add</button>
   </div>
-  <div style="margin-top:8px">
-  ${t.tools.map((x) => {
-    const driver = (t.carpools || []).find((c) => normName(c.driver_name) === normName(x.claimed_by));
-    const veh = driver ? vehicleTip(driver.vehicle) : "";
-    const isVan = vanNames.has(normName(x.claimed_by || ""));
-    return `<div class="row" style="margin:6px 0">
-    <span><b>${esc(x.name)}</b> <span class="sub">\u00d7${x.qty}</span></span>
-    ${x.claimed_by ? (isVan
-      ? `<span class="pill green">\u{1F69A} loaded in team van ${esc(x.claimed_by)}</span>
-      <button class="btn small ghost" data-tunclaim="${x.id}">Unclaim</button>`
-      : `<span class="pill green">\u{1F697} loaded in ${esc(x.claimed_by)}'s car</span>
-      ${veh ? `<span class="pill" title="${esc(veh)}">\u{1F697} vehicle</span>` : ""}
-      <button class="btn small ghost" data-tunclaim="${x.id}">Unclaim</button>`)
-    : (driverOpts || vanOpts) ? `<select id="tls-${x.id}">${driverOpts}${vanOpts}</select>
-      <button class="btn small" data-tclaim="${x.id}">Claim</button>`
-    : `<span class="sub">No haulers yet \u2014 post a carpool ride above or add a team van above.</span>`}
-  </div>`;}).join("") || '<p class="sub">Nothing listed yet.</p>'}
-  </div></div>
+  <div class="row mo" style="margin-top:6px">
+    <a class="btn small ghost" href="/api/events/${travelEventId}/tools.csv">Export CSV</a>
+    <input type="file" id="tl-import-file" accept=".csv" style="max-width:220px">
+    <button class="btn small ghost" id="tl-import">Import CSV</button>
+  </div>
+  ${t.tools.length ? `<table class="acct" style="margin-top:8px"><thead><tr><th>Tool</th><th>Amount</th><th>Vehicle</th><th>Actions</th></tr></thead>
+  <tbody>${t.tools.map((x) => {
+    let veh = '<span class="sub">—</span>';
+    if (x.vehicle_type === "carpool") {
+      const c = (t.carpools || []).find((c) => c.id === x.vehicle_id);
+      veh = c ? `${esc(c.driver_name)}'s car${vehicleTip(c.vehicle) ? ` <span class="pill" title="${esc(vehicleTip(c.vehicle))}">\u{1F697} vehicle</span>` : ""}` : '<span class="sub">—</span>';
+    } else if (x.vehicle_type === "van") {
+      const v = vans.find((v) => v.id === x.vehicle_id);
+      veh = v ? `\u{1F69A} Team van ${esc(v.name)}` : '<span class="sub">—</span>';
+    }
+    // Actions: mentors assign anywhere + manage the pool; parents
+    // only their own vehicles (assign unassigned, release their own);
+    // students read-only.
+    let acts = "";
+    const ownVehicles = [
+      ...(t.carpools || []).filter((c) => c.driver_user_id === ME.id)
+        .map((c) => ({type: "carpool", id: c.id, label: `${c.driver_name}'s car`})),
+      ...vans.filter((v) => v.driver_user_id === ME.id)
+        .map((v) => ({type: "van", id: v.id, label: `Team van ${v.name}`}))];
+    const ownsThis = !!x.vehicle_type && ownVehicles.some((o) => o.type === x.vehicle_type && o.id === x.vehicle_id);
+    if (MENTOR()) {
+      const opts = vehOptsFor(x);
+      acts += opts
+        ? `<select id="tls-${x.id}">${opts}</select><button class="btn small" data-tassign="${x.id}">${x.vehicle_type ? "Move" : "Assign"}</button>`
+        : `<span class="sub">No haulers yet — post a carpool ride above or add a team van above.</span>`;
+      if (x.vehicle_type) acts += ` <button class="btn small ghost" data-trelease="${x.id}">Release</button>`;
+      acts += ` <button class="btn small ghost" data-tedit="${x.id}">Edit</button><button class="btn small ghost" data-tdel="${x.id}">Delete</button>`;
+    } else if (ME.role === "parent") {
+      if (!x.vehicle_type && ownVehicles.length === 1) {
+        const o = ownVehicles[0];
+        acts += `<button class="btn small" data-tassign-own="${x.id}" data-tvt="${o.type}" data-tvid="${o.id}">Load in my ${o.type === "van" ? "van" : "car"}</button>`;
+      } else if (!x.vehicle_type && ownVehicles.length > 1) {
+        acts += `<select id="tls-${x.id}">${ownVehicles.map((o) => `<option value="${o.type}:${o.id}">${esc(o.label)}</option>`).join("")}</select><button class="btn small" data-tassign="${x.id}">Assign</button>`;
+      } else if (ownsThis) {
+        acts += `<button class="btn small ghost" data-trelease="${x.id}">Release</button>`;
+      }
+    }
+    return `<tr id="tl-row-${x.id}"><td><b>${esc(x.name)}</b>${x.notes ? `<div class="sub">${esc(x.notes)}</div>` : ""}</td><td>\u00d7${x.qty}</td><td>${veh}</td><td>${acts || '<span class="sub">—</span>'}</td></tr>`;
+  }).join("")}</tbody></table>` : '<p class="sub">Nothing listed yet.</p>'}
+  </div>
 
   <div class="card"><h3>Hotel assignments</h3>
   ${t.hotel ? hotelHTML(t.hotel, students, attParents, studentNames, attStudents) : `
@@ -2296,8 +2382,8 @@ async function renderTravel() {
     const riders = c.claims.length + c.waitlist.length;
     if (!confirm(`Remove this car from the pool?${riders ? ` ${riders} rider(s) will be released.` : ""}`)) return;
     try {
-      await DEL(`/api/carpools/${c.id}`);
-      toast("Car removed from the pool."); renderTravel();
+      const r = await DEL(`/api/carpools/${c.id}`);
+      toast(r.tools_unassigned ? `Car removed from the pool; ${r.tools_unassigned} tool(s) back in the pool.` : "Car removed from the pool."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   }));
   v.querySelectorAll("[data-claim]").forEach((b) => b.addEventListener("click", async () => {
@@ -2323,33 +2409,142 @@ async function renderTravel() {
       qty: parseInt($("tl-qty").value, 10) || 1, notes: $("tl-notes").value.trim()});
     toast("Tool added."); renderTravel();
   });
-  v.querySelectorAll("[data-tclaim]").forEach((b) => b.addEventListener("click", async () => {
+  // Tool assignments: mentors pick any vehicle, parents only their
+  // own. The server enforces ownership; the buttons just don't offer
+  // what the caller can't do.
+  const parseVeh = (s) => {
+    const [type, id] = (s || "").split(":");
+    return {vehicle_type: type, vehicle_id: +id};
+  };
+  v.querySelectorAll("[data-tassign]").forEach((b) => b.addEventListener("click", async () => {
+    const sel = $("tls-" + b.dataset.tassign);
+    if (!sel || !sel.value) return toast("Pick a vehicle.");
     try {
-      await POST(`/api/tools/${b.dataset.tclaim}/claim`,
-        {claimed_by: $("tls-" + b.dataset.tclaim).value});
-      toast("Loaded — thank you for hauling!");
+      await POST(`/api/tools/${b.dataset.tassign}/assign`, parseVeh(sel.value));
+      toast("Tool assigned."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
+  v.querySelectorAll("[data-tassign-own]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await POST(`/api/tools/${b.dataset.tassignOwn}/assign`,
+        {vehicle_type: b.dataset.tvt, vehicle_id: +b.dataset.tvid});
+      toast("Tool assigned."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
+  v.querySelectorAll("[data-trelease]").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await POST(`/api/tools/${b.dataset.trelease}/release`);
+      toast("Tool back in the pool."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
+  v.querySelectorAll("[data-tedit]").forEach((b) => b.addEventListener("click", () => {
+    const x = (t.tools || []).find((y) => y.id === +b.dataset.tedit);
+    if (!x) return;
+    const row = $("tl-row-" + x.id);
+    row.innerHTML = `<td><input id="te-name-${x.id}" value="${esc(x.name)}"></td>
+      <td><input id="te-qty-${x.id}" inputmode="numeric" value="${x.qty}" style="max-width:60px"></td>
+      <td><input id="te-notes-${x.id}" value="${esc(x.notes || "")}"></td>
+      <td><button class="btn small" id="te-save-${x.id}">Save</button><button class="btn small ghost" id="te-cancel-${x.id}">Cancel</button></td>`;
+    $("te-cancel-" + x.id).addEventListener("click", () => renderTravel());
+    $("te-save-" + x.id).addEventListener("click", async () => {
+      const qty = parseInt($("te-qty-" + x.id).value, 10);
+      if (!$("te-name-" + x.id).value.trim() || !qty || qty < 1) return toast("Name and qty (1+) are required.");
+      try {
+        await PATCH(`/api/tools/${x.id}`, {name: $("te-name-" + x.id).value.trim(), qty, notes: $("te-notes-" + x.id).value.trim()});
+        toast("Tool updated."); renderTravel();
+      } catch (e) { toast("Error: " + e.message); }
+    });
+  }));
+  v.querySelectorAll("[data-tdel]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this tool from the pool?")) return;
+    try {
+      await DEL(`/api/tools/${b.dataset.tdel}`);
+      toast("Tool deleted."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
+  const tlImport = $("tl-import");
+  if (tlImport) tlImport.addEventListener("click", async () => {
+    const file = $("tl-import-file").files[0];
+    if (!file) return toast("Choose a CSV file first.");
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch(`/api/events/${travelEventId}/tools/import`, {method: "POST", body: fd, credentials: "same-origin"});
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "import failed");
+      let msg = `Tools imported: ${data.added} added, ${data.updated} updated.`;
+      if (data.skipped.length) msg += ` Skipped: ${data.skipped.slice(0, 3).join("; ")}${data.skipped.length > 3 ? ` (+${data.skipped.length - 3} more)` : ""}`;
+      if (data.vehicles_unmatched.length) msg += ` Vehicles not found (left unassigned): ${data.vehicles_unmatched.slice(0, 3).join(", ")}`;
+      toast(msg); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  });
+  // Team van rides: claim a seat / release, mirroring carpool seats.
+  v.querySelectorAll("[data-vclaim]").forEach((b) => b.addEventListener("click", async () => {
+    const p = JSON.parse($("vps-" + b.dataset.vclaim).value.replace(/&#39;/g, "'"));
+    try {
+      const r = await POST(`/api/vans/${b.dataset.vclaim}/claims`, {
+        event_id: travelEventId, member_id: p.member_id, person_kind: p.kind,
+        person_name: p.name.replace(/ \((student|parent)\)$/, "")});
+      toast(r.status === "waitlisted" ? "Van is full — added to the waitlist." : "Seat claimed.");
       renderTravel();
     } catch (e) { toast("Error: " + e.message); }
+  }));
+  v.querySelectorAll("[data-vunclaim]").forEach((a) => a.addEventListener("click", async (e) => {
+    e.preventDefault();
+    const r = await DEL(`/api/van_claims/${a.dataset.vunclaim}`);
+    toast(r.promoted ? `${r.promoted.person_name} promoted from the waitlist.` : "Released.");
+    renderTravel();
   }));
   const tvAdd = $("tv-add");
   if (tvAdd) tvAdd.addEventListener("click", async () => {
     const name = $("tv-name").value.trim();
     if (!name) { toast("Van name is required."); return; }
+    const seats = parseInt($("tv-seats").value, 10);
     try {
-      await POST("/api/team-vans", {name, notes: $("tv-notes").value.trim()});
+      await POST("/api/team-vans", {name, notes: $("tv-notes").value.trim(),
+        driver_user_id: $("tv-driver").value ? +$("tv-driver").value : null,
+        seats: seats || null});
       toast("Van added."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   });
+  v.querySelectorAll("[data-tvedit]").forEach((b) => b.addEventListener("click", () => {
+    const vn = vans.find((y) => y.id === +b.dataset.tvedit);
+    if (!vn) return;
+    const row = $("tv-row-" + vn.id);
+    // Keep the current driver selectable even if they left the pool
+    // (e.g. disabled since) — otherwise saving would silently clear them.
+    let drvOpts = vanDriverOpts;
+    const curDrv = allUsers.find((u) => u.id === vn.driver_user_id);
+    if (curDrv) {
+      if (drvOpts.includes(`value="${curDrv.id}"`))
+        drvOpts = drvOpts.replace(`value="${curDrv.id}"`, `value="${curDrv.id}" selected`);
+      else
+        drvOpts = `<option value="${curDrv.id}" selected>${esc(curDrv.name)}</option>` + drvOpts;
+    }
+    row.innerHTML = `<span style="flex:1"><input id="tve-name-${vn.id}" value="${esc(vn.name)}" style="min-width:120px">
+      <input id="tve-notes-${vn.id}" value="${esc(vn.notes || "")}" style="min-width:120px">
+      <select id="tve-driver-${vn.id}"><option value="">Driver: none yet</option>${drvOpts}</select>
+      <input id="tve-seats-${vn.id}" inputmode="numeric" value="${vn.seats || ""}" placeholder="Seats" style="max-width:70px"></span>
+      <button class="btn small" id="tve-save-${vn.id}">Save</button><button class="btn small ghost" id="tve-cancel-${vn.id}">Cancel</button>`;
+    $("tve-cancel-" + vn.id).addEventListener("click", () => renderTravel());
+    $("tve-save-" + vn.id).addEventListener("click", async () => {
+      const seats = parseInt($("tve-seats-" + vn.id).value, 10);
+      if (!$("tve-name-" + vn.id).value.trim()) return toast("Van name is required.");
+      try {
+        await PATCH(`/api/team-vans/${vn.id}`, {name: $("tve-name-" + vn.id).value.trim(),
+          notes: $("tve-notes-" + vn.id).value.trim(),
+          driver_user_id: $("tve-driver-" + vn.id).value ? +$("tve-driver-" + vn.id).value : null,
+          seats: seats || null});
+        toast("Van updated."); renderTravel();
+      } catch (e) { toast("Error: " + e.message); }
+    });
+  }));
   v.querySelectorAll("[data-tvdel]").forEach((b) =>
     b.addEventListener("click", async () => {
-      if (!confirm("Delete this team van?")) return;
-      await DEL(`/api/team-vans/${b.dataset.tvdel}`);
-      toast("Van deleted."); renderTravel();
+      if (!confirm("Delete this team van? Its tools go back to the pool and its riders are released.")) return;
+      const r = await DEL(`/api/team-vans/${b.dataset.tvdel}`);
+      toast(`Van deleted.${r.tools_unassigned ? ` ${r.tools_unassigned} tool(s) back in the pool.` : ""}${r.claims_removed ? ` ${r.claims_removed} rider(s) released.` : ""}`); renderTravel();
     }));
-  v.querySelectorAll("[data-tunclaim]").forEach((b) => b.addEventListener("click", async () => {
-    await POST(`/api/tools/${b.dataset.tunclaim}/unclaim`);
-    toast("Unclaimed."); renderTravel();
-  }));
   v.querySelectorAll("[data-rvol]").forEach((b) => b.addEventListener("click", async () => {
     const sel = $("rp-" + b.dataset.rvol);
     if (!sel.value) return toast("Pick which parent is volunteering.");

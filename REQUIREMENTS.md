@@ -464,19 +464,57 @@ well as in the UI.
 
 ### Tools & equipment
 
-### Tools & equipment
-
-- Mentors list the tools/gear an event needs. Tools are **hauled by parent
-  drivers**: the claim picker lists only the event's parent drivers with
-  their cars (driver + vehicle detail), never students. A claimed tool
-  shows as "loaded in <driver>'s car" with the vehicle tooltip. Anyone
-  signed in can claim a tool for a driver and unclaim it.
-- **Team vans** haul tools too: mentors manage a team-wide van list in
-  Travel & Logistics (`GET|POST /api/team-vans`, `DELETE /api/team-vans/<id>`,
-  mentor/admin-only for writes), and vans appear in every event's tool-claim
-  picker as "Team van: <name>". Claiming by a van name is allowed without
-  the parent-driver/carpool checks, and a van-hauled tool shows as
-  "loaded in team van <name>".
+- **Tools pool (mentors only):** mentors list the tools/gear an event
+  needs. The pool renders as a table — **Name, Amount, Vehicle** —
+  with notes under the name. Mentors add, edit (name/qty/notes), and
+  delete rows. Every tool starts **unassigned** until a mentor or its
+  vehicle's driver confirms it.
+- **Assignment is by vehicle id, not driver name**
+  (`tools.vehicle_type` = 'carpool'|'van' + `vehicle_id`). A tool
+  stays with the *car* when a mentor reassigns the car's driver, and
+  deleting a car or van sends its tools back to the pool (reported in
+  the delete response) instead of leaving them pointed at a ghost.
+  Old name-based assignments were migrated once at boot (carpool
+  driver for the event first, else van name; unmatched names —
+  including every carpool wiped by the driver-account clean slate —
+  fell back to unassigned).
+- **Who can assign/release:** mentors may assign any tool to any
+  event carpool or any team van, and release or move any tool. A
+  parent may only load a vehicle they drive — their own carpool, or a
+  van they are designated to drive — and may only release a tool from
+  their own vehicle; moving a tool off someone else's vehicle is a
+  mentor's job. Students see the table read-only (they used to see
+  Claim buttons, and claim/unclaim had no permission checks at all).
+- **One row = one vehicle, whole quantity.** Splitting a quantity
+  across vehicles means two rows (e.g. ×6 and ×4).
+- **CSV backup/import (mentors only):** `GET /api/events/<id>/tools.csv`
+  exports Name, Qty, Notes, Vehicle (carpool driver name, or
+  "Team van X", blank when unassigned) — the same columns the import
+  accepts. `POST /api/events/<id>/tools/import` upserts by name
+  (case-insensitive) and never deletes: new rows are added, existing
+  rows get qty/notes updated, and a vehicle name that matches an event
+  carpool driver or a van assigns the row — an unmatched vehicle
+  leaves the row unassigned and is reported, along with skipped rows.
+  Only columns present in the file overwrite on update. Single-step
+  (unlike the roster/events preview-confirm flow) because nothing
+  here deletes; the summary is the confirmation record.
+- **Team vans:** mentors manage a team-wide van list in Travel &
+  Logistics. A van has an optional **designated parent driver**
+  (parent account) and **passenger seats** (blank = tools-only).
+  Mentors add, edit (name/notes/driver/seats), and delete vans;
+  deleting a van also releases its riders and unassigns its tools.
+- **Van rides:** a van takes student riders for an event only when
+  it has seats AND its designated driver RSVP'd going for that event
+  AND that driver isn't already driving a carpool for the same event
+  — otherwise the van is tools-only for the event. Eligible vans show
+  as ride cards with seats, riders, waitlist, and claim/release,
+  mirroring carpools (capacity → waitlist → auto-promote).
+- **Ride status pane:** Travel shows every RSVP'd going/partial
+  person for the event with a bubble — **'needs ride'**, **'ride on
+  XYZ's car'**, **'ride in team van XYZ'**, or **'driving'** for
+  drivers. Waitlisted riders count as needing a ride (no seat yet).
+  'Needs ride' means not on any posted ride; a parent driving
+  themselves without posting a carpool still shows as needing one.
 
 ### Hotels & room parents
 
