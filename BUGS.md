@@ -25,7 +25,7 @@ _None right now._
   table and shows the note, expand restores it, the collapsed state
   survives a re-render, and an unassigned tool shows a red pill
   while an assigned one shows green.
-  (commit TBD)
+  (commit deed08ea)
 
 ### Seat picker offered drivers and already-seated riders; Post Ride pool ignored van drivers (2026-10-28)
 - **Reported:** Bruce (screenshot) — on Jessica Ting's car card, the
