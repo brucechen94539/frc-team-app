@@ -4,6 +4,7 @@
    in index.html / app.js; this file is a pure reskin. */
 /* Dark is the default theme; light overrides below. */
 :root{
+  color-scheme:dark;
   --bg:#0b1220;
   --card:#111b2e;
   --card2:#182642;
@@ -31,6 +32,7 @@
   --radius:10px;
 }
 [data-theme="light"]{
+  color-scheme:light;
   --bg:#f1f5f9;
   --card:#ffffff;
   --card2:#f8fafc;
@@ -312,3 +314,88 @@ pre.welcome{background:var(--fieldbg);border:1px solid var(--line);border-radius
 .modal-card{background:var(--card);border:1px solid var(--line);
   border-radius:12px;padding:20px;min-width:260px;
   box-shadow:0 12px 32px rgba(0,0,0,.35)}
+
+/* ---------- refined basic controls ---------- */
+/* Bare controls outside .field wrappers (pickers, role selects, search
+   boxes) used to render with browser defaults. They now share the
+   field look: same border, radius, padding and indigo focus ring.
+   Buttons, file pickers and hidden inputs are excluded. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="file"]):not([type="hidden"]),
+textarea{
+  padding:10px 12px;font-size:14px;font-family:inherit;
+  border:1px solid var(--line);border-radius:8px;
+  background:var(--fieldbg);color:var(--ink);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="file"]):not([type="hidden"]):hover,
+textarea:hover{border-color:var(--muted)}
+input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="file"]):not([type="hidden"]):focus,
+textarea:focus{
+  outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+input:not([type="checkbox"]):not([type="radio"]):not([type="button"]):not([type="submit"]):not([type="file"]):not([type="hidden"]):disabled,
+textarea:disabled{opacity:.55;cursor:default}
+
+/* Dropdowns: native arrow replaced by a slim indigo chevron, with
+   room for it in the padding. The .field padding rule above would
+   otherwise cover the chevron, so .field selects get the room back. */
+select{
+  appearance:none;-webkit-appearance:none;
+  padding:10px 34px 10px 12px;font-size:14px;font-family:inherit;
+  border:1px solid var(--line);border-radius:8px;
+  background-color:var(--fieldbg);color:var(--ink);cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 12px center;
+}
+[data-theme="light"] select{
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.field select{padding-right:34px}
+select:hover{border-color:var(--muted)}
+select:focus{
+  outline:none;border-color:var(--accent);
+  box-shadow:0 0 0 3px var(--accent-soft);
+}
+select:disabled{opacity:.55;cursor:default}
+
+/* Checkboxes: custom 18px box with an indigo fill and a drawn check.
+   Pure CSS — no markup change — so every checkbox in the app picks
+   it up, including day picks, bulk selects and task checklists. */
+input[type="checkbox"]{
+  appearance:none;-webkit-appearance:none;
+  width:18px;height:18px;flex:none;margin:0;
+  vertical-align:-3px;
+  border:1.5px solid var(--muted);border-radius:5px;
+  background:var(--fieldbg);cursor:pointer;
+  display:inline-grid;place-content:center;
+  transition:border-color .15s ease, background-color .15s ease, box-shadow .15s ease;
+}
+input[type="checkbox"]:hover{border-color:var(--accent)}
+input[type="checkbox"]:checked{background:var(--accent);border-color:var(--accent)}
+input[type="checkbox"]:checked::before{
+  content:"";display:block;width:10px;height:6px;
+  border-left:2px solid #fff;border-bottom:2px solid #fff;
+  transform:rotate(-45deg) translate(0,-1px);
+}
+input[type="checkbox"]:focus-visible{outline:none;box-shadow:0 0 0 3px var(--accent-soft)}
+input[type="checkbox"]:disabled{opacity:.45;cursor:default}
+.checkline input[type="checkbox"]{margin-top:3px}
+
+/* Radios: same treatment, round, with an indigo dot. */
+input[type="radio"]{
+  appearance:none;-webkit-appearance:none;
+  width:18px;height:18px;flex:none;margin:0;
+  vertical-align:-3px;
+  border:1.5px solid var(--muted);border-radius:50%;
+  background:var(--fieldbg);cursor:pointer;
+  display:inline-grid;place-content:center;
+  transition:border-color .15s ease, box-shadow .15s ease;
+}
+input[type="radio"]:hover{border-color:var(--accent)}
+input[type="radio"]:checked{border-color:var(--accent)}
+input[type="radio"]:checked::before{
+  content:"";display:block;width:8px;height:8px;border-radius:50%;
+  background:var(--accent);
+}
+input[type="radio"]:focus-visible{outline:none;box-shadow:0 0 0 3px var(--accent-soft)}
+input[type="radio"]:disabled{opacity:.45;cursor:default}

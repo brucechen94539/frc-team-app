@@ -9,6 +9,25 @@ _None right now._
 
 ## Fixed
 
+### Duplicate members/accounts after remove-and-recreate (2026-10-29)
+
+**Reported** (Bruce): after removing and re-creating users, lists showed
+dupes — Joe Blow, Zander Chen, and so on. **Root cause:** deleting an
+account archives only its self-linked members, so re-creating and
+re-approving a person left two approved member rows (and a disabled
+old account next to the new one), and every picker rendered each row.
+**Fix:** a Mentor Queue **Duplicate cleanup** card (`GET
+/api/admin/duplicates` + `POST /api/admin/duplicates/merge`) that scans
+approved members and users by normalized name, suggests a survivor per
+group, and merges with conflict-aware re-pointing (colliding RSVPs,
+placements, claims, check-ins, and requests are dropped and counted;
+vehicle-colliding account dupes are skipped with a reason; the whole
+request validates against a fresh scan first). Pickers and lists dedupe
+by name in the meantime, and the roster marks dupes with an amber
+**duplicate** pill. Verified: 19 API checks (merge drops, re-points,
+blocks, validation) + 8 browser checks (card merge flow, picker once,
+roster marker) + fleet suite re-run green.
+
 ### Room-parent volunteering, parent bed, and own-only seats/beds (2026-10-29)
 - **Reported:** Bruce — three reports in one thread: (1) a parent
   should not be allowed to volunteer as room parent for any other

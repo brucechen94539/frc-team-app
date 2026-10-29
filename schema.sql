@@ -88,6 +88,8 @@ CREATE TABLE IF NOT EXISTS events (
   season       TEXT,                 -- NULL = current season; set when archived
   end_date     TEXT,                 -- multi-day: last day, YYYY-MM-DD;
                                    -- NULL = single-day (date only)
+  archived     INTEGER NOT NULL DEFAULT 0,  -- 1 = frozen: no updates
+                                   -- (distinct from season archiving)
   sample       INTEGER NOT NULL DEFAULT 0
 );
 

@@ -445,6 +445,28 @@ and `can't make it` do not count as attending.
   "mentor override" note and may file late RSVPs. Releasing a seat
   (removing an RSVP) stays allowed after the deadline, since it only
   frees a spot for the waitlist.
+- **Closed events leave the regular user's Events view:** once an
+  event's RSVP is closed, its card is hidden from students and parents
+  entirely; mentors/admins keep seeing it. Travel & Logistics and
+  Tracking are unaffected — a trip whose RSVP closed still needs its
+  rides, rooms, and attendance visible.
+- **Archive (freeze) for closed events:** a closed event's card carries
+  an **Archive** button for mentors/admins. Archiving sets
+  `events.archived` and freezes the event: every event-scoped write is
+  refused server-side (edits, delete, RSVPs, carpools and claims, vans
+  and day-drivers, hotels, rooms, occupants, room parents, rooming
+  requests, tools, tool assignments, check-ins, and the tools CSV
+  import) with "this event is archived — unarchive it to make
+  changes"; reads (including Travel) keep working. An archived card
+  shows an **Archived** pill, hides Edit/Delete and the RSVP picker,
+  and offers **Unarchive**, which restores all writes. Only a closed
+  RSVP can be archived, and archiving travels alone in its PATCH
+  (`PATCH /api/events/<id> {archived: 1}`); a non-mentor archiving
+  attempt is refused. This freeze is distinct from **season
+  archiving**: season archive/restore skip frozen events entirely, so
+  a frozen event is never swept into a season or restored out of one.
+  Duplicate cleanup (below) is a data-cleanup operation, not an event
+  update, so it still runs on archived events.
 - When an event is full, new "going" or "partial" RSVPs join the waitlist
   and are auto-promoted as spots open; going + partial both count toward
   capacity.
@@ -772,6 +794,43 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   consistent even while the server runs, and serves it as
   `frc-team-app-backup-YYYYMMDD.db`. Restoring is copying the file back
   over `data.db` while the server is stopped.
+- **Duplicate cleanup (Mentor Queue card):** removing and re-creating
+  accounts used to leave two approved member rows (or two user rows)
+  for one person, and every picker showed the name twice. The queue's
+  **Duplicate cleanup** card scans for them (`GET /api/admin/duplicates`,
+  mentor/admin only): approved members grouped by normalized name and
+  users grouped by normalized name, each group with a suggested
+  survivor (lowest member id; for accounts, enabled with a password
+  first) pre-checked as a radio, plus a detail line (code, school,
+  grade, subteam, parent, and counts of RSVPs, beds, seats, check-ins,
+  links for members; email, role, disabled/password/2FA state, links,
+  cars, vans for accounts). **Merge into selected**
+  (`POST /api/admin/duplicates/merge`) re-points the dupe's rows onto
+  the survivor — RSVPs, check-ins, carpool and van claims, room
+  occupants, rooming requests, room parents, link requests, and user
+  links — and drops the ones that collide with a row the survivor
+  already has (same event + kind, same room + overlapping day, same
+  check-in day, same hotel request), reporting the dropped counts; the
+  survivor's own record fields are kept. Account merges are skipped
+  per dupe with a reason when both accounts drive a carpool for the
+  same event or hold conflicting van designations/day-drivers (the
+  surviving account is untouched and the dupe row stays). The whole
+  request is validated up front against a fresh scan — a survivor or
+  dupe outside the group, or a row merged twice, fails the entire
+  request with nothing applied. The scan covers approved members and
+  users only; pending/declined/archived member dupes are out of scope
+  (decline them from the queue as before). The Team accounts list
+  itself is not deduped (emails distinguish rows); the merge tool
+  handles true dupes.
+- **Picker/list dedupe:** every name picker and list collapses
+  duplicate rows by normalized name before rendering — the RSVP person
+  picker, the self-RSVP options, carpool/van seat pickers, room
+  placement pickers (placed exclusion is name-aware too), the Travel
+  attendee lists, and the room gap lines — so a duplicate row can
+  never double-book or double-count while it still exists. The roster
+  itself still shows every row (it is the record the cleanup merges),
+  with an amber **duplicate** pill on any name that appears more than
+  once.
 
 ### Sticky session
 

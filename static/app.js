@@ -6,6 +6,19 @@ const esc = (s) => String(s == null ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;")
   .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const normName = (s) => String(s == null ? "" : s).toLowerCase().replace(/\s+/g, "");
+// Lists built from member/RSVP rows can carry one person twice
+// (remove + re-create cycles leave two approved rows for one name).
+// Pickers must show each person once: first row wins (roster order
+// is lowest id first, so the original survives the dedupe).
+function dedupePeople(list, keyFn) {
+  const seen = new Set();
+  return list.filter((x) => {
+    const k = keyFn(x);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
 
 // Tap-to-toggle chip groups: the phone-friendly replacement for
 // <select multiple>. Ctrl/Cmd-click doesn't exist on touch screens, and
@@ -951,6 +964,10 @@ async function renderQueue() {
       </div></div>
     </div>
     <p class="sub">Reset password and Reset 2FA are per-row buttons in the table above.</p>
+  </div>
+  <div class="card"><h3>Duplicate cleanup</h3>
+    <p class="sub">Remove + re-create cycles leave two approved rows or two accounts for one person, and the lists show the name twice. Pick the row to keep per group: merging re-points RSVPs, seats, rooms, check-ins and links to it, then deletes the other rows (the survivor's own record fields are kept; rows that would collide after re-pointing are dropped and counted). A duplicate account whose driving collides with the survivor's is skipped with a reason.</p>
+    <div id="dup-list"><span class="sub">Loading…</span></div>
   </div>`;
   v.querySelectorAll("[data-f]").forEach((b) =>
     b.addEventListener("click", () => { queueFilter = b.dataset.f; renderQueue(); }));
@@ -994,6 +1011,56 @@ async function renderQueue() {
   renderAccounts();
   renderLinkRequests();
   renderDeletionRequests();
+  renderDupCleanup();
+}
+
+async function renderDupCleanup() {
+  const el = $("dup-list");
+  if (!el) return;
+  let d;
+  try { d = await GET("/api/admin/duplicates"); }
+  catch (e) { el.innerHTML = '<span class="sub">Could not load duplicates.</span>'; return; }
+  const groups = [...(d.members || []).map((g) => ({...g, kind: "member"})),
+    ...(d.users || []).map((g) => ({...g, kind: "user"}))];
+  if (!groups.length) {
+    el.innerHTML = '<span class="sub">No duplicates found — each approved member and account name appears once.</span>';
+    return;
+  }
+  el.innerHTML = groups.map((g, gi) => {
+    const rows = g.rows.map((r) => {
+      const detail = g.kind === "member"
+        ? `${esc(r.code)} · ${esc(r.school || "")} · grade ${esc(r.grade || "")} · ${esc(r.subteam || "no subteam")} · parent ${esc(r.parent_name || "")} · ${r.rsvps} RSVPs · ${r.placements} beds · ${r.claims} seats · ${r.checkins} check-ins · ${r.links} links`
+        : `${esc(r.email)} · ${esc(r.role)}${r.disabled ? " · disabled" : ""}${r.has_password ? "" : " · no password"}${r.totp ? " · 2FA on" : ""} · ${r.links} links · ${r.carpools} cars · ${r.vans} vans`;
+      return `<label class="row" style="margin:4px 0"><input type="radio" name="dup-${gi}" value="${r.id}"${r.id === g.suggested ? " checked" : ""}>
+        <span><b>${esc(r.name)}</b> <span class="sub">${detail}</span></span></label>`;
+    }).join("");
+    return `<div class="card" style="margin-top:8px"><b>${esc(g.name)}</b>
+      <span class="pill amber">${g.kind === "member" ? "member" : "account"}</span>
+      <span class="sub">Pick the row to keep — the rest merge into it and are deleted.</span>
+      ${rows}
+      <button class="btn small danger" data-dup-merge="${gi}">Merge into selected</button></div>`;
+  }).join("");
+  el.querySelectorAll("[data-dup-merge]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const gi = +b.dataset.dupMerge;
+      const g = groups[gi];
+      const sel = el.querySelector(`input[name="dup-${gi}"]:checked`);
+      if (!sel) return toast("Pick a row to keep first.");
+      const surv = +sel.value;
+      const dupes = g.rows.map((r) => r.id).filter((id) => id !== surv);
+      if (!dupes.length) return toast("Nothing to merge.");
+      if (!confirm(`Merge ${g.rows.length - 1} duplicate row(s) for ${g.name} into the selected row? The other rows will be deleted.`)) return;
+      try {
+        const r = await POST("/api/admin/duplicates/merge",
+          {merges: [{kind: g.kind, survivor_id: surv, dupe_ids: dupes}]});
+        const res = r.results[0];
+        const dropped = Object.entries(res.dropped || {}).filter(([, n]) => n)
+          .map(([k, n]) => `${n} ${k}`).join(", ");
+        const skipped = (res.skipped || []).map((s) => `row ${s.dupe_id}: ${s.reasons.join("; ")}`).join(" | ");
+        toast(`Merged ${res.merged.length} row(s) for ${g.name}${dropped ? ` (dropped ${dropped})` : ""}${skipped ? ` — skipped: ${skipped}` : ""}.`);
+        renderQueue();
+      } catch (e) { toast("Error: " + e.message); }
+    }));
 }
 
 async function renderDeletionRequests() {
@@ -1402,6 +1469,14 @@ async function renderRoster() {
     const hit = !q || `${m.first_name} ${m.last_name} ${m.school}`.toLowerCase().includes(q);
     return hit && (!rosterSubteam || m.assigned_subteam === rosterSubteam);
   });
+  // A name on two approved rows (remove + re-create leftovers) gets a
+  // marker pointing at the fix — the roster itself keeps showing
+  // every row, since it is the record the cleanup merges.
+  const nameCounts = {};
+  rosterCache.forEach((m) => {
+    const k = normName(`${m.first_name} ${m.last_name}`);
+    nameCounts[k] = (nameCounts[k] || 0) + 1;
+  });
   v.innerHTML = `
   <div class="card"><h2>Team Roster</h2>
   <p class="sub">${rosterCache.length} approved members</p>
@@ -1417,7 +1492,7 @@ async function renderRoster() {
   <div class="card"><table><tr><th>Code</th><th>Student</th><th>School</th><th>Subteam</th>
     <th>Parent</th><th>WhatsApp</th><th>Discovery</th></tr>
     ${rows.map((m) => `<tr><td>${esc(m.code)}</td>
-      <td><b>${esc(m.first_name)} ${esc(m.last_name)}</b></td>
+      <td><b>${esc(m.first_name)} ${esc(m.last_name)}</b>${nameCounts[normName(`${m.first_name} ${m.last_name}`)] > 1 ? ' <span class="pill amber">duplicate</span>' : ""}</td>
       <td>${esc(m.school)}</td><td>${esc(m.assigned_subteam || "—")}</td>
       <td>${esc(m.parent_name)}<br><span class="sub">${esc(m.parent_phone)}</span></td>
       <td>${esc(m.parent_whatsapp || "—")}${m.whatsapp_opt_in ? " ✓" : ""}</td>
@@ -1432,11 +1507,26 @@ async function renderRoster() {
 
 /* ---------------- events & RSVPs ---------------- */
 function personOptions() {
-  // approved members -> student + parent responder entries
-  return rosterCache.flatMap((m) => [
+  // approved members -> student + parent responder entries. Two
+  // approved rows for one child collapse to the first (lowest id);
+  // one parent of several children gets a "parent of <child>" label
+  // per child, so those entries stay distinguishable instead of
+  // collapsing into one identical label.
+  const entries = dedupePeople(rosterCache.flatMap((m) => [
     {member_id: m.id, kind: "student", name: `${m.first_name} ${m.last_name} (student)`},
-    {member_id: m.id, kind: "parent", name: `${m.parent_name} (parent)`},
-  ]);
+    {member_id: m.id, kind: "parent", name: `${m.parent_name} (parent)`,
+     _child: `${m.first_name} ${m.last_name}`, _parent: m.parent_name},
+  ]), (p) => p.kind === "student" ? `student:${normName(p.name)}`
+    : `parent:${normName(p._parent)}:${normName(p._child)}`);
+  const parentCounts = {};
+  entries.filter((p) => p.kind === "parent").forEach((p) => {
+    parentCounts[normName(p._parent)] = (parentCounts[normName(p._parent)] || 0) + 1;
+  });
+  return entries.map((p) => p.kind === "parent"
+    && parentCounts[normName(p._parent)] > 1
+    ? {member_id: p.member_id, kind: p.kind, name: p.name,
+       label: `${p._parent} (parent of ${p._child.split(" ")[0]})`}
+    : {member_id: p.member_id, kind: p.kind, name: p.name});
 }
 
 /* What the signed-in account may RSVP as: own student record and/or the
@@ -1467,7 +1557,11 @@ function selfRSVPOptions() {
     const self = ME.links.find((l) => l.kind === "self");
     if (self) opts.push({member_id: self.member_id, kind: "student",
       name: `${self.member_name} (student)`});
-    const plinks = ME.links.filter((l) => l.kind === "parent");
+    // Two links to duplicate rows for one child collapse to one
+    // option (first link wins); distinct children keep their
+    // "parent of <child>" labels.
+    const plinks = dedupePeople(ME.links.filter((l) => l.kind === "parent"),
+      (l) => normName(l.member_name));
     plinks.forEach((l) => {
       const first = (l.member_name || "").split(" ")[0];
       opts.push({member_id: l.member_id, kind: "parent",
@@ -1481,11 +1575,11 @@ function selfRSVPOptions() {
     if (m) opts.push({member_id: student, kind: "student",
       name: `${m.first_name} ${m.last_name} (student)`});
   }
-  parents.forEach((mid) => {
-    const m = rosterCache.find((x) => x.id === mid);
-    if (!m) return;
-    opts.push({member_id: mid, kind: "parent", name: `${m.parent_name} (parent)`,
-      label: parents.length > 1 ? `${m.parent_name} (parent of ${m.first_name})` : undefined});
+  const ppl = dedupePeople(parents.map((mid) => rosterCache.find((x) => x.id === mid))
+    .filter(Boolean), (m) => normName(m.parent_name));
+  ppl.forEach((m) => {
+    opts.push({member_id: m.id, kind: "parent", name: `${m.parent_name} (parent)`,
+      label: ppl.length > 1 ? `${m.parent_name} (parent of ${m.first_name})` : undefined});
   });
   return opts;
 }
@@ -1566,7 +1660,12 @@ async function renderEvents() {
   const list = events.filter((e) => {
     const q = eventSearch.toLowerCase();
     return (eventFilter === "all" || e.type === eventFilter) &&
-      (!q || (e.title + e.location).toLowerCase().includes(q));
+      (!q || (e.title + e.location).toLowerCase().includes(q)) &&
+      // Closed cards leave the regular user's view entirely; mentors
+      // and admins keep them (with the Archive button). Travel and
+      // Tracking are unaffected — a trip whose RSVP closed still
+      // needs its rides and rooms.
+      (MENTOR() || !eventClosed(e));
   });
   const cards = [];
   for (const e of list) cards.push(await eventCard(e));
@@ -1773,6 +1872,17 @@ async function renderEvents() {
       await DEL(`/api/events/${b.dataset.delev}`);
       toast("Event deleted."); renderEvents();
     }));
+  v.querySelectorAll("[data-archev]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("Archive this event? No updates will be allowed until it is unarchived.")) return;
+      try { await PATCH(`/api/events/${b.dataset.archev}`, {archived: 1}); toast("Event archived."); renderEvents(); }
+      catch (e) { toast("Error: " + e.message); }
+    }));
+  v.querySelectorAll("[data-unarchev]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try { await PATCH(`/api/events/${b.dataset.unarchev}`, {archived: 0}); toast("Event unarchived."); renderEvents(); }
+      catch (e) { toast("Error: " + e.message); }
+    }));
   v.querySelectorAll("[data-qr]").forEach((b) =>
     b.addEventListener("click", async () => {
       try {
@@ -1855,10 +1965,18 @@ async function createEvent() {
   } catch (e) { toast("Error: " + e.message); }
 }
 
+// RSVP closed = deadline passed (UTC date, same rule the server uses
+// for Archive). Non-mentors never see closed cards (renderEvents
+// filters them); mentors/admins see them with an Archive button.
+function eventClosed(e) {
+  return !!(e.deadline && e.deadline < new Date().toISOString().slice(0, 10));
+}
+
 async function eventCard(e, ro = false) {
   const d = await GET(`/api/events/${e.id}/rsvps`);
   const hc = d.headcounts;
-  const closed = e.deadline && e.deadline < new Date().toISOString().slice(0, 10);
+  const closed = eventClosed(e);
+  const archived = !!e.archived;
   const pickerOpts = MENTOR() ? personOptions() : selfRSVPOptions();
   const opts = pickerOpts.map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.label || p.name)}</option>`).join("");
@@ -1870,6 +1988,7 @@ async function eventCard(e, ro = false) {
   const clubBlocked = e.type === "club" && !MENTOR() && ME && ME.bif === false;
   let pickerRow;
   if (ro) pickerRow = "";
+  else if (archived) pickerRow = `<p class="sub">Archived — updates disabled. Unarchive to make changes.</p>`;
   else if (clubBlocked) pickerRow = `<p class="sub">Club events are only for BASIS Independent Fremont students.</p>`;
   else if (closed && !MENTOR()) pickerRow = "";
   else if (pickerOpts.length) pickerRow = `<div class="row">
@@ -1904,10 +2023,10 @@ async function eventCard(e, ro = false) {
     <div class="row"><b>${esc(e.title)}</b>
       <span class="pill">${esc(e.type)}</span>
       ${e.season ? `<span class="pill gray">${esc(e.season)}</span>` : ""}
-      ${closed ? '<span class="pill red">RSVP closed</span>' : ""}
+      ${archived ? '<span class="pill amber">Archived</span>' : closed ? '<span class="pill red">RSVP closed</span>' : ""}
       <span style="flex:1"></span>
       ${ro ? "" : `<a class="btn small ghost" href="/api/events/${e.id}.ics">Add to calendar</a>
-      ${MENTOR() ? `<button class="btn small ghost" data-qr="${e.id}">Check-in QR</button><button class="btn small ghost" data-dupev="${e.id}">Duplicate</button><button class="btn small ghost" data-editev="${e.id}">Edit</button><button class="btn small danger" data-delev="${e.id}">Delete</button>` : ""}`}</div>
+      ${MENTOR() ? `<button class="btn small ghost" data-qr="${e.id}">Check-in QR</button><button class="btn small ghost" data-dupev="${e.id}">Duplicate</button>${archived ? "" : `<button class="btn small ghost" data-editev="${e.id}">Edit</button><button class="btn small danger" data-delev="${e.id}">Delete</button>`}${archived ? `<button class="btn small ghost" data-unarchev="${e.id}">Unarchive</button>` : closed ? `<button class="btn small ghost" data-archev="${e.id}">Archive</button>` : ""}` : ""}`}</div>
     <div class="sub">${esc(eventDateLabel(e) || "")} ${esc(e.time || "")} · ${esc(e.location || "")}
       ${e.capacity ? `· ${hc.going}/${e.capacity} going` : `· ${hc.going} going`}
       · ${hc.maybe} maybe · ${hc.partial} partial
@@ -2268,7 +2387,8 @@ async function renderTravel() {
       own.add(`${x.member_id}:${x.person_kind}`);
       own.add(`${normName(x.person_name)}:${x.person_kind}`);
     });
-    const attPeople = (dp.t.attendees || []).map((a) => ({member_id: a.member_id,
+    const attPeople = dedupePeople(dp.t.attendees || [],
+      (a) => `${a.person_kind}:${normName(a.person_name)}`).map((a) => ({member_id: a.member_id,
       kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
     // Non-mentors only ever see their own people in the picker: a
     // student themself, a parent their linked children (as student
@@ -2309,7 +2429,8 @@ async function renderTravel() {
   // Hotel rooms are per-trip, not per-day: the hotel section (place
   // dropdown, room-parent volunteers, room status gaps) uses everyone
   // attending the trip, not just one day's riders.
-  const allAtt = t.all_attendees || t.attendees || [];
+  const allAtt = dedupePeople(t.all_attendees || t.attendees || [],
+    (a) => `${a.person_kind}:${normName(a.person_name)}`);
   const allAttStudents = allAtt.filter((a) => a.person_kind === "student");
   const allStudents = allAttStudents.map((a) =>
     `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
@@ -2416,7 +2537,18 @@ async function renderTravel() {
   // day's occupants and per-day capacity.
   const placeOptsForDay = (dp) => {
     const placed = placedIdsForDay(t.hotel, dp.day);
-    let list = (dp.t.attendees || []).filter((a) => a.person_kind === "student" && !placed.has(a.member_id));
+    // Name-aware too: a duplicate row for an already-placed student
+    // must not reappear in the picker under its other row id.
+    const placedNames = new Set();
+    (t.hotel.rooms || []).forEach((r) => {
+      if (!roomRunsDay(r, dp.day)) return;
+      (r.occupants || []).forEach((o) => {
+        if (occMatchesDay(o, dp.day)) placedNames.add(normName(`${o.first_name} ${o.last_name}`));
+      });
+    });
+    let list = dedupePeople((dp.t.attendees || []).filter((a) => a.person_kind === "student"
+      && !placed.has(a.member_id) && !placedNames.has(normName(a.person_name))),
+      (a) => normName(a.person_name));
     // Parents only ever see their own student in the place picker;
     // mentors see everyone attending that day.
     if (!MENTOR() && ME && ME.role === "parent") {
@@ -3282,12 +3414,25 @@ function placedIdsForDay(h, day) {
   return ids;
 }
 function roomGapHTML(h, dayAttendees, day) {
-  const students = (dayAttendees || []).filter((a) => a.person_kind === "student");
+  const students = dedupePeople((dayAttendees || []).filter((a) => a.person_kind === "student"),
+    (a) => normName(a.person_name));
   const placed = placedIdsForDay(h, day);
-  const pendingReq = (mid) => (h.requests || []).find((q) =>
-    q.member_id === mid && q.status === "pending");
-  const needs = students.filter((a) => !placed.has(a.member_id) && !pendingReq(a.member_id));
-  const awaiting = students.filter((a) => !placed.has(a.member_id) && pendingReq(a.member_id));
+  // Name-aware like the place picker: a duplicate row must not list
+  // its person as needing a room when the other row is placed, or as
+  // awaiting when the other row already requested.
+  const placedNames = new Set();
+  (h.rooms || []).forEach((r) => {
+    if (!roomRunsDay(r, day)) return;
+    (r.occupants || []).forEach((o) => {
+      if (occMatchesDay(o, day)) placedNames.add(normName(`${o.first_name} ${o.last_name}`));
+    });
+  });
+  const isPlaced = (a) => placed.has(a.member_id) || placedNames.has(normName(a.person_name));
+  const hasPending = (a) => (h.requests || []).some((q) => q.status === "pending"
+    && (q.member_id === a.member_id
+      || normName(`${q.first_name} ${q.last_name}`) === normName(a.person_name)));
+  const needs = students.filter((a) => !isPlaced(a) && !hasPending(a));
+  const awaiting = students.filter((a) => !isPlaced(a) && hasPending(a));
   return `<p class="sub">Needs a room: ${needs.length ? needs.map((a) => esc(a.person_name)).join(", ") : "everyone has a room."}</p>
   <p class="sub">Requested — awaiting placement: ${awaiting.length ? awaiting.map((a) => esc(a.person_name)).join(", ") : "none."}</p>`;
 }

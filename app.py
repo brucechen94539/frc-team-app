@@ -159,6 +159,9 @@ def _migrate(db):
             created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
         if "season" not in event_cols:
             db.execute("ALTER TABLE events ADD COLUMN season TEXT")
+        if "archived" not in event_cols:
+            db.execute("ALTER TABLE events ADD COLUMN archived INTEGER"
+                       " NOT NULL DEFAULT 0")
         if "totp_secret" not in user_cols:
             db.execute("ALTER TABLE users ADD COLUMN totp_secret TEXT")
         if "totp_enabled" not in user_cols:
@@ -567,6 +570,98 @@ def _auth_gate():
         full = q_one("SELECT totp_enabled FROM users WHERE id=?", (u["id"],))
         if full and not full["totp_enabled"]:
             return err("two-factor setup required", 403)
+    return None
+
+
+def _event_archived(eid):
+    """True when the event is frozen by Archive. Missing events read
+    as not archived — the endpoint itself reports the 404."""
+    if not eid:
+        return False
+    ev = q_one("SELECT archived FROM events WHERE id=?", (eid,))
+    return bool(ev) and bool(ev["archived"])
+
+
+@app.before_request
+def _archive_gate():
+    """An archived event accepts no updates — not from parents,
+    students, or mentors. Runs after the auth gate; reads only, so
+    GETs, event creation, and the archive toggle itself pass through.
+    Team vans are global (only their per-day, per-event driver
+    overrides are event-scoped), and season archiving excludes frozen
+    events in its own query."""
+    if request.method == "GET" or not request.path.startswith("/api/"):
+        return None
+    p = request.path
+    parts = [x for x in p.split("/") if x]
+    if len(parts) < 2 or parts[0] != "api":
+        return None
+    b = request.get_json(force=True, silent=True) or {}
+    eid = None
+    # The archive toggle itself: PATCH /api/events/<id> with ONLY
+    # {archived} — the endpoint owns its closed-only rule.
+    if (request.method == "PATCH" and len(parts) == 3
+            and parts[1] == "events" and parts[2].isdigit()
+            and set(b.keys()) == {"archived"}):
+        return None
+    if parts[1] == "events" and len(parts) >= 3 and parts[2].isdigit():
+        eid = int(parts[2])
+    elif parts[1] == "rsvps" and len(parts) == 3 and parts[2].isdigit():
+        r = q_one("SELECT event_id FROM rsvps WHERE id=?", (parts[2],))
+        eid = r["event_id"] if r else None
+    elif parts[1] == "checkins" and len(parts) == 3 and parts[2].isdigit():
+        c = q_one("SELECT event_id FROM checkins WHERE id=?", (parts[2],))
+        eid = c["event_id"] if c else None
+    elif parts[1] == "checkins" and len(parts) == 2:
+        eid = b.get("event_id")
+    elif parts[1] == "carpools" and len(parts) == 2:
+        eid = b.get("event_id")
+    elif parts[1] == "carpools" and len(parts) >= 3 and parts[2].isdigit():
+        c = q_one("SELECT event_id FROM carpools WHERE id=?", (parts[2],))
+        eid = c["event_id"] if c else None
+    elif parts[1] == "carpool_claims" and len(parts) == 3 \
+            and parts[2].isdigit():
+        c = q_one("SELECT cp.event_id FROM carpool_claims cc"
+                  " JOIN carpools cp ON cp.id=cc.carpool_id"
+                  " WHERE cc.id=?", (parts[2],))
+        eid = c["event_id"] if c else None
+    elif parts[1] == "tools" and len(parts) == 2:
+        eid = b.get("event_id")
+    elif parts[1] == "tools" and len(parts) >= 3 and parts[2].isdigit():
+        t = q_one("SELECT event_id FROM tools WHERE id=?", (parts[2],))
+        eid = t["event_id"] if t else None
+    elif parts[1] == "vans" and len(parts) >= 3 and parts[2].isdigit():
+        eid = b.get("event_id")
+    elif parts[1] == "van_claims" and len(parts) == 3 \
+            and parts[2].isdigit():
+        c = q_one("SELECT event_id FROM van_claims WHERE id=?", (parts[2],))
+        eid = c["event_id"] if c else None
+    elif parts[1] == "hotels" and len(parts) == 2:
+        eid = b.get("event_id")
+    elif parts[1] == "hotels" and len(parts) >= 3 and parts[2].isdigit():
+        h = q_one("SELECT event_id FROM hotels WHERE id=?", (parts[2],))
+        eid = h["event_id"] if h else None
+    elif parts[1] == "rooming-requests" and len(parts) == 3 \
+            and parts[2].isdigit():
+        q = q_one("SELECT h.event_id FROM rooming_requests r"
+                  " JOIN hotels h ON h.id=r.hotel_id WHERE r.id=?",
+                  (parts[2],))
+        eid = q["event_id"] if q else None
+    elif parts[1] == "rooms" and len(parts) >= 3 and parts[2].isdigit():
+        r = q_one("SELECT h.event_id FROM rooms rm"
+                  " JOIN hotels h ON h.id=rm.hotel_id WHERE rm.id=?",
+                  (parts[2],))
+        eid = r["event_id"] if r else None
+    elif parts[1] == "room_occupants" and len(parts) == 3 \
+            and parts[2].isdigit():
+        o = q_one("SELECT h.event_id FROM room_occupants oc"
+                  " JOIN rooms rm ON rm.id=oc.room_id"
+                  " JOIN hotels h ON h.id=rm.hotel_id WHERE oc.id=?",
+                  (parts[2],))
+        eid = o["event_id"] if o else None
+    if eid is not None and _event_archived(eid):
+        return err("this event is archived — unarchive it to make"
+                   " changes", 403)
     return None
 
 
@@ -1564,6 +1659,315 @@ def api_deletion_request_decline(rid):
     execute("UPDATE deletion_requests SET status='declined' WHERE id=?",
             (rid,))
     return jsonify({"ok": True})
+# ----------------------------------------------------------------------------
+# Duplicate cleanup: remove + re-create cycles leave two approved rows
+# or two accounts for one person, and the lists then show the name
+# twice. Scan first, merge on an explicit survivor choice: the merge
+# re-points every reference to the survivor, drops only the rows that
+# would collide after re-pointing (same event+kind RSVP, same room+day
+# bed, same day seat, same hotel request, same link), and deletes the
+# duplicate rows. A duplicate account whose carpool/van driving
+# collides with the survivor's is skipped with a reason — merging
+# those would break the one-vehicle-per-driver rules.
+# ----------------------------------------------------------------------------
+
+def _dupe_groups():
+    """{members: [...], users: [...]}: same normalized name, 2+ rows.
+    Members: approved rows only (those are the ones lists show).
+    Users: every account row. Each group names a suggested survivor:
+    members -> lowest id (the original); users -> enabled with a
+    password first, then lowest id."""
+    groups = {"members": [], "users": []}
+    by_name = {}
+    for m in q_all("SELECT * FROM members WHERE status='approved'"
+                   " ORDER BY id"):
+        by_name.setdefault(_norm_name(m["first_name"] + m["last_name"]),
+                           []).append(m)
+    for rows in by_name.values():
+        if len(rows) < 2:
+            continue
+        out_rows = []
+        for m in rows:
+            out_rows.append({
+                "id": m["id"], "code": m["code"],
+                "name": f"{m['first_name']} {m['last_name']}".strip(),
+                "school": m["school"], "grade": m["grade"],
+                "subteam": m["assigned_subteam"],
+                "parent_name": m["parent_name"],
+                "rsvps": q_one("SELECT COUNT(*) AS n FROM rsvps"
+                               " WHERE member_id=?", (m["id"],))["n"],
+                "placements": q_one("SELECT COUNT(*) AS n FROM room_occupants"
+                                    " WHERE member_id=?", (m["id"],))["n"],
+                "claims": q_one("SELECT COUNT(*) AS n FROM carpool_claims"
+                                " WHERE member_id=?", (m["id"],))["n"]
+                + q_one("SELECT COUNT(*) AS n FROM van_claims"
+                        " WHERE member_id=?", (m["id"],))["n"],
+                "checkins": q_one("SELECT COUNT(*) AS n FROM checkins"
+                                  " WHERE member_id=?", (m["id"],))["n"],
+                "links": q_one("SELECT COUNT(*) AS n FROM user_members"
+                               " WHERE member_id=?", (m["id"],))["n"]})
+        groups["members"].append({
+            "name": out_rows[0]["name"], "rows": out_rows,
+            "suggested": min(r["id"] for r in out_rows)})
+    by_name = {}
+    for u in q_all("SELECT * FROM users ORDER BY id"):
+        by_name.setdefault(_norm_name(u["name"]), []).append(u)
+    for rows in by_name.values():
+        if len(rows) < 2:
+            continue
+        out_rows = []
+        for u in rows:
+            out_rows.append({
+                "id": u["id"], "name": u["name"], "email": u["email"],
+                "role": u["role"], "disabled": bool(u["disabled"]),
+                "has_password": bool(u["password_hash"]),
+                "totp": bool(u["totp_enabled"]),
+                "links": q_one("SELECT COUNT(*) AS n FROM user_members"
+                               " WHERE user_id=?", (u["id"],))["n"],
+                "carpools": q_one("SELECT COUNT(*) AS n FROM carpools"
+                                  " WHERE driver_user_id=?", (u["id"],))["n"],
+                "vans": q_one("SELECT COUNT(*) AS n FROM team_vans"
+                              " WHERE driver_user_id=?", (u["id"],))["n"]})
+        sug = sorted(out_rows,
+                     key=lambda r: (r["disabled"], not r["has_password"],
+                                    r["id"]))[0]["id"]
+        groups["users"].append({
+            "name": out_rows[0]["name"], "rows": out_rows,
+            "suggested": sug})
+    return groups
+
+
+def _merge_member(surv, dupes):
+    """Fold dupe member rows into the survivor; returns
+    (merged_ids, dropped_counts)."""
+    dropped = {"rsvps": 0, "checkins": 0, "carpool_claims": 0,
+               "van_claims": 0, "room_occupants": 0,
+               "rooming_requests": 0, "links": 0}
+    merged = []
+    for d in dupes:
+        for r in q_all("SELECT * FROM rsvps WHERE member_id=?", (d,)):
+            if q_one("SELECT id FROM rsvps WHERE member_id=? AND event_id=?"
+                     " AND person_kind=?",
+                     (surv, r["event_id"], r["person_kind"])):
+                execute("DELETE FROM rsvps WHERE id=?", (r["id"],))
+                dropped["rsvps"] += 1
+            else:
+                execute("UPDATE rsvps SET member_id=? WHERE id=?",
+                        (surv, r["id"]))
+        for c in q_all("SELECT * FROM checkins WHERE member_id=?", (d,)):
+            if q_one("SELECT id FROM checkins WHERE member_id=?"
+                     " AND event_id=? AND person_kind=? AND day=?",
+                     (surv, c["event_id"], c["person_kind"], c["day"])):
+                execute("DELETE FROM checkins WHERE id=?", (c["id"],))
+                dropped["checkins"] += 1
+            else:
+                execute("UPDATE checkins SET member_id=? WHERE id=?",
+                        (surv, c["id"]))
+
+        def _repoint_rows(table, join, event_col, surv_rows):
+            # Re-point the dupe's rows, dropping any that would
+            # collide with a survivor row: same event + kind +
+            # overlapping day. NULL day = every day, so it overlaps
+            # any dated row. Re-pointed rows join surv_rows as they
+            # land, so two dupe rows can't both survive a clash.
+            # Returns how many were dropped.
+            dropped_n = 0
+            for cl in q_all(f"SELECT cc.*, {event_col} AS event_id FROM"
+                            f" {table} cc {join} WHERE cc.member_id=?",
+                            (d,)):
+                clash = any(s["event_id"] == cl["event_id"]
+                            and s["person_kind"] == cl["person_kind"]
+                            and (s["day"] is None or cl["day"] is None
+                                 or s["day"] == cl["day"])
+                            for s in surv_rows)
+                if clash:
+                    execute(f"DELETE FROM {table} WHERE id=?", (cl["id"],))
+                    dropped_n += 1
+                else:
+                    execute(f"UPDATE {table} SET member_id=? WHERE id=?",
+                            (surv, cl["id"]))
+                    surv_rows.append({"event_id": cl["event_id"],
+                                      "person_kind": cl["person_kind"],
+                                      "day": cl["day"]})
+            return dropped_n
+
+        surv_car = q_all("SELECT cc.*, cp.event_id AS event_id FROM"
+                         " carpool_claims cc JOIN carpools cp"
+                         " ON cp.id=cc.carpool_id WHERE cc.member_id=?",
+                         (surv,))
+        dropped["carpool_claims"] += _repoint_rows(
+            "carpool_claims", "JOIN carpools cp ON cp.id=cc.carpool_id",
+            "cp.event_id", surv_car)
+        surv_van = q_all("SELECT * FROM van_claims WHERE member_id=?",
+                         (surv,))
+        dropped["van_claims"] += _repoint_rows(
+            "van_claims", "", "event_id", surv_van)
+        surv_rooms = q_all("SELECT room_id, day FROM room_occupants"
+                           " WHERE member_id=?", (surv,))
+        for o in q_all("SELECT * FROM room_occupants WHERE member_id=?",
+                       (d,)):
+            clash = any(s["room_id"] == o["room_id"]
+                        and (s["day"] is None or o["day"] is None
+                             or s["day"] == o["day"])
+                        for s in surv_rooms)
+            if clash:
+                execute("DELETE FROM room_occupants WHERE id=?", (o["id"],))
+                dropped["room_occupants"] += 1
+            else:
+                execute("UPDATE room_occupants SET member_id=? WHERE id=?",
+                        (surv, o["id"]))
+                surv_rooms.append({"room_id": o["room_id"],
+                                   "day": o["day"]})
+        for rq in q_all("SELECT * FROM rooming_requests WHERE member_id=?",
+                        (d,)):
+            if q_one("SELECT id FROM rooming_requests WHERE member_id=?"
+                     " AND hotel_id=?", (surv, rq["hotel_id"])):
+                execute("DELETE FROM rooming_requests WHERE id=?",
+                        (rq["id"],))
+                dropped["rooming_requests"] += 1
+            else:
+                execute("UPDATE rooming_requests SET member_id=? WHERE id=?",
+                        (surv, rq["id"]))
+        execute("UPDATE rooms SET parent_member_id=? WHERE parent_member_id=?",
+                (surv, d))
+        execute("UPDATE link_requests SET member_id=? WHERE member_id=?",
+                (surv, d))
+        for l in q_all("SELECT * FROM user_members WHERE member_id=?", (d,)):
+            if q_one("SELECT * FROM user_members WHERE user_id=?"
+                     " AND member_id=? AND kind=?",
+                     (l["user_id"], surv, l["kind"])):
+                execute("DELETE FROM user_members WHERE user_id=?"
+                        " AND member_id=? AND kind=?",
+                        (l["user_id"], d, l["kind"]))
+                dropped["links"] += 1
+            else:
+                execute("UPDATE user_members SET member_id=? WHERE user_id=?"
+                        " AND member_id=? AND kind=?",
+                        (surv, l["user_id"], d, l["kind"]))
+        execute("DELETE FROM members WHERE id=?", (d,))
+        merged.append(d)
+    return merged, dropped
+
+
+def _user_merge_blockers(surv, d):
+    """Why dupe account d can't fold into survivor surv (vehicle
+    rules would break). Empty list = safe to merge."""
+    reasons = []
+    for c in q_all("SELECT * FROM carpools WHERE driver_user_id=?", (d,)):
+        if q_one("SELECT id FROM carpools WHERE driver_user_id=?"
+                 " AND event_id=?", (surv, c["event_id"])):
+            ev = q_one("SELECT title FROM events WHERE id=?",
+                       (c["event_id"],))
+            reasons.append("both drive a carpool for "
+                           f"{ev['title'] if ev else 'the same event'}")
+            break
+    for v in q_all("SELECT * FROM team_vans WHERE driver_user_id=?"
+                   " AND seats IS NOT NULL", (d,)):
+        if q_one("SELECT id FROM team_vans WHERE driver_user_id=?"
+                 " AND seats IS NOT NULL AND id!=?", (surv, v["id"])):
+            reasons.append("both are designated drivers of seated vans")
+            break
+    for dd in q_all("SELECT * FROM van_day_drivers WHERE driver_user_id=?",
+                    (d,)):
+        if q_one("SELECT id FROM van_day_drivers WHERE driver_user_id=?"
+                 " AND event_id=? AND day=? AND van_id!=?",
+                 (surv, dd["event_id"], dd["day"], dd["van_id"])):
+            reasons.append("both drive different vans on the same day")
+            break
+    return reasons
+
+
+def _merge_user(surv, d):
+    for l in q_all("SELECT * FROM user_members WHERE user_id=?", (d,)):
+        if q_one("SELECT * FROM user_members WHERE user_id=?"
+                 " AND member_id=? AND kind=?",
+                 (surv, l["member_id"], l["kind"])):
+            execute("DELETE FROM user_members WHERE user_id=?"
+                    " AND member_id=? AND kind=?",
+                    (d, l["member_id"], l["kind"]))
+        else:
+            execute("UPDATE user_members SET user_id=? WHERE user_id=?"
+                    " AND member_id=? AND kind=?",
+                    (surv, d, l["member_id"], l["kind"]))
+    execute("UPDATE carpools SET driver_user_id=? WHERE driver_user_id=?",
+            (surv, d))
+    execute("UPDATE team_vans SET driver_user_id=? WHERE driver_user_id=?",
+            (surv, d))
+    execute("UPDATE van_day_drivers SET driver_user_id=?"
+            " WHERE driver_user_id=?", (surv, d))
+    execute("DELETE FROM password_history WHERE user_id=?", (d,))
+    execute("DELETE FROM totp_recovery_codes WHERE user_id=?", (d,))
+    execute("DELETE FROM deletion_requests WHERE user_id=? OR requested_by=?",
+            (d, d))
+    execute("DELETE FROM users WHERE id=?", (d,))
+
+
+@app.route("/api/admin/duplicates")
+@require_role("mentor", "admin")
+def api_duplicates():
+    return jsonify(_dupe_groups())
+
+
+@app.route("/api/admin/duplicates/merge", methods=["POST"])
+@require_role("mentor", "admin")
+def api_duplicates_merge():
+    """Merge duplicate groups on explicit survivor choice. Every
+    survivor + dupe must sit in one group from the current scan, so
+    this endpoint can never delete an arbitrary row — only rows the
+    scan itself grouped. Vehicle-colliding account dupes are skipped
+    per dupe with a reason; other groups still merge."""
+    b = request.get_json(force=True, silent=True) or {}
+    merges = b.get("merges") or []
+    if not isinstance(merges, list) or not merges:
+        return err("merges is required")
+    groups = _dupe_groups()
+    index = {}
+    for g in groups["members"]:
+        for r in g["rows"]:
+            index[("member", r["id"])] = g
+    for g in groups["users"]:
+        for r in g["rows"]:
+            index[("user", r["id"])] = g
+    seen = set()
+    for m in merges:
+        kind = m.get("kind")
+        surv = m.get("survivor_id")
+        dupes = m.get("dupe_ids") or []
+        if kind not in ("member", "user") or not isinstance(surv, int) \
+                or not dupes or not all(isinstance(d, int) for d in dupes) \
+                or surv in dupes:
+            return err("bad merge request")
+        g = index.get((kind, surv))
+        if not g or any(index.get((kind, d)) is not g for d in dupes):
+            return err("survivor and dupes must be one duplicate group")
+        if surv in seen or any(d in seen for d in dupes):
+            return err("a row can only merge once per request")
+        seen.add(surv)
+        seen.update(dupes)
+    results = []
+    for m in merges:
+        kind, surv, dupes = m["kind"], m["survivor_id"], m["dupe_ids"]
+        g = index[(kind, surv)]
+        if kind == "member":
+            merged, dropped = _merge_member(surv, dupes)
+            results.append({"kind": kind, "name": g["name"],
+                            "survivor_id": surv, "merged": merged,
+                            "dropped": dropped, "skipped": []})
+        else:
+            merged, skipped = [], []
+            for d in dupes:
+                reasons = _user_merge_blockers(surv, d)
+                if reasons:
+                    skipped.append({"dupe_id": d, "reasons": reasons})
+                    continue
+                _merge_user(surv, d)
+                merged.append(d)
+            results.append({"kind": kind, "name": g["name"],
+                            "survivor_id": surv, "merged": merged,
+                            "dropped": {}, "skipped": skipped})
+    return jsonify({"results": results})
+
+
 # ----------------------------------------------------------------------------
 # Members (sign-up applications + roster)
 # ----------------------------------------------------------------------------
@@ -2582,9 +2986,12 @@ def api_events_archive_season():
         return err("season name is required")
     if len(season) > 40:
         return err("season name is too long (40 max)")
+    # Season archiving is a different archive from the freeze: frozen
+    # events keep their state and are never swept into a season.
     with _lock:
         db = get_db()
-        n = db.execute("UPDATE events SET season=? WHERE season IS NULL",
+        n = db.execute("UPDATE events SET season=? WHERE season IS NULL"
+                       " AND (archived IS NULL OR archived=0)",
                        (season,)).rowcount
         db.commit()
     return jsonify({"archived": n, "season": season})
@@ -2597,9 +3004,12 @@ def api_events_unarchive_season():
     season = (b.get("season") or "").strip()
     if not season:
         return err("season name is required")
+    # Frozen events keep their season too: restoring a season must
+    # not rewrite a frozen event's record.
     with _lock:
         db = get_db()
-        n = db.execute("UPDATE events SET season=NULL WHERE season=?",
+        n = db.execute("UPDATE events SET season=NULL WHERE season=?"
+                       " AND (archived IS NULL OR archived=0)",
                        (season,)).rowcount
         db.commit()
     return jsonify({"restored": n, "season": season})
@@ -2608,13 +3018,32 @@ def api_events_unarchive_season():
 @app.route("/api/events/<int:eid>", methods=["PATCH", "DELETE"])
 @require_role("mentor", "admin")
 def api_event(eid):
-    if request.method == "DELETE":
-        execute("DELETE FROM events WHERE id=?", (eid,))
-        return jsonify({"deleted": eid})
     ev = q_one("SELECT * FROM events WHERE id=?", (eid,))
     if not ev:
         return err("event not found", 404)
     b = request.get_json(force=True, silent=True) or {}
+    # Archiving is its own action: the toggle travels alone, and only
+    # a closed RSVP can be frozen (the button only appears there).
+    # Unarchiving is always allowed; every other change to a frozen
+    # event is refused here as well as by the archive gate.
+    if "archived" in b:
+        if set(b.keys()) != {"archived"}:
+            return err("change archived on its own")
+        want = b["archived"]
+        if want not in (0, 1, True, False):
+            return err("archived must be 0 or 1")
+        want = 1 if want else 0
+        if want == 1 and not (ev["deadline"]
+                              and ev["deadline"]
+                              < datetime.date.today().isoformat()):
+            return err("only events with a closed RSVP can be archived")
+        execute("UPDATE events SET archived=? WHERE id=?", (want, eid))
+        return jsonify(q_one("SELECT * FROM events WHERE id=?", (eid,)))
+    if ev["archived"]:
+        return err("event is archived — unarchive it first", 403)
+    if request.method == "DELETE":
+        execute("DELETE FROM events WHERE id=?", (eid,))
+        return jsonify({"deleted": eid})
     sets, args = [], []
     if "title" in b:
         if not (b["title"] or "").strip():
