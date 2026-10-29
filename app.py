@@ -361,6 +361,60 @@ def _migrate(db):
             db.execute("DELETE FROM carpools")
             db.execute("INSERT INTO meta (key, value) VALUES (?,?)",
                        ("carpools_wiped_2026_10_28", "1"))
+        # 2026-10-29: multi-day trips. Additive columns first, then
+        # the new day tables, then the checkins rebuild: the old
+        # UNIQUE(event, member, kind) would block a second day's
+        # check-in, so old tables are rebuilt with
+        # UNIQUE(event, member, kind, day), data preserved. Fresh
+        # DBs already have the day column from schema.sql, so the
+        # rebuild (guarded on the missing column) never runs there.
+        if "end_date" not in event_cols:
+            db.execute("ALTER TABLE events ADD COLUMN end_date TEXT")
+        for tbl, col in (("carpool_claims", "day"),
+                         ("van_claims", "day")):
+            cols = {r[1] for r in db.execute(
+                f"PRAGMA table_info({tbl})")}
+            if col not in cols:
+                db.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} TEXT")
+        db.execute("""CREATE TABLE IF NOT EXISTS rsvp_days (
+            rsvp_id INTEGER NOT NULL REFERENCES rsvps(id)
+                ON DELETE CASCADE,
+            day TEXT NOT NULL, UNIQUE(rsvp_id, day))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS carpool_days (
+            carpool_id INTEGER NOT NULL REFERENCES carpools(id)
+                ON DELETE CASCADE,
+            day TEXT NOT NULL, UNIQUE(carpool_id, day))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS van_day_drivers (
+            van_id INTEGER NOT NULL REFERENCES team_vans(id)
+                ON DELETE CASCADE,
+            event_id INTEGER NOT NULL REFERENCES events(id)
+                ON DELETE CASCADE,
+            day TEXT NOT NULL, driver_user_id INTEGER NOT NULL,
+            UNIQUE(van_id, event_id, day))""")
+        check_cols = {r[1] for r in db.execute(
+            "PRAGMA table_info(checkins)")}
+        if check_cols and "day" not in check_cols:
+            db.execute("ALTER TABLE checkins RENAME TO checkins_old")
+            db.execute("""CREATE TABLE checkins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id INTEGER NOT NULL REFERENCES events(id)
+                    ON DELETE CASCADE,
+                member_id INTEGER NOT NULL REFERENCES members(id)
+                    ON DELETE CASCADE,
+                person_kind TEXT NOT NULL DEFAULT 'student',
+                person_name TEXT NOT NULL,
+                method TEXT NOT NULL DEFAULT 'mentor',
+                verified INTEGER NOT NULL DEFAULT 1,
+                hours REAL NOT NULL DEFAULT 0,
+                day TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(event_id, member_id, person_kind, day))""")
+            db.execute("""INSERT INTO checkins (id, event_id, member_id,
+                person_kind, person_name, method, verified, hours,
+                created_at) SELECT id, event_id, member_id, person_kind,
+                person_name, method, verified, hours, created_at
+                FROM checkins_old""")
+            db.execute("DROP TABLE checkins_old")
         db.commit()
         db.commit()
 
@@ -2350,16 +2404,20 @@ def api_events():
     b = request.get_json(force=True)
     if not b.get("title"):
         return err("title is required")
+    end_s = (b.get("end_date") or "").strip() or None
+    range_err = _validate_event_range(b.get("date"), end_s)
+    if range_err:
+        return err(range_err)
     defaults = {"meeting": 2, "build": 4, "competition": 8, "outreach": 3,
                 "club": 1}
     eid = execute(
         """INSERT INTO events (title, type, date, time, location, capacity,
-           deadline, session_hours, notes, sample)
-           VALUES (?,?,?,?,?,?,?,?,?,0)""",
+           deadline, session_hours, notes, end_date, sample)
+           VALUES (?,?,?,?,?,?,?,?,?,?,0)""",
         (b["title"], b.get("type", "meeting"), b.get("date"), b.get("time"),
          b.get("location"), b.get("capacity"), b.get("deadline"),
          b.get("session_hours", defaults.get(b.get("type", "meeting"), 2)),
-         b.get("notes")))
+         b.get("notes"), end_s))
     execute("UPDATE events SET code=? WHERE id=?", (f"EVT-{200 + eid}", eid))
     return jsonify(q_one("SELECT * FROM events WHERE id=?", (eid,))), 201
 
@@ -2410,9 +2468,11 @@ def api_event_ics(eid):
         start = ("DTSTART:" + start_dt.strftime("%Y%m%dT%H%M%S"),
                  "DTEND:" + end_dt.strftime("%Y%m%dT%H%M%S"))
     else:
+        # Multi-day: the all-day end is the day AFTER end_date.
+        d_end = _parse_ymd(ev.get("end_date")) or d0
         start = (f"DTSTART;VALUE=DATE:{d0.strftime('%Y%m%d')}",
                  "DTEND;VALUE=DATE:"
-                 + (d0 + datetime.timedelta(days=1)).strftime("%Y%m%d"))
+                 + (d_end + datetime.timedelta(days=1)).strftime("%Y%m%d"))
     lines = ["BEGIN:VCALENDAR", "VERSION:2.0",
              "PRODID:-//FRC Team App//EN", "BEGIN:VEVENT",
              f"UID:event-{ev['id']}@frc-team-app",
@@ -2490,7 +2550,7 @@ def api_event(eid):
         sets.append("type=?")
         args.append(b["type"])
     import re as _re
-    for col in ("date", "deadline"):
+    for col in ("date", "deadline", "end_date"):
         if col in b:
             raw = (b[col] or "").strip() or None
             if raw:
@@ -2500,6 +2560,15 @@ def api_event(eid):
                     return err(f"{col} must be YYYY-MM-DD")
             sets.append(f"{col}=?")
             args.append(raw)
+    # Validate the combined range, not just each field alone: a new
+    # end_date must still be >= the (possibly unchanged) start date.
+    new_date = b.get("date", ev["date"])
+    new_end = b.get("end_date", ev.get("end_date"))
+    range_err = _validate_event_range(
+        (new_date or "").strip() if isinstance(new_date, str) else new_date,
+        (new_end or "").strip() if isinstance(new_end, str) else new_end)
+    if range_err:
+        return err(range_err)
     if "time" in b:
         raw = (b["time"] or "").strip() or None
         if raw and not _re.match(r"^\d{1,2}:\d{2}(\s*[APap][Mm])?$", raw):
@@ -2545,13 +2614,6 @@ def api_event(eid):
     return jsonify(q_one("SELECT * FROM events WHERE id=?", (eid,)))
 
 
-def _occupancy_count(eid):
-    """Spots taken: going + partial both occupy a place at the event."""
-    r = q_one("SELECT COUNT(*) c FROM rsvps WHERE event_id=?"
-              " AND status IN ('going','partial')", (eid,))
-    return r["c"]
-
-
 @app.route("/api/events/<int:eid>/checkin-qr")
 @require_role("mentor", "admin")
 def api_event_checkin_qr(eid):
@@ -2578,6 +2640,14 @@ def api_rsvps(eid):
     if request.method == "GET":
         rsvps = q_all("SELECT * FROM rsvps WHERE event_id=? ORDER BY created_at, id",
                       (eid,))
+        # Per-day picks for partial RSVPs (empty = unspecified partial,
+        # which attends every day). The UI shows them on multi-day
+        # events; the travel payload uses them to filter attendees.
+        with _lock:
+            db = get_db()
+            days_map = _rsvp_days_map(db, eid)
+        for r in rsvps:
+            r["days"] = sorted(days_map.get(r["id"], set()))
         return jsonify({
             "event": ev,
             "rsvps": rsvps,
@@ -2645,10 +2715,49 @@ def api_rsvps(eid):
             and u["role"] not in ("mentor", "admin")):
         return err("RSVP deadline has passed — ask a mentor to RSVP for you",
                    403)
+    # Per-day picks: only meaningful for partial on a multi-day
+    # event, but the server accepts and stores them whenever they
+    # are sent (attendance logic ignores stored days for 'going').
+    # An empty list means unspecified partial = every day.
+    event_days = _event_days(ev)
+    days_in, days_err = _validate_days_input(b.get("days"), event_days)
+    if days_err:
+        return err(days_err)
     status = want
-    if want in ("going", "partial") and ev["capacity"] \
-            and _occupancy_count(eid) >= ev["capacity"]:
-        status = "waitlisted"
+    if want in ("going", "partial") and ev["capacity"]:
+        # Capacity is per DAY, not per event: a partial attending
+        # only Day 1 must not occupy a Day 3 spot. Going covers
+        # every day; partial covers its picked days, or every day
+        # when unspecified. If any covered day is full, the whole
+        # RSVP waitlists (waitlisting is per RSVP, not per day).
+        # The filer themself is excluded, so re-filing a going
+        # RSVP at exact capacity doesn't spuriously waitlist.
+        covered = event_days if (want == "going" or not days_in) \
+            else days_in
+        if not covered:
+            covered = [None]
+        with _lock:
+            db = get_db()
+            days_map = _rsvp_days_map(db, eid)
+            full = False
+            for day in covered:
+                n = 0
+                for r in db.execute(
+                        "SELECT id, member_id, person_kind, status FROM rsvps"
+                        " WHERE event_id=? AND status IN ('going','partial')",
+                        (eid,)):
+                    if (r["member_id"] == b.get("member_id")
+                            and r["person_kind"] == b["person_kind"]):
+                        continue
+                    if _attends_day(r["status"],
+                                    days_map.get(r["id"], set()),
+                                    day, event_days):
+                        n += 1
+                if n >= ev["capacity"]:
+                    full = True
+                    break
+        if full:
+            status = "waitlisted"
     with _lock:
         db = get_db()
         db.execute(
@@ -2665,6 +2774,17 @@ def api_rsvps(eid):
             + " AND person_kind=?",
             tuple([eid] + ([] if b.get("member_id") is None else [b["member_id"]])
                   + [b["person_kind"]])).fetchone()
+        # Only replace the day set when the client sent one — a
+        # going re-file without days must not wipe a partial's
+        # earlier picks, and a status-only change keeps them too.
+        if days_in is not None and r:
+            db.execute("DELETE FROM rsvp_days WHERE rsvp_id=?", (r["id"],))
+            for d in days_in:
+                db.execute("INSERT OR IGNORE INTO rsvp_days (rsvp_id, day)"
+                           " VALUES (?,?)", (r["id"], d))
+            db.commit()
+            r = dict(r)
+            r["days"] = sorted(days_in)
     return jsonify(row(r)), 201
 
 
@@ -2712,19 +2832,56 @@ def api_checkin():
         return err("method must be self|mentor")
     verified = 1 if method == "mentor" else 0
     hours = float(b.get("hours", 0) or 0)
+    # Per-day check-ins: a multi-day trip credits each day
+    # separately, so the day is part of the check-in's identity.
+    # Multi-day events require an explicit day; single-day events
+    # default to their one date, dateless events to NULL. The
+    # upsert is explicit (not ON CONFLICT) because NULL days on
+    # dateless events would never conflict in SQLite's UNIQUE.
+    ev = q_one("SELECT * FROM events WHERE id=?", (b["event_id"],))
+    if not ev:
+        return err("event not found", 404)
+    event_days = _event_days(ev)
+    day_in = (b.get("day") or "").strip() or None
+    if len(event_days) > 1:
+        if not day_in:
+            return err("day is required for multi-day events")
+        if day_in not in event_days:
+            return err("day is not part of this event")
+        day = day_in
+    elif len(event_days) == 1:
+        if day_in and day_in != event_days[0]:
+            return err("day is not part of this event")
+        day = event_days[0]
+    else:
+        day = None
+    kind = b.get("person_kind", "student")
     with _lock:
         db = get_db()
-        db.execute(
-            """INSERT INTO checkins (event_id, member_id, person_kind, person_name,
-               method, verified, hours)
-               VALUES (?,?,?,?,?,?,?)
-               ON CONFLICT(event_id, member_id, person_kind)
-               DO UPDATE SET person_name=excluded.person_name, method=excluded.method,
-                             verified=excluded.verified, hours=excluded.hours""",
-            (b["event_id"], b["member_id"], b.get("person_kind", "student"),
-             b["person_name"], method, verified, hours))
+        if day is None:
+            existing = db.execute(
+                "SELECT id FROM checkins WHERE event_id=? AND member_id=?"
+                " AND person_kind=? AND day IS NULL",
+                (b["event_id"], b["member_id"], kind)).fetchone()
+        else:
+            existing = db.execute(
+                "SELECT id FROM checkins WHERE event_id=? AND member_id=?"
+                " AND person_kind=? AND day=?",
+                (b["event_id"], b["member_id"], kind, day)).fetchone()
+        if existing:
+            db.execute(
+                "UPDATE checkins SET person_name=?, method=?, verified=?,"
+                " hours=? WHERE id=?",
+                (b["person_name"], method, verified, hours, existing["id"]))
+        else:
+            db.execute(
+                "INSERT INTO checkins (event_id, member_id, person_kind,"
+                " person_name, method, verified, hours, day)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (b["event_id"], b["member_id"], kind, b["person_name"],
+                 method, verified, hours, day))
         db.commit()
-    return jsonify({"ok": True, "verified": bool(verified)}), 201
+    return jsonify({"ok": True, "verified": bool(verified), "day": day}), 201
 
 
 @app.route("/api/checkins/<int:cid>", methods=["PATCH"])
@@ -2740,6 +2897,19 @@ def api_checkin_verify(cid):
 
 @app.route("/api/events/<int:eid>/checkins")
 def api_event_checkins(eid):
+    day = request.args.get("day")
+    if day:
+        # Pre-multi-day check-ins have day NULL: they belong to the
+        # event's (single) day, so they show on the start-date tab
+        # and nowhere else — otherwise upgrading would hide them.
+        ev = q_one("SELECT date FROM events WHERE id=?", (eid,))
+        if ev and ev.get("date") == day:
+            return jsonify(q_all(
+                "SELECT * FROM checkins WHERE event_id=? AND"
+                " (day=? OR day IS NULL) ORDER BY id", (eid, day)))
+        return jsonify(q_all(
+            "SELECT * FROM checkins WHERE event_id=? AND day=? ORDER BY id",
+            (eid, day)))
     return jsonify(q_all("SELECT * FROM checkins WHERE event_id=? ORDER BY id",
                          (eid,)))
 
@@ -2787,9 +2957,9 @@ def api_hours():
            GROUP BY c.member_id ORDER BY verified_hours DESC""")
     for r in rows:
         r["breakdown"] = q_all(
-            """SELECT c.event_id, e.title, e.date, c.hours, c.verified, c.method
+            """SELECT c.event_id, e.title, e.date, c.day, c.hours, c.verified, c.method
                FROM checkins c JOIN events e ON e.id = c.event_id
-               WHERE c.member_id=? ORDER BY e.date""", (r["member_id"],))
+               WHERE c.member_id=? ORDER BY e.date, c.day""", (r["member_id"],))
     return jsonify(rows)
 
 
@@ -2887,35 +3057,74 @@ def api_travel(eid):
     ev = q_one("SELECT * FROM events WHERE id=?", (eid,))
     if not ev:
         return err("event not found", 404)
-    carpools = q_all("SELECT * FROM carpools WHERE event_id=? ORDER BY id", (eid,))
-    for c in carpools:
+    # The day this payload is FOR: ?day=, else the trip's first day,
+    # else None for dateless events. Rides, seats, drivers, and the
+    # ride-status attendees are all per-day; tools and hotel are
+    # per-trip and ignore it. Without a day, a multi-day payload
+    # defaults to Day 1 rather than mixing days incoherently.
+    event_days = _event_days(ev)
+    day = request.args.get("day")
+    if day:
+        if day not in event_days:
+            return err("day is not part of this event")
+    elif event_days:
+        day = event_days[0]
+    with _lock:
+        db = get_db()
+        rsvp_days = _rsvp_days_map(db, eid)
+        carpool_days = _carpool_days_map(db, eid)
+        van_overrides = _van_day_drivers_map(db, eid)
+    all_carpools = q_all("SELECT * FROM carpools WHERE event_id=? ORDER BY id",
+                         (eid,))
+    for c in all_carpools:
+        c["days"] = sorted(carpool_days.get(c["id"], set()))
         claims = q_all("SELECT * FROM carpool_claims WHERE carpool_id=?"
                        " ORDER BY created_at, id", (c["id"],))
+        claims = [x for x in claims
+                  if _claim_day_matches(x.get("day"), day)]
         c["claims"] = [x for x in claims if x["status"] == "claimed"]
         c["waitlist"] = [x for x in claims if x["status"] == "waitlisted"]
         c["seats_open"] = max(0, c["seats"] - len(c["claims"]))
-    # Team vans going to this event: seats set, a designated parent
-    # driver who RSVP'd going for this event, and that driver not
-    # already driving a carpool for the same event. Driverless or
-    # seatless vans stay tools-only and never appear here.
-    going_parents = {r["person_name"] for r in q_all(
-        "SELECT person_name FROM rsvps WHERE event_id=? AND"
-        " person_kind='parent' AND status='going'", (eid,))}
+    # Carpools shown are only the ones running on this day; the
+    # full list goes out as all_carpools for the (per-trip) tools
+    # section, which must not lose a car that runs another day.
+    carpools = [c for c in all_carpools
+                if _carpool_runs_day(carpool_days, c["id"], day)]
+    # Team vans going to this event on this day: seats set, a driver
+    # for this day (per-day override, else designated) who is
+    # attending that day (going, or partial covering the day on a
+    # multi-day event), and that driver not already driving a
+    # carpool that day. Driverless or seatless vans stay tools-only
+    # and never appear here.
     car_driver_uids = {c["driver_user_id"] for c in carpools
                        if c.get("driver_user_id")}
     event_vans = []
     for v in q_all("SELECT * FROM team_vans ORDER BY name"):
-        if not v.get("seats") or not v.get("driver_user_id"):
+        if not v.get("seats"):
             continue
-        if v["driver_user_id"] in car_driver_uids:
+        day_driver = _van_driver_for_day(v, eid, day, van_overrides)
+        if not day_driver:
             continue
-        drv = q_one("SELECT name FROM users WHERE id=?",
-                    (v["driver_user_id"],))
-        if not drv or drv["name"] not in going_parents:
+        if day_driver in car_driver_uids:
+            continue
+        drv = q_one("SELECT name FROM users WHERE id=?", (day_driver,))
+        if not drv:
+            continue
+        with _lock:
+            db = get_db()
+            attends = _parent_attends_day(db, eid, drv["name"], day,
+                                          event_days)
+        if not attends:
             continue
         claims = q_all("SELECT * FROM van_claims WHERE van_id=? AND"
                        " event_id=? ORDER BY created_at, id",
                        (v["id"], eid))
+        claims = [x for x in claims
+                  if _claim_day_matches(x.get("day"), day)]
+        v["designated_driver_user_id"] = v.get("driver_user_id")
+        v["driver_user_id"] = day_driver
+        v["day_driver_override"] = bool(
+            day is not None and (v["id"], day) in van_overrides)
         v["driver_name"] = drv["name"]
         v["claims"] = [x for x in claims if x["status"] == "claimed"]
         v["waitlist"] = [x for x in claims if x["status"] == "waitlisted"]
@@ -2938,16 +3147,30 @@ def api_travel(eid):
                WHERE r.hotel_id=? ORDER BY r.created_at, r.id""", (hotel["id"],))
         hotel["requests"] = reqs
         hotel["awaiting"] = sum(1 for x in reqs if x["status"] == "pending")
-    attendees = q_all(
-        "SELECT member_id, person_kind, person_name FROM rsvps"
+    # attendees = attending ON THIS DAY (rides, ride status, seat
+    # pickers). all_attendees = attending the trip at all (hotel
+    # rooms and room status are per-trip, not per-day, so they must
+    # not lose a student who only attends another day).
+    all_rsvps = q_all(
+        "SELECT id, member_id, person_kind, person_name, status FROM rsvps"
         " WHERE event_id=? AND status IN ('going','partial')"
         " ORDER BY person_name", (eid,))
+    all_attendees = [{"member_id": r["member_id"],
+                      "person_kind": r["person_kind"],
+                      "person_name": r["person_name"]} for r in all_rsvps]
+    attendees = [a for a, r in zip(all_attendees, all_rsvps)
+                 if _attends_day(r["status"],
+                                 rsvp_days.get(r["id"], set()),
+                                 day, event_days)]
     parent_names = sorted({m["parent_name"] for m in q_all(
         "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
         " AND parent_name != ''") if m["parent_name"]})
     return jsonify({"event": ev, "carpools": carpools, "tools": tools,
                     "parent_names": parent_names, "event_vans": event_vans,
-                    "hotel": hotel, "attendees": attendees})
+                    "hotel": hotel, "attendees": attendees,
+                    "all_attendees": all_attendees,
+                    "all_carpools": all_carpools,
+                    "days": event_days, "day": day})
 
 
 def is_attending(eid, member_id, kind):
@@ -3154,34 +3377,6 @@ def _own_member_id(u):
     return _self_rsvp_scope(u)[0] if u else None
 
 
-def _event_driver_names(db, eid):
-    """Normalized names of everyone driving for this event: carpool
-    drivers, plus designated drivers of vans with passenger seats
-    (a seatless van is tools-only, so its designee is not driving
-    riders). Takes a raw db connection — callers inside _lock must
-    not go through q_* (which re-locks)."""
-    names = set()
-    for r in db.execute("SELECT driver_name FROM carpools WHERE event_id=?",
-                        (eid,)):
-        if r["driver_name"]:
-            names.add(_norm_name(r["driver_name"]))
-    for r in db.execute(
-            "SELECT u.name FROM team_vans v JOIN users u"
-            " ON u.id = v.driver_user_id WHERE v.seats IS NOT NULL"
-            " AND v.driver_user_id IS NOT NULL"):
-        if r["name"]:
-            names.add(_norm_name(r["name"]))
-    return names
-
-
-def _is_event_driver(db, eid, person_kind, person_name):
-    """True if this person is driving for the event. Only parents
-    drive, so a student name never matches, even if it coincides."""
-    if person_kind != "parent" or not person_name:
-        return False
-    return _norm_name(person_name) in _event_driver_names(db, eid)
-
-
 def _claim_matches(row, member_id, person_kind, person_name):
     if row["person_kind"] != person_kind:
         return False
@@ -3192,23 +3387,317 @@ def _claim_matches(row, member_id, person_kind, person_name):
                 and _norm_name(row["person_name"]) == _norm_name(person_name))
 
 
-def _has_claimed_seat(db, eid, member_id, person_kind, person_name):
-    """True if this person already holds a CLAIMED seat on any vehicle
-    for the event — any carpool or any van. Waitlisted rows don't
-    count: a waitlisted person has no seat yet and may still grab an
-    open seat elsewhere."""
+# ----------------------------------------------------------------------------
+# Multi-day trips: every per-day rule lives here. An event's days are
+# [date .. end_date] inclusive, or [date] when end_date is empty, or
+# [] when the event has no date at all (day=None then means the whole
+# event, which is the pre-multi-day behavior). NULL/empty day sets
+# mean "all days": a carpool with no carpool_days rows runs every day,
+# a claim with day NULL holds a seat every day, and a partial RSVP
+# with no rsvp_days rows attends every day. New rows always get a
+# concrete day when the event has days, so NULL only survives from
+# pre-multi-day data — and every helper treats NULL as all-days, so
+# old data keeps working untouched.
+# ----------------------------------------------------------------------------
+def _parse_ymd(s):
+    try:
+        return datetime.datetime.strptime(s, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _event_days(ev):
+    """Sorted YYYY-MM-DD days for an event (empty if dateless)."""
+    if not ev or not ev.get("date"):
+        return []
+    d0 = _parse_ymd(ev["date"])
+    if not d0:
+        return []
+    d1 = _parse_ymd(ev.get("end_date")) if ev.get("end_date") else d0
+    if not d1 or d1 < d0:
+        return [ev["date"]]
+    days = []
+    d = d0
+    while d <= d1 and len(days) <= 31:
+        days.append(d.isoformat())
+        d += datetime.timedelta(days=1)
+    return days
+
+
+def _validate_event_range(date_s, end_s):
+    """Error string for a bad (date, end_date) pair, else None."""
+    if end_s:
+        d0, d1 = _parse_ymd(date_s), _parse_ymd(end_s)
+        if not d1:
+            return "end_date must be YYYY-MM-DD"
+        if d0 and d1 < d0:
+            return "end_date can't be before the start date"
+        if d0 and (d1 - d0).days > 30:
+            return "multi-day events are at most 31 days"
+    return None
+
+
+def _validate_days_input(days_in, event_days):
+    """Clean a client-supplied day list: deduped, sorted, subset of
+    the event's days. Returns (days, error): days is None when the
+    client sent nothing (meaning all days), [] when they sent an
+    empty list (also all days), or the cleaned list."""
+    if days_in is None:
+        return None, None
+    if not isinstance(days_in, list):
+        return None, "days must be a list of dates"
+    cleaned = sorted({str(d) for d in days_in if str(d).strip()})
+    if not event_days:
+        if cleaned:
+            return None, "this event has no days to pick from"
+        return [], None
+    bad = [d for d in cleaned if d not in event_days]
+    if bad:
+        return None, f"day {bad[0]} is not part of this event"
+    return cleaned, None
+
+
+def _attends_day(status, stored_days, day, event_days):
+    """Does an RSVP with this status + stored day set attend `day`?
+    day=None means the whole event (pre-multi-day callers). Going =
+    every day. Partial with no stored days = every day (legacy
+    meaning). Otherwise the day must be in the stored set."""
+    if status not in ("going", "partial"):
+        return False
+    if day is None:
+        return True
+    if event_days and day not in event_days:
+        return False
+    if status == "going":
+        return True
+    if not stored_days:
+        return True
+    return day in stored_days
+
+
+def _rsvp_days_map(db, eid):
+    """rsvp_id -> set of days, for one event's RSVPs."""
+    out = {}
     for r in db.execute(
-            "SELECT cc.member_id, cc.person_kind, cc.person_name"
-            " FROM carpool_claims cc JOIN carpools c ON c.id = cc.carpool_id"
-            " WHERE c.event_id=? AND cc.status='claimed'", (eid,)):
-        if _claim_matches(r, member_id, person_kind, person_name):
+            "SELECT rd.rsvp_id, rd.day FROM rsvp_days rd"
+            " JOIN rsvps r ON r.id = rd.rsvp_id WHERE r.event_id=?",
+            (eid,)):
+        out.setdefault(r["rsvp_id"], set()).add(r["day"])
+    return out
+
+
+def _carpool_days_map(db, eid):
+    """carpool_id -> set of days (empty set = runs every day)."""
+    out = {}
+    for c in db.execute("SELECT id FROM carpools WHERE event_id=?",
+                        (eid,)):
+        out[c["id"]] = set()
+    for r in db.execute(
+            "SELECT cd.carpool_id, cd.day FROM carpool_days cd"
+            " JOIN carpools c ON c.id = cd.carpool_id"
+            " WHERE c.event_id=?", (eid,)):
+        out.setdefault(r["carpool_id"], set()).add(r["day"])
+    return out
+
+
+def _carpool_runs_day(days_map, cid, day):
+    if day is None:
+        return True
+    days = days_map.get(cid)
+    if days is None:
+        return True
+    return not days or day in days
+
+
+def _days_overlap(days_a, days_b, event_days):
+    """Do two day sets overlap? An empty set means every day, and
+    an empty event_days (dateless) means the whole event overlaps."""
+    if not event_days:
+        return True
+    set_a = set(days_a) if days_a else set(event_days)
+    set_b = set(days_b) if days_b else set(event_days)
+    return bool(set_a & set_b)
+
+
+def _van_day_drivers_map(db, eid):
+    """(van_id, day) -> driver_user_id override for this event."""
+    return {(r["van_id"], r["day"]): r["driver_user_id"]
+            for r in db.execute(
+                "SELECT van_id, day, driver_user_id FROM van_day_drivers"
+                " WHERE event_id=?", (eid,))}
+
+
+def _van_driver_for_day(van, eid, day, overrides):
+    """The van's driver for a trip day: the per-day override if one
+    exists, else the designated driver. Returns a user id or None.
+    Accepts both dict rows (q_*) and raw sqlite Rows."""
+    try:
+        designated = van.get("driver_user_id")
+    except AttributeError:
+        designated = van["driver_user_id"]
+    if day is not None and overrides is not None:
+        ov = overrides.get((van["id"], day))
+        if ov:
+            return ov
+    return designated
+
+
+def _parent_attends_day(db, eid, parent_name, day, event_days):
+    """A parent RSVP (going, or partial covering the day on a
+    multi-day event) with this name, for driver eligibility. On a
+    single-day event only 'going' counts — the old rule, unchanged."""
+    multi = len(event_days) > 1
+    days_map = _rsvp_days_map(db, eid)
+    for r in db.execute(
+            "SELECT id, person_name, status FROM rsvps WHERE event_id=?"
+            " AND person_kind='parent'", (eid,)):
+        if _norm_name(r["person_name"]) != _norm_name(parent_name):
+            continue
+        if r["status"] == "going":
             return True
-    for r in db.execute(
-            "SELECT member_id, person_kind, person_name FROM van_claims"
-            " WHERE event_id=? AND status='claimed'", (eid,)):
-        if _claim_matches(r, member_id, person_kind, person_name):
+        if multi and r["status"] == "partial" and _attends_day(
+                "partial", days_map.get(r["id"], set()), day, event_days):
             return True
     return False
+
+
+def _event_driver_names_day(db, eid, day, event_days):
+    """Normalized names of everyone driving on `day`: carpool
+    drivers whose car runs that day, plus drivers of seated vans
+    for that day (override or designated). day=None = whole event
+    (the old _event_driver_names behavior, kept for callers that
+    don't pass a day)."""
+    names = set()
+    days_map = _carpool_days_map(db, eid) if day is not None else {}
+    for r in db.execute("SELECT id, driver_name FROM carpools"
+                        " WHERE event_id=?", (eid,)):
+        if r["driver_name"] and (day is None or _carpool_runs_day(
+                days_map, r["id"], day)):
+            names.add(_norm_name(r["driver_name"]))
+    overrides = _van_day_drivers_map(db, eid) if day is not None else {}
+    for v in db.execute("SELECT id, driver_user_id FROM team_vans"
+                        " WHERE seats IS NOT NULL"
+                        " AND driver_user_id IS NOT NULL"):
+        drv = _van_driver_for_day(v, eid, day, overrides) if day is not None \
+            else v["driver_user_id"]
+        if not drv:
+            continue
+        u = db.execute("SELECT name FROM users WHERE id=?",
+                       (drv,)).fetchone()
+        if u and u["name"]:
+            names.add(_norm_name(u["name"]))
+    return names
+
+
+def _is_driver_day(db, eid, day, event_days, person_kind, person_name):
+    """True if this person is driving on `day`. Only parents drive,
+    so a student name never matches, even if it coincides."""
+    if person_kind != "parent" or not person_name:
+        return False
+    return _norm_name(person_name) in _event_driver_names_day(
+        db, eid, day, event_days)
+
+
+def _claim_day_matches(claim_day, day):
+    """A claim row covers `day` when it is an all-days row (NULL) or
+    its day equals it. day=None (dateless/single-day legacy callers)
+    matches every row."""
+    if day is None:
+        return True
+    return claim_day is None or claim_day == day
+
+
+def _has_claimed_seat_day(db, eid, member_id, person_kind, person_name,
+                          day):
+    """One seat per person per DAY, across every vehicle: a claimed
+    seat on any carpool or van covering that day blocks another
+    claim for the same day. A seat on a different day does not."""
+    for r in db.execute(
+            "SELECT cc.member_id, cc.person_kind, cc.person_name, cc.day"
+            " FROM carpool_claims cc JOIN carpools c ON c.id = cc.carpool_id"
+            " WHERE c.event_id=? AND cc.status='claimed'", (eid,)):
+        if _claim_day_matches(r["day"], day) and _claim_matches(
+                r, member_id, person_kind, person_name):
+            return True
+    for r in db.execute(
+            "SELECT member_id, person_kind, person_name, day FROM van_claims"
+            " WHERE event_id=? AND status='claimed'", (eid,)):
+        if _claim_day_matches(r["day"], day) and _claim_matches(
+                r, member_id, person_kind, person_name):
+            return True
+    return False
+
+
+def _claimed_count_day(db, table, id_col, vid, day):
+    """Claimed seats on one vehicle for one day (NULL-day rows count
+    on every day)."""
+    rows = db.execute(
+        f"SELECT day FROM {table} WHERE {id_col}=? AND status='claimed'",
+        (vid,)).fetchall()
+    return sum(1 for r in rows if _claim_day_matches(r["day"], day))
+
+
+def _promote_waitlist_db(db, vehicle_type, vid, eid, deleted_day,
+                         event_days):
+    """Promote waitlisted riders after a claimed seat is freed.
+    Same-day buckets only: freeing a Day-1 seat promotes a Day-1
+    waitlist row, never a Day-3 one. A freed all-days (NULL) seat
+    promotes the first all-days waitlist row if there is one (it
+    fills every day); otherwise one row per event day. A candidate
+    is skipped if they have since become a driver for that day or
+    been seated elsewhere for that day. Returns the promoted row
+    dict, or a list of them for the all-days case, or None. Takes a
+    raw db connection — callers inside _lock must not go through
+    q_* (which re-locks)."""
+    if vehicle_type == "carpool":
+        tbl, id_col = "carpool_claims", "carpool_id"
+    else:
+        tbl, id_col = "van_claims", "van_id"
+
+    def waitlisted(day):
+        sql = (f"SELECT * FROM {tbl} WHERE {id_col}=? AND"
+               " status='waitlisted'")
+        args = [vid]
+        if vehicle_type == "van":
+            # Van claims are keyed by (van, event): never promote a
+            # waitlist row from a different event into this one.
+            sql += " AND event_id=?"
+            args.append(eid)
+        if day is None:
+            sql += " AND day IS NULL"
+        else:
+            sql += " AND day=?"
+            args.append(day)
+        return [dict(r) for r in db.execute(sql, args).fetchall()]
+
+    def eligible(nxt, day):
+        if _is_driver_day(db, eid, day, event_days, nxt["person_kind"],
+                          nxt["person_name"]):
+            return False
+        return not _has_claimed_seat_day(
+            db, eid, nxt["member_id"], nxt["person_kind"],
+            nxt["person_name"], day)
+
+    def promote_one(day):
+        for nxt in waitlisted(day):
+            if eligible(nxt, day):
+                db.execute(f"UPDATE {tbl} SET status='claimed' WHERE id=?",
+                           (nxt["id"],))
+                return dict(nxt)
+        return None
+
+    if deleted_day is not None:
+        return promote_one(deleted_day)
+    # All-days seat freed: an all-days waitlist row fills every day.
+    p = promote_one(None)
+    if p:
+        return p
+    promoted = []
+    for day in event_days:
+        p = promote_one(day)
+        if p:
+            promoted.append(p)
+    return promoted or None
 
 
 @app.route("/api/carpools", methods=["POST"])
@@ -3240,28 +3729,51 @@ def api_carpool_create():
         if not drv or drv["role"] != "parent":
             return err("pick a parent account as the driver")
         driver_uid, driver_name = drv["id"], drv["name"]
-    # A driver must be attending themselves (RSVP 'going'). The rule
-    # used to check the typed driver name; now it checks the resolved
+    ev = q_one("SELECT * FROM events WHERE id=?", (b["event_id"],))
+    if not ev:
+        return err("event not found", 404)
+    event_days = _event_days(ev)
+    days_in, days_err = _validate_days_input(b.get("days"), event_days)
+    if days_err:
+        return err(days_err)
+    run_days = days_in if days_in else event_days
+    # A driver must be attending on every day the car runs: 'going',
+    # or (multi-day only) a partial covering that day. The rule used
+    # to check the typed driver name; now it checks the resolved
     # account's name — same discipline, applied to the driver.
-    going_parents = {r["person_name"] for r in q_all(
-        "SELECT person_name FROM rsvps WHERE event_id=? AND"
-        " person_kind='parent' AND status='going'", (b["event_id"],))}
-    if driver_name not in going_parents:
-        return err("the driver must RSVP as attending for this event first")
-    # One vehicle per driver per event: a parent already driving a
-    # carpool can't post a second one, and a parent driving a team
-    # van with seats can't also drive a carpool — the van would stop
-    # being eligible for the event the moment the carpool appeared.
-    # (The going check above already ran, so a seated van driver here
-    # is an event-eligible van driver.)
-    if q_one("SELECT id FROM carpools WHERE event_id=? AND"
-             " driver_user_id=?", (b["event_id"], driver_uid)):
-        return err("that parent is already driving a carpool for"
-                   " this event")
-    if q_one("SELECT id FROM team_vans WHERE driver_user_id=? AND"
-             " seats IS NOT NULL", (driver_uid,)):
-        return err("that parent is already driving a team van with"
-                   " seats for this event")
+    with _lock:
+        db = get_db()
+        for d in (run_days or [None]):
+            if not _parent_attends_day(db, b["event_id"], driver_name,
+                                       d, event_days):
+                return err("the driver must RSVP as attending for"
+                           " every day the car runs")
+    # One vehicle per driver per DAY: a parent already driving a
+    # carpool on an overlapping day can't post a second one, and a
+    # parent driving a seated van on an overlapping day can't also
+    # drive a carpool — the van would stop being eligible for that
+    # day the moment the carpool appeared. Driving on a different
+    # day is fine.
+    with _lock:
+        db = get_db()
+        other_days = _carpool_days_map(db, b["event_id"])
+        for c in db.execute(
+                "SELECT id, driver_user_id FROM carpools"
+                " WHERE event_id=? AND driver_user_id=?",
+                (b["event_id"], driver_uid)):
+            if _days_overlap(other_days.get(c["id"], set()), run_days,
+                             event_days):
+                return err("that parent is already driving a carpool"
+                           " on one of those days")
+        van_overrides = _van_day_drivers_map(db, b["event_id"])
+        for v in db.execute(
+                "SELECT id, driver_user_id FROM team_vans"
+                " WHERE seats IS NOT NULL"):
+            for d in (run_days or [None]):
+                if _van_driver_for_day(v, b["event_id"], d,
+                                       van_overrides) == driver_uid:
+                    return err("that parent is already driving a team"
+                               " van with seats on one of those days")
     veh_in = b.get("vehicle") or {}
     vehicle = {k: str(veh_in.get(k) or "").strip()
                for k in ("plate", "color", "model", "make")
@@ -3274,7 +3786,13 @@ def api_carpool_create():
         (b["event_id"], driver_name, driver_uid, seats, b.get("depart_from"),
          b.get("depart_time"), b.get("return_info"), b.get("notes"),
          json.dumps(vehicle) if vehicle else None))
-    return jsonify(q_one("SELECT * FROM carpools WHERE id=?", (cid,))), 201
+    if days_in:
+        for d in days_in:
+            execute("INSERT OR IGNORE INTO carpool_days (carpool_id, day)"
+                    " VALUES (?,?)", (cid, d))
+    out = q_one("SELECT * FROM carpools WHERE id=?", (cid,))
+    out["days"] = sorted(days_in) if days_in else []
+    return jsonify(out), 201
 
 
 @app.route("/api/carpools/<int:cid>", methods=["PATCH"])
@@ -3289,6 +3807,15 @@ def api_carpool_patch(cid):
         return err("only the driver or a mentor can edit this car", 403)
     b = request.get_json(force=True)
     sets, args = [], []
+    ev = q_one("SELECT * FROM events WHERE id=?", (c["event_id"],))
+    event_days = _event_days(ev) if ev else []
+    # Days the car runs can be edited like any other field: an empty
+    # list (or omitting days) means every day.
+    new_days = None
+    if "days" in b:
+        new_days, days_err = _validate_days_input(b["days"], event_days)
+        if days_err:
+            return err(days_err)
     if "seats" in b:
         try:
             seats = int(b["seats"])
@@ -3296,10 +3823,19 @@ def api_carpool_patch(cid):
             return err("seats must be a number")
         if seats < 1:
             return err("seats required")
-        claimed = q_one("SELECT COUNT(*) n FROM carpool_claims"
-                        " WHERE carpool_id=? AND status='claimed'",
-                        (cid,))["n"]
-        if seats < claimed:
+        # Seats are per-day capacity, so the floor is the busiest
+        # day's claimed count (all-days rows count on every day),
+        # not the total across days.
+        with _lock:
+            db = get_db()
+            rows = db.execute(
+                "SELECT day FROM carpool_claims WHERE carpool_id=?"
+                " AND status='claimed'", (cid,)).fetchall()
+        busiest = 0
+        for d in (event_days or [None]):
+            busiest = max(busiest, sum(
+                1 for r in rows if _claim_day_matches(r["day"], d)))
+        if seats < busiest:
             return err("seats can't go below the riders already claimed")
         sets.append("seats=?")
         args.append(seats)
@@ -3316,35 +3852,88 @@ def api_carpool_patch(cid):
         args.append(json.dumps(vehicle) if vehicle else None)
     # Driver reassignment is mentor-only; a parent editing their own
     # car keeps themselves as driver (any driver field sent is ignored).
+    # Changing the days re-checks the (possibly new) driver against
+    # the new days, so a car can't be moved onto a day its driver
+    # doesn't attend or already drives on.
     if me["role"] in MENTOR_ROLES and b.get("driver_user_id"):
         drv = q_one("SELECT id, name, role FROM users WHERE id=?",
                     (b["driver_user_id"],))
         if not drv or drv["role"] != "parent":
             return err("pick a parent account as the driver")
-        going_parents = {r["person_name"] for r in q_all(
-            "SELECT person_name FROM rsvps WHERE event_id=? AND"
-            " person_kind='parent' AND status='going'", (c["event_id"],))}
-        if drv["name"] not in going_parents:
-            return err("the driver must RSVP as attending for this event first")
+        check_days = new_days if new_days is not None else None
+        if check_days is None:
+            with _lock:
+                db = get_db()
+                existing = {r["day"] for r in db.execute(
+                    "SELECT day FROM carpool_days WHERE carpool_id=?",
+                    (cid,))}
+            check_days = sorted(existing) if existing else event_days
+        with _lock:
+            db = get_db()
+            for d in (check_days or [None]):
+                if not _parent_attends_day(db, c["event_id"], drv["name"],
+                                           d, event_days):
+                    return err("the driver must RSVP as attending for"
+                               " every day the car runs")
         if drv["id"] != c.get("driver_user_id"):
-            if q_one("SELECT id FROM carpools WHERE event_id=? AND"
-                     " driver_user_id=? AND id!=?",
-                     (c["event_id"], drv["id"], cid)):
-                return err("that parent is already driving a carpool"
-                           " for this event")
-            if q_one("SELECT id FROM team_vans WHERE driver_user_id=?"
-                     " AND seats IS NOT NULL", (drv["id"],)):
-                return err("that parent is already driving a team van"
-                           " with seats for this event")
+            with _lock:
+                db = get_db()
+                other_days = _carpool_days_map(db, c["event_id"])
+                for oc in db.execute(
+                        "SELECT id FROM carpools WHERE event_id=?"
+                        " AND driver_user_id=? AND id!=?",
+                        (c["event_id"], drv["id"], cid)):
+                    if _days_overlap(other_days.get(oc["id"], set()),
+                                     check_days, event_days):
+                        return err("that parent is already driving a"
+                                   " carpool on one of those days")
+                van_overrides = _van_day_drivers_map(db, c["event_id"])
+                for v in db.execute(
+                        "SELECT id, driver_user_id FROM team_vans"
+                        " WHERE seats IS NOT NULL"):
+                    for d in (check_days or [None]):
+                        if _van_driver_for_day(v, c["event_id"], d,
+                                               van_overrides) == drv["id"]:
+                            return err("that parent is already driving"
+                                       " a team van with seats on one"
+                                       " of those days")
         sets.append("driver_user_id=?")
         args.append(drv["id"])
         sets.append("driver_name=?")
         args.append(drv["name"])
-    if not sets:
+    elif new_days is not None and me["role"] not in MENTOR_ROLES:
+        # A driver-owner changing only the days still needs to attend
+        # the new days themselves.
+        with _lock:
+            db = get_db()
+            for d in (new_days or event_days or [None]):
+                if not _parent_attends_day(db, c["event_id"],
+                                           c["driver_name"], d, event_days):
+                    return err("the driver must RSVP as attending for"
+                               " every day the car runs")
+    if not sets and new_days is None:
         return err("nothing to update")
-    execute(f"UPDATE carpools SET {', '.join(sets)} WHERE id=?",
-            (*args, cid))
-    return jsonify(q_one("SELECT * FROM carpools WHERE id=?", (cid,)))
+    if sets:
+        execute(f"UPDATE carpools SET {', '.join(sets)} WHERE id=?",
+                (*args, cid))
+    if new_days is not None:
+        with _lock:
+            db = get_db()
+            db.execute("DELETE FROM carpool_days WHERE carpool_id=?",
+                       (cid,))
+            for d in new_days:
+                db.execute("INSERT OR IGNORE INTO carpool_days"
+                           " (carpool_id, day) VALUES (?,?)", (cid, d))
+            db.commit()
+    out = q_one("SELECT * FROM carpools WHERE id=?", (cid,))
+    out["days"] = sorted(new_days) if new_days is not None else None
+    if out["days"] is None:
+        with _lock:
+            db = get_db()
+            out["days"] = sorted({r["day"] for r in db.execute(
+                "SELECT day FROM carpool_days WHERE carpool_id=?",
+                (cid,))})
+    return jsonify(out)
 
 
 @app.route("/api/carpools/<int:cid>", methods=["DELETE"])
@@ -3359,6 +3948,7 @@ def api_carpool_delete(cid):
         db = get_db()
         n = db.execute("DELETE FROM carpool_claims WHERE carpool_id=?",
                        (cid,)).rowcount
+        db.execute("DELETE FROM carpool_days WHERE carpool_id=?", (cid,))
         # Tools riding in this car go back to the pool, not to a ghost.
         tu = db.execute("UPDATE tools SET vehicle_type=NULL, vehicle_id=NULL,"
                         " claimed_at=NULL WHERE vehicle_type='carpool'"
@@ -3377,46 +3967,81 @@ def api_carpool_claim(cid):
     b = request.get_json(force=True)
     if not b.get("person_name"):
         return err("person_name required")
-    if not is_attending(c["event_id"], b.get("member_id"), b.get("person_kind")):
-        return err("only people attending this event can claim a seat"
-                   " — RSVP as going first")
+    ev = q_one("SELECT * FROM events WHERE id=?", (c["event_id"],))
+    event_days = _event_days(ev) if ev else []
+    # The day claimed: required on multi-day events (a seat is
+    # per-day), defaulted to the one date on single-day events.
+    day_in = (b.get("day") or "").strip() or None
+    if len(event_days) > 1:
+        if not day_in:
+            return err("day is required for multi-day events"
+                       " — pick a day")
+        if day_in not in event_days:
+            return err("day is not part of this event")
+        day = day_in
+    elif len(event_days) == 1:
+        if day_in and day_in != event_days[0]:
+            return err("day is not part of this event")
+        day = event_days[0]
+    else:
+        day = None
     with _lock:
         db = get_db()
-        # One row per person per carpool: a second claim used to land in
-        # the waitlist while the person already held a seat (or vice versa).
+        if not _carpool_runs_day(_carpool_days_map(db, c["event_id"]),
+                                 cid, day):
+            return err("this car isn't running on that day", 400)
+        # Attending ON THAT DAY, not just the trip: a partial
+        # attending only Day 3 can't claim a Day 1 seat.
+        days_map = _rsvp_days_map(db, c["event_id"])
+        rsvp = db.execute(
+            "SELECT id, status FROM rsvps WHERE event_id=? AND member_id"
+            + (" IS NULL" if b.get("member_id") is None else "=?")
+            + " AND person_kind=?",
+            tuple([c["event_id"]]
+                  + ([] if b.get("member_id") is None else [b["member_id"]])
+                  + [b.get("person_kind")])).fetchone()
+        if not rsvp or not _attends_day(rsvp["status"],
+                                        days_map.get(rsvp["id"], set()),
+                                        day, event_days):
+            return err("only people attending on that day can claim a"
+                       " seat — RSVP for that day first")
+        # One row per person per carpool per day: a second claim used
+        # to land in the waitlist while the person already held a
+        # seat (or vice versa). A row for another day doesn't count.
         if b.get("member_id"):
             dup = db.execute(
-                "SELECT id FROM carpool_claims WHERE carpool_id=? AND"
+                "SELECT id, day FROM carpool_claims WHERE carpool_id=? AND"
                 " member_id=? AND person_kind=?",
-                (cid, b["member_id"], b.get("person_kind"))).fetchone()
+                (cid, b["member_id"], b.get("person_kind"))).fetchall()
         else:
             dup = db.execute(
-                "SELECT id FROM carpool_claims WHERE carpool_id=? AND"
+                "SELECT id, day FROM carpool_claims WHERE carpool_id=? AND"
                 " member_id IS NULL AND person_name=? AND person_kind=?",
-                (cid, b["person_name"], b.get("person_kind"))).fetchone()
-        if dup:
+                (cid, b["person_name"], b.get("person_kind"))).fetchall()
+        if any(_claim_day_matches(r["day"], day) for r in dup):
             return err("already on this ride — claimed or waitlisted", 409)
-        # A driver can't also be a rider: not in their own car, and
-        # not in anyone else's — they're already driving for the event.
-        if _is_event_driver(db, c["event_id"], b.get("person_kind"),
-                            b["person_name"]):
-            return err("drivers can't claim a seat — they're driving"
-                       " for this event", 403)
-        # One seat per person per event, across every vehicle: a seat
-        # already claimed on another carpool or a van blocks this one.
-        if _has_claimed_seat(db, c["event_id"], b.get("member_id"),
-                             b.get("person_kind"), b["person_name"]):
-            return err("already has a seat for this event — on another"
+        # A driver can't also be a rider on a day they're driving:
+        # not in their own car, and not in anyone else's.
+        if _is_driver_day(db, c["event_id"], day, event_days,
+                          b.get("person_kind"), b["person_name"]):
+            return err("drivers can't claim a seat on a day they're"
+                       " driving", 403)
+        # One seat per person per DAY, across every vehicle: a seat
+        # already claimed on another carpool or a van for this day
+        # blocks this one; a seat on another day does not.
+        if _has_claimed_seat_day(db, c["event_id"], b.get("member_id"),
+                                 b.get("person_kind"), b["person_name"],
+                                 day):
+            return err("already has a seat for that day — on another"
                        " car or van", 409)
-        taken = db.execute(
-            "SELECT COUNT(*) n FROM carpool_claims"
-            " WHERE carpool_id=? AND status='claimed'", (cid,)).fetchone()["n"]
+        taken = _claimed_count_day(db, "carpool_claims", "carpool_id",
+                                   cid, day)
         status = "claimed" if taken < c["seats"] else "waitlisted"
         cur = db.execute(
             "INSERT INTO carpool_claims (carpool_id, member_id, person_kind,"
-            " person_name, status) VALUES (?,?,?,?,?)",
+            " person_name, status, day) VALUES (?,?,?,?,?,?)",
             (cid, b.get("member_id"), b.get("person_kind"), b["person_name"],
-             status))
+             status, day))
         db.commit()
         clid = cur.lastrowid
     return jsonify(q_one("SELECT * FROM carpool_claims WHERE id=?", (clid,))), 201
@@ -3432,35 +4057,16 @@ def api_carpool_claim_delete(clid):
         db.execute("DELETE FROM carpool_claims WHERE id=?", (clid,))
         promoted = None
         if cl["status"] == "claimed":
-            claimed_ids = {(r["member_id"], r["person_kind"]) for r in db.execute(
-                "SELECT member_id, person_kind FROM carpool_claims"
-                " WHERE carpool_id=? AND status='claimed'",
-                (cl["carpool_id"],))}
-            claimed_names = {(r["person_name"], r["person_kind"]) for r in db.execute(
-                "SELECT person_name, person_kind FROM carpool_claims"
-                " WHERE carpool_id=? AND status='claimed'",
-                (cl["carpool_id"],))}
             ev_row = db.execute("SELECT event_id FROM carpools WHERE id=?",
                                 (cl["carpool_id"],)).fetchone()
             eid = ev_row["event_id"] if ev_row else None
-            for nxt in db.execute(
-                    "SELECT * FROM carpool_claims WHERE carpool_id=? AND"
-                    " status='waitlisted' ORDER BY created_at, id",
-                    (cl["carpool_id"],)):
-                if ((nxt["member_id"], nxt["person_kind"]) in claimed_ids
-                        or (nxt["person_name"], nxt["person_kind"]) in claimed_names):
-                    continue  # stale duplicate: never promote into a second seat
-                if eid is not None and (
-                        _is_event_driver(db, eid, nxt["person_kind"],
-                                         nxt["person_name"])
-                        or _has_claimed_seat(db, eid, nxt["member_id"],
-                                             nxt["person_kind"],
-                                             nxt["person_name"])):
-                    continue  # driving, or already seated on another vehicle
-                db.execute("UPDATE carpool_claims SET status='claimed' WHERE id=?",
-                           (nxt["id"],))
-                promoted = dict(nxt)
-                break
+            if eid is not None:
+                ev = db.execute("SELECT * FROM events WHERE id=?",
+                                (eid,)).fetchone()
+                event_days = _event_days(dict(ev)) if ev else []
+                promoted = _promote_waitlist_db(
+                    db, "carpool", cl["carpool_id"], eid,
+                    cl.get("day"), event_days)
         db.commit()
     return jsonify({"deleted": clid, "promoted": promoted})
 
@@ -3520,8 +4126,9 @@ def api_tool_delete(tid):
 
 
 def _owns_vehicle(me, vehicle_type, vehicle_id):
-    """True if this parent drives the vehicle: their own carpool, or a
-    team van they are designated to drive. Mentors are handled by the
+    """True if this parent drives the vehicle: their own carpool, or
+    a team van they are designated to drive — or drive on any day
+    of any event via a per-day override. Mentors are handled by the
     caller, not here."""
     if vehicle_type == "carpool":
         c = q_one("SELECT driver_user_id FROM carpools WHERE id=?",
@@ -3530,7 +4137,11 @@ def _owns_vehicle(me, vehicle_type, vehicle_id):
     if vehicle_type == "van":
         v = q_one("SELECT driver_user_id FROM team_vans WHERE id=?",
                   (vehicle_id,))
-        return v is not None and v["driver_user_id"] == me["id"]
+        if v is not None and v["driver_user_id"] == me["id"]:
+            return True
+        return q_one("SELECT driver_user_id FROM van_day_drivers"
+                     " WHERE van_id=? AND driver_user_id=?",
+                     (vehicle_id, me["id"])) is not None
     return False
 
 
@@ -3811,6 +4422,7 @@ def api_team_van_delete(vid):
                         " AND vehicle_id=?", (vid,)).rowcount
         nc = db.execute("DELETE FROM van_claims WHERE van_id=?",
                         (vid,)).rowcount
+        db.execute("DELETE FROM van_day_drivers WHERE van_id=?", (vid,))
         db.execute("DELETE FROM team_vans WHERE id=?", (vid,))
         db.commit()
     return jsonify({"deleted": vid, "tools_unassigned": tu,
@@ -3819,12 +4431,12 @@ def api_team_van_delete(vid):
 
 @app.route("/api/vans/<int:vid>/claims", methods=["POST"])
 def api_van_claim(vid):
-    """A student (or parent) rides in a team van for an event. The van
-    takes riders only when it has seats AND a designated parent driver
-    who RSVP'd going for this event — and that driver isn't already
-    driving a carpool for the same event. Otherwise the van is
-    tools-only for the event. Capacity, waitlist, and dedupe mirror
-    carpool seats."""
+    """A student (or parent) rides in a team van for an event on one
+    day. The van takes riders only when it has seats AND a driver
+    for that day (per-day override, else designated) who is
+    attending that day — and that driver isn't already driving a
+    carpool that day. Otherwise the van is tools-only for that day.
+    Capacity, waitlist, and dedupe mirror carpool seats, per day."""
     v = q_one("SELECT * FROM team_vans WHERE id=?", (vid,))
     if not v:
         return err("team van not found", 404)
@@ -3833,59 +4445,93 @@ def api_van_claim(vid):
         return err("event_id and person_name required")
     if not v.get("seats"):
         return err("this van doesn't take riders — set its seats first")
-    drv = q_one("SELECT id, name FROM users WHERE id=?",
-                (v.get("driver_user_id"),)) if v.get("driver_user_id") else None
-    if not drv:
-        return err("this van has no designated driver yet")
-    going = {r["person_name"] for r in q_all(
-        "SELECT person_name FROM rsvps WHERE event_id=? AND"
-        " person_kind='parent' AND status='going'", (b["event_id"],))}
-    if drv["name"] not in going:
-        return err("the van's driver must RSVP as attending for this"
-                   " event first")
-    car_driver = q_one("SELECT id FROM carpools WHERE event_id=? AND"
-                       " driver_user_id=?", (b["event_id"], drv["id"]))
-    if car_driver:
-        return err("the van's driver is already driving a carpool for"
-                   " this event")
-    if not is_attending(b["event_id"], b.get("member_id"), b.get("person_kind")):
-        return err("only people attending this event can ride — RSVP"
-                   " as going first")
+    ev = q_one("SELECT * FROM events WHERE id=?", (b["event_id"],))
+    if not ev:
+        return err("event not found", 404)
+    event_days = _event_days(ev)
+    day_in = (b.get("day") or "").strip() or None
+    if len(event_days) > 1:
+        if not day_in:
+            return err("day is required for multi-day events"
+                       " — pick a day")
+        if day_in not in event_days:
+            return err("day is not part of this event")
+        day = day_in
+    elif len(event_days) == 1:
+        if day_in and day_in != event_days[0]:
+            return err("day is not part of this event")
+        day = event_days[0]
+    else:
+        day = None
     with _lock:
         db = get_db()
+        day_driver = _van_driver_for_day(
+            v, b["event_id"], day, _van_day_drivers_map(db, b["event_id"]))
+        if not day_driver:
+            return err("this van has no driver for that day yet")
+        drv = db.execute("SELECT id, name FROM users WHERE id=?",
+                         (day_driver,)).fetchone()
+        if not drv:
+            return err("this van has no driver for that day yet")
+        if not _parent_attends_day(db, b["event_id"], drv["name"], day,
+                                   event_days):
+            return err("the van's driver must RSVP as attending for"
+                       " that day first")
+        car_days = _carpool_days_map(db, b["event_id"])
+        for c in db.execute(
+                "SELECT id FROM carpools WHERE event_id=? AND"
+                " driver_user_id=?", (b["event_id"], drv["id"])):
+            if _carpool_runs_day(car_days, c["id"], day):
+                return err("the van's driver is already driving a"
+                           " carpool on that day")
+        days_map = _rsvp_days_map(db, b["event_id"])
+        rsvp = db.execute(
+            "SELECT id, status FROM rsvps WHERE event_id=? AND member_id"
+            + (" IS NULL" if b.get("member_id") is None else "=?")
+            + " AND person_kind=?",
+            tuple([b["event_id"]]
+                  + ([] if b.get("member_id") is None else [b["member_id"]])
+                  + [b.get("person_kind")])).fetchone()
+        if not rsvp or not _attends_day(rsvp["status"],
+                                        days_map.get(rsvp["id"], set()),
+                                        day, event_days):
+            return err("only people attending on that day can ride"
+                       " — RSVP for that day first")
         if b.get("member_id"):
             dup = db.execute(
-                "SELECT id FROM van_claims WHERE van_id=? AND event_id=?"
+                "SELECT id, day FROM van_claims WHERE van_id=? AND event_id=?"
                 " AND member_id=? AND person_kind=?",
                 (vid, b["event_id"], b["member_id"],
-                 b.get("person_kind"))).fetchone()
+                 b.get("person_kind"))).fetchall()
         else:
             dup = db.execute(
-                "SELECT id FROM van_claims WHERE van_id=? AND event_id=?"
+                "SELECT id, day FROM van_claims WHERE van_id=? AND event_id=?"
                 " AND member_id IS NULL AND person_name=? AND person_kind=?",
                 (vid, b["event_id"], b["person_name"],
-                 b.get("person_kind"))).fetchone()
-        if dup:
+                 b.get("person_kind"))).fetchall()
+        if any(_claim_day_matches(r["day"], day) for r in dup):
             return err("already riding in this van — claimed or waitlisted",
                        409)
-        if _is_event_driver(db, b["event_id"], b.get("person_kind"),
-                            b["person_name"]):
-            return err("drivers can't claim a seat — they're driving"
-                       " for this event", 403)
-        if _has_claimed_seat(db, b["event_id"], b.get("member_id"),
-                             b.get("person_kind"), b["person_name"]):
-            return err("already has a seat for this event — on another"
+        if _is_driver_day(db, b["event_id"], day, event_days,
+                          b.get("person_kind"), b["person_name"]):
+            return err("drivers can't claim a seat on a day they're"
+                       " driving", 403)
+        if _has_claimed_seat_day(db, b["event_id"], b.get("member_id"),
+                                 b.get("person_kind"), b["person_name"],
+                                 day):
+            return err("already has a seat for that day — on another"
                        " car or van", 409)
-        taken = db.execute(
-            "SELECT COUNT(*) n FROM van_claims WHERE van_id=? AND"
-            " event_id=? AND status='claimed'",
-            (vid, b["event_id"])).fetchone()["n"]
+        # Van capacity is per (van, event, day), scoped to this event.
+        taken = sum(1 for r in db.execute(
+            "SELECT day FROM van_claims WHERE van_id=? AND event_id=?"
+            " AND status='claimed'", (vid, b["event_id"])).fetchall()
+            if _claim_day_matches(r["day"], day))
         status = "claimed" if taken < v["seats"] else "waitlisted"
         cur = db.execute(
             "INSERT INTO van_claims (van_id, event_id, member_id,"
-            " person_kind, person_name, status) VALUES (?,?,?,?,?,?)",
+            " person_kind, person_name, status, day) VALUES (?,?,?,?,?,?,?)",
             (vid, b["event_id"], b.get("member_id"), b.get("person_kind"),
-             b["person_name"], status))
+             b["person_name"], status, day))
         db.commit()
         clid = cur.lastrowid
     return jsonify(q_one("SELECT * FROM van_claims WHERE id=?", (clid,))), 201
@@ -3901,34 +4547,56 @@ def api_van_claim_delete(clid):
         db.execute("DELETE FROM van_claims WHERE id=?", (clid,))
         promoted = None
         if cl["status"] == "claimed":
-            claimed_ids = {(r["member_id"], r["person_kind"]) for r in db.execute(
-                "SELECT member_id, person_kind FROM van_claims"
-                " WHERE van_id=? AND event_id=? AND status='claimed'",
-                (cl["van_id"], cl["event_id"]))}
-            claimed_names = {(r["person_name"], r["person_kind"]) for r in db.execute(
-                "SELECT person_name, person_kind FROM van_claims"
-                " WHERE van_id=? AND event_id=? AND status='claimed'",
-                (cl["van_id"], cl["event_id"]))}
-            for nxt in db.execute(
-                    "SELECT * FROM van_claims WHERE van_id=? AND event_id=?"
-                    " AND status='waitlisted' ORDER BY created_at, id",
-                    (cl["van_id"], cl["event_id"])):
-                if ((nxt["member_id"], nxt["person_kind"]) in claimed_ids
-                        or (nxt["person_name"], nxt["person_kind"]) in claimed_names):
-                    continue
-                if (_is_event_driver(db, cl["event_id"], nxt["person_kind"],
-                                     nxt["person_name"])
-                        or _has_claimed_seat(db, cl["event_id"],
-                                             nxt["member_id"],
-                                             nxt["person_kind"],
-                                             nxt["person_name"])):
-                    continue  # driving, or already seated on another vehicle
-                db.execute("UPDATE van_claims SET status='claimed' WHERE id=?",
-                           (nxt["id"],))
-                promoted = dict(nxt)
-                break
+            ev = db.execute("SELECT * FROM events WHERE id=?",
+                            (cl["event_id"],)).fetchone()
+            event_days = _event_days(dict(ev)) if ev else []
+            promoted = _promote_waitlist_db(
+                db, "van", cl["van_id"], cl["event_id"],
+                cl.get("day"), event_days)
         db.commit()
     return jsonify({"deleted": clid, "promoted": promoted})
+
+
+@app.route("/api/vans/<int:vid>/day-driver", methods=["POST"])
+@require_role("mentor", "admin")
+def api_van_day_driver(vid):
+    """Per-day van driver override for one event: a different parent
+    may drive the van on a given trip day. driver_user_id null (or
+    empty) clears the override back to the designated driver. The
+    override itself is permissive — van eligibility for that day
+    still requires the day driver to be attending that day and not
+    driving a carpool that day — so a mentor can set it before
+    RSVPs are filed."""
+    v = q_one("SELECT * FROM team_vans WHERE id=?", (vid,))
+    if not v:
+        return err("team van not found", 404)
+    b = request.get_json(force=True, silent=True) or {}
+    ev = q_one("SELECT * FROM events WHERE id=?", (b.get("event_id"),))
+    if not ev:
+        return err("event not found", 404)
+    event_days = _event_days(ev)
+    day = (b.get("day") or "").strip() or None
+    if not day or day not in event_days:
+        return err("day is not part of this event")
+    drv_uid = b.get("driver_user_id")
+    if drv_uid:
+        drv = q_one("SELECT id, role FROM users WHERE id=?", (drv_uid,))
+        if not drv or drv["role"] != "parent":
+            return err("pick a parent account as the day driver")
+        with _lock:
+            db = get_db()
+            db.execute(
+                """INSERT INTO van_day_drivers (van_id, event_id, day,
+                   driver_user_id) VALUES (?,?,?,?)
+                   ON CONFLICT(van_id, event_id, day) DO UPDATE SET
+                     driver_user_id=excluded.driver_user_id""",
+                (vid, ev["id"], day, drv_uid))
+            db.commit()
+    else:
+        execute("DELETE FROM van_day_drivers WHERE van_id=? AND event_id=?"
+                " AND day=?", (vid, ev["id"], day))
+    return jsonify({"van_id": vid, "event_id": ev["id"], "day": day,
+                    "driver_user_id": drv_uid or None})
 
 
 @app.route("/api/hotels", methods=["POST"])

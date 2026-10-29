@@ -353,11 +353,44 @@ and `can't make it` do not count as attending.
   with a 403 instead of being silently corrected; the account-name
   allowance covers relationship-linked parents whose recorded
   parent_name differs from their account name. Statuses: going /
-  maybe / partial / can't make it / waitlisted. **Partial** is for
-  multi-day events such as tournaments, when someone attends only
-  part of the event — but note it records *that* someone is partial,
-  not *which days*; per-day attendance is still an open design (see
-  BUGS.md / multi-day notes).
+  maybe / partial / can't make it / waitlisted.
+- **Multi-day trips (per-day linkage):** an event has an optional
+  **end_date** (max 31 days); its days are date .. end_date, and the
+  calendar shows the trip on every day. **Partial** now carries the
+  days it covers (day checkboxes in the picker, all checked by
+  default; an unspecified partial still means every day, as before).
+  **Going** covers every day. Event capacity is checked **per day**:
+  a partial attending only Day 1 does not occupy a Day 3 spot, and
+  if any covered day is full the whole RSVP waitlists.
+- **Per-day rides:** Travel and Tracking have **day tabs**; rides,
+  seats, drivers, and ride status are for the selected day, while
+  tools and hotel rooms stay per-trip. A carpool lists the days it
+  runs (default every day); a rider claims **one seat per person per
+  day** across every vehicle, so riding Car A out Day 1 and Car B
+  back Day 3 is allowed and a same-day seat elsewhere blocks a
+  second claim that day. A driver must be attending on every day
+  their car runs — 'going', or (multi-day only) a partial covering
+  that day — and a driver on Day 1 may ride as a passenger on Day
+  3 if they aren't driving that day. Waitlist promotion is per-day:
+  freeing a Day 1 seat promotes a Day 1 waitlist row, never a Day 3
+  one. Team vans have a **per-day driver override** (mentors set a
+  different parent to drive the van on one day, or back to the
+  designated driver); van eligibility for a day still requires that
+  day's driver to be attending that day and not driving a carpool
+  that day. Check-ins are **per person per day**, so a 3-day trip
+  credits each day separately (the day is required on multi-day
+  events). NULL/empty day sets mean "all days" throughout, so
+  pre-multi-day data (single-day events, old claims and check-ins)
+  keeps working untouched.
+- **Room status:** the Hotel assignments section has a Room status
+  pane mirroring Ride status: every student RSVP'd going or partial
+  for the trip, with a green pill for their room (label + actual
+  room number once set), amber "requested — awaiting placement"
+  for a pending rooming request, or amber "needs room" otherwise.
+  Parents appear only when they are a room parent for a room
+  (they don't take a room slot, so unlisted parents are not shown
+  as needing a room). Rooms stay per-trip, so the pane lists all
+  trip attendees on every day tab, not just that day's riders.
 - **RSVP deadlines are enforced on the server, not just by hiding the
   buttons:** once an event's deadline passes, non-mentors get a 403
   filing an RSVP (the UI hides their picker and shows an "RSVP closed"
@@ -427,12 +460,14 @@ and `can't make it` do not count as attending.
   This month / This quarter) filters by due date; undated tasks always
   show.
 
-## Travel & logistics (per event)
+## Travel & logistics (per event, per day on multi-day trips)
 
 All assignment lists in this tab are **attendance-driven**: they are pulled
-dynamically from the event's attendees (RSVP = going). People who have not
+dynamically from the event's attendees (RSVP = going or partial). People who have not
 RSVP'd as attending do not appear and cannot be assigned, on the server as
-well as in the UI.
+well as in the UI. On a multi-day trip the ride lists are for the selected
+day (see the multi-day bullets under Events & RSVPs); tools and hotel rooms
+stay per-trip.
 
 ### Carpools
 

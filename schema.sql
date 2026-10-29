@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS events (
   session_hours REAL,               -- default hours credited per check-in
   notes        TEXT,
   season       TEXT,                 -- NULL = current season; set when archived
+  end_date     TEXT,                 -- multi-day: last day, YYYY-MM-DD;
+                                   -- NULL = single-day (date only)
   sample       INTEGER NOT NULL DEFAULT 0
 );
 
@@ -102,6 +104,8 @@ CREATE TABLE IF NOT EXISTS rsvps (
 );
 
 -- Attendance check-ins. verified=0 for self check-ins until a mentor confirms.
+-- day: the trip day checked in (YYYY-MM-DD); NULL on dateless events.
+-- One check-in per person per day, so a 3-day trip credits each day.
 CREATE TABLE IF NOT EXISTS checkins (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id    INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -111,8 +115,35 @@ CREATE TABLE IF NOT EXISTS checkins (
   method      TEXT NOT NULL DEFAULT 'mentor',  -- self | mentor
   verified    INTEGER NOT NULL DEFAULT 1,
   hours       REAL NOT NULL DEFAULT 0,
+  day         TEXT,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(event_id, member_id, person_kind)
+  UNIQUE(event_id, member_id, person_kind, day)
+);
+
+-- Days a partial RSVP covers (YYYY-MM-DD). Empty = unspecified partial,
+-- which counts as attending every day (the pre-multi-day meaning of
+-- partial). Going RSVPs need no rows: going = every day.
+CREATE TABLE IF NOT EXISTS rsvp_days (
+  rsvp_id INTEGER NOT NULL REFERENCES rsvps(id) ON DELETE CASCADE,
+  day     TEXT NOT NULL,
+  UNIQUE(rsvp_id, day)
+);
+
+-- Days a carpool runs (YYYY-MM-DD). Empty = runs every day of the trip.
+CREATE TABLE IF NOT EXISTS carpool_days (
+  carpool_id INTEGER NOT NULL REFERENCES carpools(id) ON DELETE CASCADE,
+  day        TEXT NOT NULL,
+  UNIQUE(carpool_id, day)
+);
+
+-- Per-day van driver override: a different parent may drive the van on
+-- a given trip day. Empty for a day = the van's designated driver.
+CREATE TABLE IF NOT EXISTS van_day_drivers (
+  van_id   INTEGER NOT NULL REFERENCES team_vans(id) ON DELETE CASCADE,
+  event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  day      TEXT NOT NULL,
+  driver_user_id INTEGER NOT NULL,
+  UNIQUE(van_id, event_id, day)
 );
 
 CREATE TABLE IF NOT EXISTS tasks (
@@ -141,6 +172,7 @@ CREATE TABLE IF NOT EXISTS carpool_claims (
   person_kind TEXT,
   person_name TEXT NOT NULL,
   status      TEXT NOT NULL,       -- claimed | waitlisted
+  day         TEXT,                -- trip day (YYYY-MM-DD); NULL = all days
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -223,6 +255,7 @@ CREATE TABLE IF NOT EXISTS van_claims (
   person_kind TEXT,
   person_name TEXT NOT NULL,
   status      TEXT NOT NULL,       -- claimed | waitlisted
+  day         TEXT,                -- trip day (YYYY-MM-DD); NULL = all days
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
