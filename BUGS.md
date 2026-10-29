@@ -35,7 +35,7 @@ _None right now._
   spoofing another student's name both get 403 with no row
   created/changed, legit RSVPs (including a loose case/space
   variant) still succeed, and the mentor override still files.
-  (commit TBD)
+   (commit 0581180d)
 
 ### Tool sign-up list: collapse/expand all + red/green assignment status (2026-10-28)
 - **Reported:** Bruce — "make collapse all/expand all for Tool
