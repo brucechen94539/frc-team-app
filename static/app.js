@@ -1993,7 +1993,7 @@ async function renderTracking() {
 let tasksOnlyMine = false, tasksAssignee = "", tasksSubteam = "", tasksPeriod = "all",
   tasksShowArchived = false;
 const chipColor = (name) => {
-  const palette = ["#fde8d7", "#dcefe3", "#dde8fb", "#f3e4f7", "#fdf3c4", "#e0f2f1"];
+  const palette = ["#e0e7ff", "#dcefe3", "#dde8fb", "#f3e4f7", "#fdf3c4", "#e0f2f1"];
   let h = 0;
   for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return palette[h % palette.length];
