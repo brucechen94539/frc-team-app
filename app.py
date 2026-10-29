@@ -3216,12 +3216,28 @@ def api_travel(eid):
     parent_names = sorted({m["parent_name"] for m in q_all(
         "SELECT parent_name FROM members WHERE parent_name IS NOT NULL"
         " AND parent_name != ''") if m["parent_name"]})
+    # Who the caller is for the Fleet / Post Ride rules: their own
+    # registered car (one per driver per event) and whether they
+    # drive a team van on any day of this event. The frontend hides
+    # the Post Ride form on this; the server enforces it regardless.
+    me = current_user()
+    me_info = None
+    if me:
+        my_car = q_one("SELECT id FROM carpools WHERE event_id=? AND"
+                       " driver_user_id=?", (eid, me["id"]))
+        van_driver = False
+        for v in q_all("SELECT * FROM team_vans WHERE seats IS NOT NULL"):
+            for d in (event_days or [None]):
+                if _van_driver_for_day(v, eid, d, van_overrides) == me["id"]:
+                    van_driver = True
+        me_info = {"carpool_id": my_car["id"] if my_car else None,
+                   "van_driver": van_driver}
     return jsonify({"event": ev, "carpools": carpools, "tools": tools,
                     "parent_names": parent_names, "event_vans": event_vans,
                     "hotel": hotel, "attendees": attendees,
                     "all_attendees": all_attendees,
                     "all_carpools": all_carpools,
-                    "days": event_days, "day": day})
+                    "days": event_days, "day": day, "me": me_info})
 
 
 def is_attending(eid, member_id, kind):
@@ -3831,20 +3847,12 @@ def api_carpool_create():
         return err("seats must be a number")
     if seats < 1:
         return err("seats required")
-    # Driver resolution — the driver is always an account, never free
-    # text, so the car stays editable by its owner:
-    # - a parent posts as themselves: the driver is the session user
-    #   (grayed out and auto-filled in the form); any driver_name in
-    #   the request is ignored, so nobody can post as someone else.
-    # - a mentor/admin picks a parent account from the free pool.
-    if me["role"] == "parent":
-        driver_uid, driver_name = me["id"], me["name"]
-    else:
-        drv = q_one("SELECT id, name, role FROM users WHERE id=?",
-                    (b.get("driver_user_id"),)) if b.get("driver_user_id") else None
-        if not drv or drv["role"] != "parent":
-            return err("pick a parent account as the driver")
-        driver_uid, driver_name = drv["id"], drv["name"]
+    # Driver resolution — one vehicle per driver per event, and the
+    # driver is always the session user: mentors post their own
+    # vehicle too, and posting for another parent is disabled.
+    if b.get("driver_user_id") and b.get("driver_user_id") != me["id"]:
+        return err("you can only post your own vehicle", 403)
+    driver_uid, driver_name = me["id"], me["name"]
     ev = q_one("SELECT * FROM events WHERE id=?", (b["event_id"],))
     if not ev:
         return err("event not found", 404)
@@ -3854,42 +3862,39 @@ def api_carpool_create():
         return err(days_err)
     run_days = days_in if days_in else event_days
     # A driver must be attending on every day the car runs: 'going',
-    # or (multi-day only) a partial covering that day. The rule used
-    # to check the typed driver name; now it checks the resolved
-    # account's name — same discipline, applied to the driver.
+    # or (multi-day only) a partial covering that day. Mentors skip
+    # this check: staff attendance isn't tracked via parent RSVPs,
+    # and a mentor driving their own car is attending by definition.
+    if me["role"] not in MENTOR_ROLES:
+        with _lock:
+            db = get_db()
+            for d in (run_days or [None]):
+                if not _parent_attends_day(db, b["event_id"], driver_name,
+                                           d, event_days):
+                    return err("the driver must RSVP as attending for"
+                               " every day the car runs")
+    # One vehicle per driver per EVENT: a driver who already
+    # registered a car for this event can't post a second one, even
+    # for different days — they edit the registered vehicle instead.
+    # Likewise a driver tied to a team van on ANY day of the event
+    # can't also register a carpool: one driver, one vehicle.
     with _lock:
         db = get_db()
-        for d in (run_days or [None]):
-            if not _parent_attends_day(db, b["event_id"], driver_name,
-                                       d, event_days):
-                return err("the driver must RSVP as attending for"
-                           " every day the car runs")
-    # One vehicle per driver per DAY: a parent already driving a
-    # carpool on an overlapping day can't post a second one, and a
-    # parent driving a seated van on an overlapping day can't also
-    # drive a carpool — the van would stop being eligible for that
-    # day the moment the carpool appeared. Driving on a different
-    # day is fine.
-    with _lock:
-        db = get_db()
-        other_days = _carpool_days_map(db, b["event_id"])
-        for c in db.execute(
-                "SELECT id, driver_user_id FROM carpools"
-                " WHERE event_id=? AND driver_user_id=?",
-                (b["event_id"], driver_uid)):
-            if _days_overlap(other_days.get(c["id"], set()), run_days,
-                             event_days):
-                return err("that parent is already driving a carpool"
-                           " on one of those days")
+        if db.execute(
+                "SELECT id FROM carpools WHERE event_id=?"
+                " AND driver_user_id=?",
+                (b["event_id"], driver_uid)).fetchone():
+            return err("you already registered a vehicle for this event",
+                       409)
         van_overrides = _van_day_drivers_map(db, b["event_id"])
         for v in db.execute(
                 "SELECT id, driver_user_id FROM team_vans"
                 " WHERE seats IS NOT NULL"):
-            for d in (run_days or [None]):
+            for d in (event_days or [None]):
                 if _van_driver_for_day(v, b["event_id"], d,
                                        van_overrides) == driver_uid:
                     return err("that parent is already driving a team"
-                               " van with seats on one of those days")
+                               " van for this event")
     veh_in = b.get("vehicle") or {}
     vehicle = {k: str(veh_in.get(k) or "").strip()
                for k in ("plate", "color", "model", "make")
@@ -3966,67 +3971,34 @@ def api_carpool_patch(cid):
                    if str(veh_in.get(k) or "").strip()}
         sets.append("vehicle=?")
         args.append(json.dumps(vehicle) if vehicle else None)
-    # Driver reassignment is mentor-only; a parent editing their own
-    # car keeps themselves as driver (any driver field sent is ignored).
-    # Changing the days re-checks the (possibly new) driver against
-    # the new days, so a car can't be moved onto a day its driver
-    # doesn't attend or already drives on.
-    if me["role"] in MENTOR_ROLES and b.get("driver_user_id"):
-        drv = q_one("SELECT id, name, role FROM users WHERE id=?",
-                    (b["driver_user_id"],))
-        if not drv or drv["role"] != "parent":
-            return err("pick a parent account as the driver")
-        check_days = new_days if new_days is not None else None
-        if check_days is None:
-            with _lock:
-                db = get_db()
-                existing = {r["day"] for r in db.execute(
-                    "SELECT day FROM carpool_days WHERE carpool_id=?",
-                    (cid,))}
-            check_days = sorted(existing) if existing else event_days
+    # The driver is fixed at registration: nobody (mentor included)
+    # can reassign a car to another driver — remove the vehicle and
+    # register a new one instead. Changing the days re-checks the
+    # driver against the new days, so a car can't be moved onto a
+    # day its driver doesn't attend or already drives a van on.
+    # Mentors skip the RSVP check, as in POST.
+    if b.get("driver_user_id") and b.get("driver_user_id") != c.get("driver_user_id"):
+        return err("the driver can't be changed", 400)
+    if new_days is not None:
+        check_days = new_days if new_days else event_days
         with _lock:
             db = get_db()
-            for d in (check_days or [None]):
-                if not _parent_attends_day(db, c["event_id"], drv["name"],
-                                           d, event_days):
-                    return err("the driver must RSVP as attending for"
-                               " every day the car runs")
-        if drv["id"] != c.get("driver_user_id"):
-            with _lock:
-                db = get_db()
-                other_days = _carpool_days_map(db, c["event_id"])
-                for oc in db.execute(
-                        "SELECT id FROM carpools WHERE event_id=?"
-                        " AND driver_user_id=? AND id!=?",
-                        (c["event_id"], drv["id"], cid)):
-                    if _days_overlap(other_days.get(oc["id"], set()),
-                                     check_days, event_days):
-                        return err("that parent is already driving a"
-                                   " carpool on one of those days")
+            if me["role"] not in MENTOR_ROLES:
+                for d in (check_days or [None]):
+                    if not _parent_attends_day(db, c["event_id"],
+                                               c["driver_name"], d, event_days):
+                        return err("the driver must RSVP as attending for"
+                                   " every day the car runs")
+            if c.get("driver_user_id"):
                 van_overrides = _van_day_drivers_map(db, c["event_id"])
                 for v in db.execute(
                         "SELECT id, driver_user_id FROM team_vans"
                         " WHERE seats IS NOT NULL"):
                     for d in (check_days or [None]):
                         if _van_driver_for_day(v, c["event_id"], d,
-                                               van_overrides) == drv["id"]:
-                            return err("that parent is already driving"
-                                       " a team van with seats on one"
-                                       " of those days")
-        sets.append("driver_user_id=?")
-        args.append(drv["id"])
-        sets.append("driver_name=?")
-        args.append(drv["name"])
-    elif new_days is not None and me["role"] not in MENTOR_ROLES:
-        # A driver-owner changing only the days still needs to attend
-        # the new days themselves.
-        with _lock:
-            db = get_db()
-            for d in (new_days or event_days or [None]):
-                if not _parent_attends_day(db, c["event_id"],
-                                           c["driver_name"], d, event_days):
-                    return err("the driver must RSVP as attending for"
-                               " every day the car runs")
+                                               van_overrides) == c["driver_user_id"]:
+                            return err("the driver is already driving a team"
+                                       " van on one of those days")
     if not sets and new_days is None:
         return err("nothing to update")
     if sets:

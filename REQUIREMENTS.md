@@ -502,27 +502,57 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
 - Only **parents, mentors, and admins** can define a ride (driver,
   seats, departure point/time, return plan). Students cannot post rides.
 - **The driver is always an account, never free text**
-  (`carpools.driver_user_id`). A parent posting a ride sees the Driver
-  name field grayed out and auto-filled with their own name — the
-  server takes the driver from the session and ignores any driver name
-  in the request, so nobody can post as someone else. A mentor/admin
-  picks the driver from a **free pool of parent accounts** — parents
-  not disabled and not already driving for that event (a parent
-  without an account must be created in Team accounts first).
-- A **driver must be attending themselves**: the driver's account name
-  must have a parent RSVP = going for that event — the same rule for
-  parent-posted and mentor-assigned rides. (Mentors used to be exempt
-  and could post any driver name; team vehicles now live in Team vans
-  instead.)
-- **One vehicle per driver per event:** a parent already driving a
-  carpool can't post (or be reassigned) a second one, and a parent
-  driving a team van with seats can't also drive a carpool — the van
-  would stop being eligible for the event. The mentor Post Ride pool
-  therefore excludes carpool drivers *and* eligible van drivers, and
-  is recomputed from each render's travel data, so a van becoming
-  eligible immediately removes its driver from the pool. A parent
-  already driving for the event sees a note instead of the Post Ride
-  form.
+  (`carpools.driver_user_id`). **Everyone posts only their own
+  vehicle** — the Driver name field is grayed out and auto-filled
+  with the session user's name, and the server 403s any
+  `driver_user_id` that isn't the caller. Posting for another parent
+  (the old mentor driver pool) is disabled.
+- A **driver must be attending themselves**: a parent driver's account
+  name must have a parent RSVP = going for that event (or a partial
+  covering every day the car runs, on multi-day events).
+  Mentors/admins are exempt — staff attendance isn't tracked via
+  parent RSVPs, and a mentor driving their own car is attending by
+  definition.
+- **One vehicle per driver per event:** posting a vehicle is a
+  one-time action per event, with checkboxes for the days the car
+  runs. A driver who already registered a car for the event can't
+  post a second one (409), even for different days — they edit the
+  registered vehicle instead. A driver tied to a team van with seats
+  on ANY day of the event can't also register a carpool: one driver,
+  one vehicle.
+- **Post a ride is collapsed by default** (click the header to show
+  the form) and **disappears entirely once the caller has registered
+  a vehicle or drives a team van for the event** — no form, no
+  warning note, so nothing invites a post that would fail. The form
+  returns if the vehicle is removed. The travel payload carries a
+  `me` field (`carpool_id`, `van_driver`) so the frontend hides the
+  form on the server's word; the server enforces the same rules.
+- **Fleet for Carpool:** a universal viewable section right below the
+  Travel & Logistics header (per selected event) listing every
+  registered car — driver, vehicle (visible make/model/color, plate
+  as a hover tooltip), days it runs, seats, riders (union of claimed
+  seats across the trip days). **Edit and Remove belong to the
+  driver (or a mentor/admin)** — nobody else sees them. Editing
+  changes seats, details, and days, never the driver.
+- **Logistics status:** a table right below the Travel & Logistics
+  header (per selected event, all roles) with one row per RSVP'd
+  person (students first, then parents, alphabetical) and one column
+  per trip day (Day N + date). Each day cell carries two round,
+  non-clickable indicators: **Hotel** (green = placed in a room
+  running that day, or room parent that day; red = still needs a
+  room) and **Ride** (green = driving or holding a claimed seat that
+  day — driving counts as a ride; red = still needs a ride). A day
+  the person doesn't attend shows a dash, as does the hotel
+  indicator when the event has no hotel block. The card's header
+  line shows the hotel block as `Name · address · check-in →
+  check-out` (event dates when block dates are empty).
+- **Hotel assignments card is mentor-only:** the trip-level card
+  (block info, Add room, rooming requests) renders only for
+  mentors/admins. The rooms tables themselves stay visible to
+  everyone — day-section rooms tables on multi-day events, and a
+  rooms-only card on single-day events with a block — so parents can
+  still place their own student. Students lose the rooming-request
+  form while the card is mentor-only (see open question in GOAL.md).
 - **One seat per person per event, across every vehicle:** a driver
   can never claim a seat (not their own car, not anyone else's, not
   a van — they're already driving), and a person already holding a
@@ -534,12 +564,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   than seating them twice.
 - **Edit and remove:** the driver-owner or a mentor/admin can edit a
   ride later (seats, departure point/time, return plan, notes, plate,
-  color, make, model) or remove the car from the pool. Editing keeps
-  the riders; removing a car releases its claims and waitlist with it.
-  A mentor editing may also reassign the driver to another parent in
-  the pool (who must also RSVP going); a parent editing their own car
-  keeps themselves as driver. Seats can't be lowered below the riders
-  already claimed.
+  color, make, model, days) or remove the car from the pool. Editing
+  keeps the riders; removing a car releases its claims and waitlist
+  with it. **The driver is fixed at registration and can never be
+  changed** — not even by a mentor (server 400s a driver change);
+  changing the days re-checks the driver against the new days (must
+  attend them, must not drive a van on them). Seats can't be lowered
+  below the riders already claimed.
 - Anyone attending can claim a seat; claims beyond capacity go to the
   carpool waitlist and auto-promote when a seat is released.
 - **Own-only seats (carpools and vans):** a student claims/releases

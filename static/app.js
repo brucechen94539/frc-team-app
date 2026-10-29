@@ -72,6 +72,7 @@ let toolsListCollapsed = false;  // Tool sign-up list in Travel, across renders
 let trackEventId = null, travelEventId = null;
 let trackDay = null;  // selected Tracking trip day (YYYY-MM-DD)
 let openTravelDays = new Set(), openTravelDaysEvent = null;  // Travel day sections left open
+let postRideOpen = false, postRideOpenEvent = null;  // Post a ride form open state
 let currentView = "events";
 
 /* Multi-day trips: an event's days are [date .. end_date] inclusive,
@@ -2172,39 +2173,15 @@ async function renderTravel() {
     openTravelDaysEvent = travelEventId;
     openTravelDays = new Set(multi ? [evDays[0]] : []);
   }
-  const dayCars = (ds) => (dayPayloads.find((d) => d.day === ds) || {}).t?.carpools || [];
-  const dayVans = (ds) => (dayPayloads.find((d) => d.day === ds) || {}).t?.event_vans || [];
+
   const allDayCars = dayPayloads.flatMap((d) => d.t.carpools || []);
   const allDayVans = dayPayloads.flatMap((d) => d.t.event_vans || []);
-  // Mentor driver pool, per set of days: parent accounts (not
-  // disabled) not already driving a carpool or an eligible van on
-  // any of those days. Parents never see it — their driver is
-  // themselves, auto-filled and grayed out below. allUsers is kept
-  // for the van driver dropdowns (a van's driver is a global
-  // designation, not per-event).
+  // allUsers is kept for the van driver dropdowns (a van's driver is
+  // a global designation, not per-event). There is no Post Ride
+  // driver pool anymore: everyone posts only their own vehicle.
   let allUsers = [];
   if (MENTOR()) allUsers = await GET("/api/users").catch(() => []);
-  const poolForDays = (days) => {
-    const taken = new Set();
-    days.forEach((ds) => {
-      dayCars(ds).forEach((c) => taken.add(c.driver_user_id));
-      dayVans(ds).forEach((vv) => taken.add(vv.driver_user_id));
-    });
-    return allUsers.filter((u) => u.role === "parent" && !u.disabled && !taken.has(u.id));
-  };
-  const poolOptsFor = (days, keepId) => {
-    const opts = poolForDays(days);
-    if (keepId && !opts.some((u) => u.id === keepId)) {
-      const cur = allUsers.find((u) => u.id === keepId);
-      if (cur) opts.unshift(cur);
-    }
-    return opts.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
-  };
-  // Days the signed-in parent already drives on (car or van) — used
-  // for the Post Ride note, which updates as day boxes change.
-  const myDrivingDays = (evDays.length ? evDays : [dayPayloads[0].day]).filter((ds) =>
-    dayCars(ds).some((c) => c.driver_user_id === ME.id)
-    || dayVans(ds).some((vv) => vv.driver_user_id === ME.id));
+
   const vanDriverOpts = allUsers.filter((u) => u.role === "parent" && !u.disabled)
     .map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("");
   const vans = await GET("/api/team-vans").catch(() => []);
@@ -2388,21 +2365,27 @@ async function renderTravel() {
   const daySection = (dp, idx) => `
   <div class="card"><h3><button class="btn small ghost" data-tdaysec="${dp.day}">${openTravelDays.has(dp.day) ? "▾" : "▸"}</button> Day ${idx + 1} · ${dayLabel(dp.day)}</h3>
   <div id="tday-body-${dp.day}" class="${openTravelDays.has(dp.day) ? "" : "hidden"}">${ridesTables(dp)}${t.hotel ? roomsDaySection(dp) : ""}</div></div>`;
-  // Post Ride lives in its own card now (trip-level, not per-day):
-  // the days the car runs are picked with checkboxes, and the driver
-  // pool + the already-driving note refresh as those boxes change,
-  // so a parent driving Day 1 only can still post a Day-3-only ride.
-  const postRideCard = (ME.role === "student" ? "" : `
-  <div class="card"><h3>Post a ride</h3>
-  <p class="sub" id="cp-driving-note"></p>
-  <div id="cp-form-wrap">
+  // Post a ride: one vehicle per driver per event, collapsed by
+  // default, and gone entirely once the caller already registered
+  // a car or drives a team van for this event — the form never
+  // reappears after registration; the Fleet card below is where
+  // the registered vehicle is edited or removed. The server
+  // enforces the same rules; t.me is its word on both.
+  if (postRideOpenEvent !== travelEventId) {
+    postRideOpenEvent = travelEventId;
+    postRideOpen = false;
+  }
+  const myCar = (t.all_carpools || []).find((c) => c.driver_user_id === ME.id);
+  const meVanDriver = !!(t.me && t.me.van_driver);
+  const canPost = ME.role !== "student" && !myCar && !meVanDriver;
+  const postRideCard = !canPost ? "" : `
+  <div class="card"><h3 id="cp-toggle" style="cursor:pointer">Post a ride <span class="sub">${postRideOpen ? "▲ hide form" : "▼ show form"}</span></h3>
+  <div id="cp-form-wrap" class="${postRideOpen ? "" : "hidden"}">
   ${multi ? `<div class="row" style="margin-bottom:8px"><span class="sub">Days this car runs:</span>
     ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="cp-day" data-day="${ds}" checked> ${dayLabel(ds)}</label>`).join("")}
     <span class="sub">(all checked = every day)</span></div>` : ""}
   <div class="grid3">
-    ${MENTOR()
-      ? `<div class="field"><label>Driver name *</label><select id="cp-driver-sel"></select></div>`
-      : `<div class="field"><label>Driver name</label><input id="cp-driver" disabled value="${esc(ME.name)}"><span class="hint">You, auto-filled</span></div>`}
+    <div class="field"><label>Driver name</label><input id="cp-driver" disabled value="${esc(ME.name)}"><span class="hint">You, auto-filled</span></div>
     <div class="field"><label>Seats *</label><input id="cp-seats" inputmode="numeric" placeholder="4"></div>
     <div class="field"><label>Departure point</label><input id="cp-from" placeholder="School lot"></div>
     <div class="field"><label>Departure time</label><input id="cp-dt" placeholder="Thu 3:30 PM"></div>
@@ -2413,14 +2396,103 @@ async function renderTravel() {
     <div class="field"><label>Make <span class="hint">(optional)</span></label><input id="cp-vmake" placeholder="Honda"></div>
     <div class="field"><label>Model <span class="hint">(optional)</span></label><input id="cp-vmodel" placeholder="Odyssey"></div>
   </div>
-  <p class="sub hidden" id="cp-nopool">No parents available to assign — every parent account is already driving a car or a van on the picked days, or no parent accounts exist yet.</p>
-  <button class="btn small" id="cp-add">Post ride</button></div></div>`);
+  <button class="btn small" id="cp-add">Post ride</button></div></div>`;
+  // Logistics status: one row per RSVP'd person (students first,
+  // then parents, alphabetical), one column per trip day. Each day
+  // cell carries two round, non-clickable indicators: Hotel (green
+  // = placed in a room running that day, or room parent that day;
+  // red = still needs a room) and Ride (green = driving or holding
+  // a claimed seat that day; red = still needs a ride). A day the
+  // person doesn't attend shows a dash, as does the hotel indicator
+  // when the event has no hotel block at all.
+  const statusTableHTML = () => {
+    const tableDays = evDays.length ? evDays : [dayPayloads[0].day];
+    const dpFor = (ds) => dayPayloads.find((d) => d.day === ds) || dayPayloads[0];
+    const attNames = (ds) => new Set((dpFor(ds).t.attendees || []).map((a) => normName(a.person_name)));
+    const rideNames = (ds) => {
+      const dp = dpFor(ds).t, s = new Set();
+      (dp.carpools || []).forEach((c) => {
+        if (c.driver_name) s.add(normName(c.driver_name));
+        (c.claims || []).forEach((x) => s.add(normName(x.person_name)));
+      });
+      (dp.event_vans || []).forEach((vv) => {
+        if (vv.driver_name) s.add(normName(vv.driver_name));
+        (vv.claims || []).forEach((x) => s.add(normName(x.person_name)));
+      });
+      return s;
+    };
+    const hotelNames = (ds) => {
+      const s = new Set();
+      if (!t.hotel) return s;
+      (t.hotel.rooms || []).forEach((rm) => {
+        if (!roomRunsDay(rm, ds)) return;
+        if (rm.parent_name) s.add(normName(rm.parent_name));
+        (rm.occupants || []).forEach((o) => {
+          if (occMatchesDay(o, ds)) s.add(normName(`${o.first_name} ${o.last_name}`));
+        });
+      });
+      return s;
+    };
+    const byName = new Map();
+    (t.all_attendees || []).forEach((a) => {
+      const k = normName(a.person_name);
+      if (!byName.has(k)) byName.set(k, {name: a.person_name, kind: a.person_kind});
+      else if (a.person_kind === "student") byName.get(k).kind = "student";
+    });
+    const rows = [...byName.values()].sort((a, b) =>
+      (a.kind === b.kind ? a.name.localeCompare(b.name) : (a.kind === "student" ? -1 : 1)));
+    const hotelLine = t.hotel
+      ? `<b>${esc(t.hotel.name)}</b>${t.hotel.address ? ` · ${esc(t.hotel.address)}` : ""}${(t.hotel.check_in && t.hotel.check_out) ? ` · ${esc(t.hotel.check_in)} → ${esc(t.hotel.check_out)}` : (evDays.length > 1 ? ` · ${evDays[0]} → ${evDays[evDays.length - 1]}` : (evDays[0] ? ` · ${evDays[0]}` : ""))}`
+      : "No hotel block for this event.";
+    return `<div class="card"><h3>Logistics status</h3>
+    <p class="sub">${hotelLine}</p>
+    <p class="sub">Green = assigned for that day, red = still needed, — = not attending that day or no hotel block.</p>
+    <div style="overflow-x:auto"><table class="acct"><thead><tr><th>Person</th>${tableDays.map((ds, i) => `<th>Day ${i + 1}${ds ? `<div class="sub">${dayLabel(ds)}</div>` : ""}</th>`).join("")}</tr></thead>
+    <tbody>${rows.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.kind === "parent" ? ` <span class="sub">(parent)</span>` : ""}</td>${tableDays.map((ds) => {
+      if (!attNames(ds).has(normName(r.name))) return `<td><span class="sub">—</span></td>`;
+      const hotel = !t.hotel ? `<span class="sub">—</span>`
+        : `<span class="pill ${hotelNames(ds).has(normName(r.name)) ? "green" : "red"}">Hotel</span>`;
+      const ride = `<span class="pill ${rideNames(ds).has(normName(r.name)) ? "green" : "red"}">Ride</span>`;
+      return `<td>${hotel} ${ride}</td>`;
+    }).join("")}</tr>`).join("") || `<tr><td colspan="${tableDays.length + 1}"><span class="sub">Nobody RSVP'd yet.</span></td></tr>`}</tbody></table></div></div>`;
+  };
+  // Fleet for Carpool: every car registered for this event, visible
+  // to everyone. Edit / Remove belong to the driver (or a mentor);
+  // riders are the union of claimed seats across the trip days.
+  const fleetHTML = () => {
+    const cars = t.all_carpools || [];
+    const ridersOf = (cid) => {
+      const names = [];
+      dayPayloads.forEach((dp) => (dp.t.carpools || []).forEach((c) => {
+        if (c.id !== cid) return;
+        (c.claims || []).forEach((x) => { if (!names.includes(x.person_name)) names.push(x.person_name); });
+      }));
+      return names;
+    };
+    return `<div class="card"><h3>Fleet for Carpool</h3>
+    <p class="sub">Every car registered for this event — visible to everyone. Only the driver (or a mentor) can edit or remove a vehicle.</p>
+    ${meVanDriver && !myCar ? `<p class="sub">You're driving a team van for this event, so you can't register a carpool.</p>` : ""}
+    ${cars.length ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Driver</th><th>Vehicle</th><th>Days</th><th>Seats</th><th>Riders</th><th>Actions</th></tr></thead>
+    <tbody>${cars.map((c) => {
+      const riders = ridersOf(c.id);
+      const acts = (MENTOR() || c.driver_user_id === ME.id)
+        ? `<button class="btn small ghost" data-fledit="${c.id}">Edit</button><button class="btn small ghost" data-fldel="${c.id}">Remove</button>` : "";
+      return `<tr id="fl-row-${c.id}"><td><b>${esc(c.driver_name)}</b></td>
+      <td>${vehicleLine(c.vehicle)}<div class="sub">${esc(c.depart_from || "")} · ${esc(c.depart_time || "")} · Return: ${esc(c.return_info || "—")}</div>${c.notes ? `<div class="sub">${esc(c.notes)}</div>` : ""}</td>
+      <td>${multi ? (c.days && c.days.length ? c.days.map(dayLabel).join(", ") : "every day") : "This event"}</td>
+      <td>${c.seats} seats</td>
+      <td>${riders.map((n) => `<span class="pill">${esc(n)}</span>`).join(" ") || '<span class="sub">none yet</span>'}</td>
+      <td>${acts || '<span class="sub">—</span>'}</td></tr>`;
+    }).join("")}</tbody></table></div>` : `<p class="sub">No cars registered yet.</p>`}</div>`;
+  };
   v.innerHTML = `
   <div class="card"><h2>Travel &amp; Logistics</h2>
   <p class="sub">${multi ? "Each trip day expands to its own rides and rooms tables. Tools are for the whole trip." : "Carpools, tool sign-up, and hotel assignments — organized per event."}</p>
   <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div>
   ${multi ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" id="td-expand-all">Expand all days</button><button class="btn small ghost" id="td-collapse-all">Collapse all days</button></div>` : ""}</div>
 
+  ${statusTableHTML()}
+  ${fleetHTML()}
   ${postRideCard}
 
   ${multi
@@ -2510,7 +2582,7 @@ async function renderTravel() {
   <p id="tl-collapsed-note" class="sub ${toolsListCollapsed && t.tools.length ? "" : "hidden"}" style="margin-top:8px">Tool list collapsed — ${t.tools.length} tool(s) hidden.</p>
   </div>
 
-  ${(t.hotel || multi) ? `<div class="card"><h3>Hotel assignments</h3>
+  ${(t.hotel || multi) && MENTOR() ? `<div class="card"><h3>Hotel assignments</h3>
   ${t.hotel ? (multi
     ? hotelTopHTML(t.hotel, {evDays, parentOpts: allAttParents, rqWhoOpts: allStudents, studentNames: allStudentNames, attStudents: allAttStudents})
     : hotelHTML(t.hotel, {day: dayPayloads[0].day, dayAttendees: dayPayloads[0].t.attendees, placeOpts: placeOptsForDay(dayPayloads[0]), parentOpts: allAttParents, rqWhoOpts: allStudents, studentNames: allStudentNames, attStudents: allAttStudents})) : `
@@ -2524,6 +2596,9 @@ async function renderTravel() {
     <div class="field mo"><label>Notes <span class="hint">(room block details)</span></label>
       <textarea id="h-notes"></textarea></div>
     <button class="btn small mo" id="h-add">Save hotel block</button>`}
+  </div>` : ""}
+  ${!MENTOR() && t.hotel && !multi ? `<div class="card"><h3>Hotel assignments</h3>
+  ${roomsTableHTML(t.hotel, dayPayloads[0].day, placeOptsForDay(dayPayloads[0]), allAttParents, {editableNumber: true, showEdit: false})}
   </div>` : ""}`;
   v.querySelectorAll("[data-ev]").forEach((b) => b.addEventListener("click", () => {
     travelEventId = parseInt(b.dataset.ev, 10); savePlace(); pendingBeds = []; renderTravel();
@@ -2551,43 +2626,16 @@ async function renderTravel() {
       check_out: $("h-out").value, notes: $("h-notes").value.trim()});
     toast("Hotel block saved."); renderTravel();
   });
-  // Post Ride state: the driver pool (mentors) and the already-driving
-  // note (parents) follow the checked days, so a Day-1 driver can
-  // still post for Day 3 by unchecking Day 1.
-  const refreshPostRide = () => {
-    const dayBoxes = [...document.querySelectorAll("input.cp-day")];
-    const days = dayBoxes.length
-      ? dayBoxes.filter((x) => x.checked).map((x) => x.dataset.day)
-      : (evDays.length ? evDays : [dayPayloads[0].day]);
-    if (MENTOR()) {
-      const sel = $("cp-driver-sel");
-      if (sel) {
-        const keep = sel.value ? +sel.value : null;
-        sel.innerHTML = poolOptsFor(days, keep) || '<option value="">No available parents</option>';
-        if (keep && [...sel.options].some((o) => +o.value === keep)) sel.value = String(keep);
-        const nopool = $("cp-nopool");
-        if (nopool) nopool.classList.toggle("hidden", !!poolForDays(days).length);
-      }
-    } else if (ME.role === "parent") {
-      const mine = myDrivingDays.filter((ds) => days.includes(ds));
-      const note = $("cp-driving-note"), wrap = $("cp-form-wrap");
-      if (!days.length) {
-        if (note) note.textContent = "Pick at least one day for the ride.";
-        if (wrap) wrap.classList.add("hidden");
-      } else if (mine.length === days.length) {
-        if (note) note.textContent = `You're already driving for ${days.length > 1 ? "these days" : "this day"}${mine.length ? ` (${mine.map(dayLabel).join(", ")})` : ""} — so you can't post another ride for them.`;
-        if (wrap) wrap.classList.add("hidden");
-      } else {
-        if (note) note.textContent = mine.length
-          ? `You're already driving on ${mine.map(dayLabel).join(", ")} — posting with ${mine.length > 1 ? "those days" : "that day"} checked will fail; uncheck ${mine.length > 1 ? "them" : "it"} to post for the other days.`
-          : "";
-        if (wrap) wrap.classList.remove("hidden");
-      }
-    }
-  };
-  document.querySelectorAll("input.cp-day").forEach((box) =>
-    box.addEventListener("change", refreshPostRide));
-  refreshPostRide();
+  // Post a ride toggle: collapsed by default; toggling flips
+  // visibility only, so an in-progress form survives.
+  const cpt = $("cp-toggle");
+  if (cpt) cpt.addEventListener("click", () => {
+    postRideOpen = !postRideOpen;
+    const w = $("cp-form-wrap");
+    if (w) w.classList.toggle("hidden", !postRideOpen);
+    const lbl = cpt.querySelector("span");
+    if (lbl) lbl.textContent = postRideOpen ? "▲ hide form" : "▼ show form";
+  });
   const cpAdd = $("cp-add");
   if (cpAdd) cpAdd.addEventListener("click", async () => {
     const seats = parseInt($("cp-seats").value, 10);
@@ -2597,13 +2645,7 @@ async function renderTravel() {
       return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim(),
       vehicle: {plate: $("cp-vplate").value.trim(), color: $("cp-vcolor").value.trim(),
         make: $("cp-vmake").value.trim(), model: $("cp-vmodel").value.trim()}};
-    // Parents post as themselves (the server fills the driver from
-    // the session); mentors pick a parent from the free pool.
-    if (MENTOR()) {
-      const duid = $("cp-driver-sel") ? $("cp-driver-sel").value : "";
-      if (!duid) return toast("Pick a driver from the parent pool.");
-      body.driver_user_id = +duid;
-    }
+    // The driver is always the session user; the server enforces it.
     // Multi-day: the checked days are the days this car runs; all
     // checked (the default) means every day.
     const dayBoxes = [...document.querySelectorAll("input.cp-day")];
@@ -2618,10 +2660,8 @@ async function renderTravel() {
     } catch (e) { toast("Error: " + e.message); }
   });
   // Edit / remove a car: the driver-owner or a mentor. Edit inserts a
-  // pre-filled form row under that day's table row (driver grayed out
-  // for a parent owner, pool dropdown for a mentor, current driver
-  // kept selectable); the pool follows the form's day boxes, like
-  // Post Ride above.
+  // pre-filled form row under that day's table row; the driver is
+  // fixed at registration and shows as static text.
   v.querySelectorAll("[data-cpedit]").forEach((b) => b.addEventListener("click", () => {
     const day = b.dataset.cpday || "";
     const c = allDayCars.find((x) => x.id === +b.dataset.cpedit);
@@ -2634,9 +2674,10 @@ async function renderTravel() {
     const veh = c.vehicle || {};
     const tr = document.createElement("tr");
     tr.id = "cp-edit-" + c.id;
-    const driverField = () => MENTOR()
-      ? `<div class="field"><label>Driver name *</label><select id="ep-driver-${c.id}"></select></div>`
-      : `<div class="field"><label>Driver name</label><input id="ep-driver-${c.id}" disabled value="${esc(c.driver_name)}"></div>`;
+    // The driver is fixed at registration — static text, never a
+    // dropdown: nobody reassigns a car to another driver.
+    const driverField = () =>
+      `<div class="field"><label>Driver name</label><input disabled value="${esc(c.driver_name)}"></div>`;
     tr.innerHTML = `<td colspan="4"><div class="grid3">
       ${driverField()}
       <div class="field"><label>Seats *</label><input id="ep-seats-${c.id}" inputmode="numeric" value="${c.seats}"></div>
@@ -2653,19 +2694,6 @@ async function renderTravel() {
       ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="ep-day" data-day="${ds}"${!c.days || !c.days.length || c.days.includes(ds) ? " checked" : ""}> ${dayLabel(ds)}</label>`).join("")}</div>` : ""}
     <div class="row" style="margin-top:6px"><button class="btn small" id="ep-save-${c.id}">Save</button><button class="btn small ghost" id="ep-cancel-${c.id}">Cancel</button></div></td>`;
     row.after(tr);
-    const refreshEditPool = () => {
-      if (!MENTOR()) return;
-      const sel = $("ep-driver-" + c.id);
-      if (!sel) return;
-      const boxes = [...tr.querySelectorAll("input.ep-day")];
-      const days = boxes.length ? boxes.filter((x) => x.checked).map((x) => x.dataset.day) : evDays;
-      const keep = sel.value ? +sel.value : c.driver_user_id;
-      sel.innerHTML = poolOptsFor(days, c.driver_user_id);
-      if ([...sel.options].some((o) => +o.value === keep)) sel.value = String(keep);
-    };
-    refreshEditPool();
-    tr.querySelectorAll("input.ep-day").forEach((box) =>
-      box.addEventListener("change", refreshEditPool));
     $("ep-cancel-" + c.id).addEventListener("click", () => tr.remove());
     $("ep-save-" + c.id).addEventListener("click", async () => {
       const seats = parseInt($("ep-seats-" + c.id).value, 10);
@@ -2675,10 +2703,7 @@ async function renderTravel() {
         return_info: $("ep-ret-" + c.id).value.trim(), notes: $("ep-notes-" + c.id).value.trim(),
         vehicle: {plate: $("ep-vplate-" + c.id).value.trim(), color: $("ep-vcolor-" + c.id).value.trim(),
           make: $("ep-vmake-" + c.id).value.trim(), model: $("ep-vmodel-" + c.id).value.trim()}};
-      if (MENTOR()) {
-        const duid = $("ep-driver-" + c.id).value;
-        if (duid) body.driver_user_id = +duid;
-      }
+
       const epBoxes = [...tr.querySelectorAll("input.ep-day")];
       if (epBoxes.length) {
         const days = epBoxes.filter((x) => x.checked).map((x) => x.dataset.day);
@@ -2696,6 +2721,71 @@ async function renderTravel() {
     if (!c) return;
     const riders = (c.claims || []).length + (c.waitlist || []).length;
     if (!confirm(`Remove this car from the pool?${riders ? ` ${riders} rider(s) will be released.` : ""}`)) return;
+    try {
+      const r = await DEL(`/api/carpools/${c.id}`);
+      toast(r.tools_unassigned ? `Car removed from the pool; ${r.tools_unassigned} tool(s) back in the pool.` : "Car removed from the pool."); renderTravel();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
+  // Fleet edit / remove: the driver-owner or a mentor. Edit inserts
+  // a pre-filled form row under the fleet row (driver fixed, days
+  // editable); remove confirms, like the day-table remove.
+  v.querySelectorAll("[data-fledit]").forEach((b) => b.addEventListener("click", () => {
+    const c = (t.all_carpools || []).find((x) => x.id === +b.dataset.fledit);
+    if (!c) return;
+    const row = $("fl-row-" + c.id);
+    if (!row) return;
+    const prev = $("fl-edit-" + c.id);
+    if (prev) prev.remove();
+    const veh = c.vehicle || {};
+    const tr = document.createElement("tr");
+    tr.id = "fl-edit-" + c.id;
+    tr.innerHTML = `<td colspan="6"><div class="grid3">
+      <div class="field"><label>Driver name</label><input disabled value="${esc(c.driver_name)}"></div>
+      <div class="field"><label>Seats *</label><input id="fl-seats-${c.id}" inputmode="numeric" value="${c.seats}"></div>
+      <div class="field"><label>Departure point</label><input id="fl-from-${c.id}" value="${esc(c.depart_from || "")}"></div>
+      <div class="field"><label>Departure time</label><input id="fl-dt-${c.id}" value="${esc(c.depart_time || "")}"></div>
+      <div class="field"><label>Return plan</label><input id="fl-ret-${c.id}" value="${esc(c.return_info || "")}"></div>
+      <div class="field"><label>Notes</label><input id="fl-notes-${c.id}" value="${esc(c.notes || "")}"></div>
+      <div class="field"><label>License plate</label><input id="fl-vplate-${c.id}" value="${esc(veh.plate || "")}"></div>
+      <div class="field"><label>Color</label><input id="fl-vcolor-${c.id}" value="${esc(veh.color || "")}"></div>
+      <div class="field"><label>Make</label><input id="fl-vmake-${c.id}" value="${esc(veh.make || "")}"></div>
+      <div class="field"><label>Model</label><input id="fl-vmodel-${c.id}" value="${esc(veh.model || "")}"></div>
+    </div>
+    ${multi ? `<div class="row" style="margin-top:6px"><span class="sub">Days this car runs:</span>
+      ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="fl-day" data-day="${ds}"${!c.days || !c.days.length || c.days.includes(ds) ? " checked" : ""}> ${dayLabel(ds)}</label>`).join("")}</div>` : ""}
+    <div class="row" style="margin-top:6px"><button class="btn small" id="fl-save-${c.id}">Save</button><button class="btn small ghost" id="fl-cancel-${c.id}">Cancel</button></div></td>`;
+    row.after(tr);
+    $("fl-cancel-" + c.id).addEventListener("click", () => tr.remove());
+    $("fl-save-" + c.id).addEventListener("click", async () => {
+      const seats = parseInt($("fl-seats-" + c.id).value, 10);
+      if (!seats || seats < 1) return toast("Seats are required.");
+      const body = {seats,
+        depart_from: $("fl-from-" + c.id).value.trim(), depart_time: $("fl-dt-" + c.id).value.trim(),
+        return_info: $("fl-ret-" + c.id).value.trim(), notes: $("fl-notes-" + c.id).value.trim(),
+        vehicle: {plate: $("fl-vplate-" + c.id).value.trim(), color: $("fl-vcolor-" + c.id).value.trim(),
+          make: $("fl-vmake-" + c.id).value.trim(), model: $("fl-vmodel-" + c.id).value.trim()}};
+      const flBoxes = [...tr.querySelectorAll("input.fl-day")];
+      if (flBoxes.length) {
+        const days = flBoxes.filter((x) => x.checked).map((x) => x.dataset.day);
+        if (!days.length) return toast("Pick at least one day for the ride.");
+        body.days = days;
+      }
+      try {
+        await PATCH(`/api/carpools/${c.id}`, body);
+        toast("Ride updated."); renderTravel();
+      } catch (e) { toast("Error: " + e.message); }
+    });
+  }));
+  v.querySelectorAll("[data-fldel]").forEach((b) => b.addEventListener("click", async () => {
+    const c = (t.all_carpools || []).find((x) => x.id === +b.dataset.fldel);
+    if (!c) return;
+    const riderNames = new Set();
+    dayPayloads.forEach((dp) => (dp.t.carpools || []).forEach((cc) => {
+      if (cc.id !== c.id) return;
+      (cc.claims || []).forEach((x) => riderNames.add(x.person_name));
+      (cc.waitlist || []).forEach((x) => riderNames.add(x.person_name));
+    }));
+    if (!confirm(`Remove this car from the pool?${riderNames.size ? ` ${riderNames.size} rider(s) will be released.` : ""}`)) return;
     try {
       const r = await DEL(`/api/carpools/${c.id}`);
       toast(r.tools_unassigned ? `Car removed from the pool; ${r.tools_unassigned} tool(s) back in the pool.` : "Car removed from the pool."); renderTravel();
