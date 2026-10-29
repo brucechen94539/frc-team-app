@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### Duplicate members/accounts after remove-and-recreate (2026-10-29)
+### Duplicate members/accounts after remove-and-recreate (2026-10-29, commit da92cb2b)
 
 **Reported** (Bruce): after removing and re-creating users, lists showed
 dupes — Joe Blow, Zander Chen, and so on. **Root cause:** deleting an
