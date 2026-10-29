@@ -48,7 +48,7 @@ _None right now._
   parent-own-student allowance, and the mentor path) and browser
   (13 checks: parent/student/mentor pickers and ✕ visibility,
   including placing and removing one's own student in the UI).
-  (commit pending)
+  (commit 5765701f)
 
 ### RSVP spoofing via the name field (2026-10-28)
 - **Reported:** Bruce — RSVP should limit to self, with an error
