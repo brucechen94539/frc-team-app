@@ -1319,20 +1319,59 @@ def api_user_password(uid):
 @app.route("/api/users/<int:uid>", methods=["PATCH"])
 @require_role("mentor", "admin")
 def api_user_patch(uid):
-    """Mentor edit of an account's contact handle: currently only
-    WhatsApp, which the Team accounts table edits inline. Empty clears
-    it. Nothing else about the account changes here."""
-    if not q_one("SELECT id FROM users WHERE id=?", (uid,)):
+    """Mentor edit of an account: WhatsApp (inline in the Team
+    accounts table; empty clears it) and member type (role).
+    Role guards: never your own row; only admins grant the admin
+    role or change an admin's role; changing the last enabled
+    mentor/admin to a non-mentor role is refused. Links are
+    untouched — role is permission, not identity — and a parent
+    newly made mentor without 2FA hits the existing
+    mandatory-mentor-2FA gate until they set it up."""
+    u = q_one("SELECT id, role FROM users WHERE id=?", (uid,))
+    if not u:
         return err("user not found", 404)
     b = request.get_json(force=True, silent=True) or {}
-    if "whatsapp" not in b:
+    wa = None
+    wa_set = False
+    if "whatsapp" in b:
+        wa = b.get("whatsapp")
+        if wa is not None and not isinstance(wa, str):
+            return err("whatsapp must be text")
+        wa = (wa or "").strip() or None
+        wa_set = True
+    new_role = None
+    role_set = False
+    if "role" in b:
+        new_role = b.get("role")
+        if new_role not in ("student", "parent", "mentor", "admin"):
+            return err("role must be student, parent, mentor or admin")
+        me = current_user()
+        if me and me["id"] == uid:
+            return err("you cannot change your own role", 400)
+        if new_role == "admin" and (not me or me["role"] != "admin"):
+            return err("only an admin can grant the admin role", 403)
+        if u["role"] == "admin" and (not me or me["role"] != "admin"):
+            return err("only an admin can change an admin's role", 403)
+        if (u["role"] in MENTOR_ROLES
+                and new_role not in MENTOR_ROLES):
+            remaining = q_one("SELECT COUNT(*) AS n FROM users"
+                              " WHERE role IN ('mentor','admin')"
+                              " AND (disabled IS NULL OR disabled=0)"
+                              " AND id!=?", (uid,))["n"]
+            if remaining == 0:
+                return err("cannot change the role of the last"
+                           " mentor/admin", 400)
+        role_set = True
+    if not wa_set and not role_set:
         return err("nothing to update")
-    wa = b.get("whatsapp")
-    if wa is not None and not isinstance(wa, str):
-        return err("whatsapp must be text")
-    wa = (wa or "").strip() or None
-    execute("UPDATE users SET whatsapp=? WHERE id=?", (wa, uid))
-    return jsonify({"ok": True, "whatsapp": wa})
+    out = {"ok": True}
+    if wa_set:
+        execute("UPDATE users SET whatsapp=? WHERE id=?", (wa, uid))
+        out["whatsapp"] = wa
+    if role_set:
+        execute("UPDATE users SET role=? WHERE id=?", (new_role, uid))
+        out["role"] = new_role
+    return jsonify(out)
 
 
 @app.route("/api/users/<int:uid>/relationships", methods=["POST"])
@@ -3206,9 +3245,16 @@ def api_travel(eid):
         "SELECT id, member_id, person_kind, person_name, status FROM rsvps"
         " WHERE event_id=? AND status IN ('going','partial')"
         " ORDER BY person_name", (eid,))
+    # Status + covered days ride along so the Logistics status table
+    # can show each row's RSVP basis ("going" vs "partial · Sun
+    # 11/22, Mon 11/23"): a "wrong status" complaint is then
+    # self-diagnosing — the row itself says which record drives it.
     all_attendees = [{"member_id": r["member_id"],
                       "person_kind": r["person_kind"],
-                      "person_name": r["person_name"]} for r in all_rsvps]
+                      "person_name": r["person_name"],
+                      "status": r["status"],
+                      "days": sorted(rsvp_days.get(r["id"], set()))}
+                     for r in all_rsvps]
     attendees = [a for a, r in zip(all_attendees, all_rsvps)
                  if _attends_day(r["status"],
                                  rsvp_days.get(r["id"], set()),

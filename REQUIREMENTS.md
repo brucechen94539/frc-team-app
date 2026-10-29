@@ -70,6 +70,17 @@ and `can't make it` do not count as attending.
   re-approving the member. Guards: nobody can disable or
   deletion-request their own account, and the last enabled mentor/admin
   cannot be disabled.
+- **Member type Edit:** each account row has an Edit role button
+  (disabled on your own row) that swaps the Member type cell for a
+  role select (student / parent / mentor, plus admin for admin
+  callers) with Save/Cancel; saving patches the role
+  (`PATCH /api/users/<id> {role}`, mentor-only). Guards mirror
+  Disable: never your own role; only admins grant the admin role or
+  change an admin's role; changing the last enabled mentor/admin to
+  a non-mentor role is refused. A role change touches no links —
+  role is permission, not identity — and a parent newly made mentor
+  without 2FA hits the existing mandatory-mentor-2FA gate until they
+  set 2FA up.
 - **Archived members:** `archived` is a member status alongside
   pending/approved/waitlisted/declined, with its own Mentor Queue filter.
   Archived members are off the roster (not in approved lists, pickers,
@@ -545,7 +556,11 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   the person doesn't attend (a partial RSVP not covering that day)
   shows both pills **gray** — "not participating", not a gap to
   fill. The hotel indicator is a dash only when the event has no
-  hotel block. The card's header line shows the hotel block as
+  hotel block. Each row's name carries its RSVP basis ("going", or
+  "partial · Sun 11/22, Mon 11/23" — a person with several RSVP rows
+  shows each distinct basis), so a surprising color traces to its
+  record instead of needing a one-off investigation. The card's
+  header line shows the hotel block as
   `Name · address · check-in → check-out` (event dates when block
   dates are empty).
 - **Hotel assignments card is mentor-only:** the trip-level card

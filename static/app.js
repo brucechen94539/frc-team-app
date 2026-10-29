@@ -1098,7 +1098,7 @@ async function renderAccounts() {
         <td>${esc(u.email || "")}</td>
         <td>${esc(u.phone || "")}</td>
         <td class="wa-cell" data-wa="${u.id}" title="Click to edit" style="cursor:pointer">${esc(u.whatsapp || "—")}</td>
-        <td><span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.role)}</span>${u.disabled ? ' <span class="pill red">disabled</span>' : ""}</td>
+        <td data-rolecell="${u.id}"><span class="pill ${(u.role === "mentor" || u.role === "admin") ? "amber" : "gray"}">${esc(u.role)}</span>${u.disabled ? ' <span class="pill red">disabled</span>' : ""}</td>
         <td>${esc(m ? (m.school || "") : "")}</td>
         <td>${esc(m ? (m.grade || "") : "")}</td>
         <td>${esc(m ? (m.assigned_subteam || "") : "")}</td>
@@ -1108,6 +1108,7 @@ async function renderAccounts() {
           <button class="btn small ghost" data-faid="${u.id}">Reset 2FA${u.totp_enabled ? "" : " (off)"}</button>
           <button class="btn small ghost" data-dis="${u.id}" ${(u.id === (ME && ME.id) && !u.disabled) ? "disabled title=\"You cannot disable your own account\"" : ""}>${u.disabled ? "Enable" : "Disable"}</button>
           <button class="btn small ghost" data-del="${u.id}" ${u.disabled ? "" : "disabled title=\"Disable the account first\""}>Delete</button>
+          <button class="btn small ghost" data-roledit="${u.id}" ${(u.id === (ME && ME.id)) ? "disabled title=\"You cannot change your own role\"" : ""}>Edit role</button>
         </div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="11"><span class="sub">No accounts yet.</span></td></tr>`}
@@ -1136,6 +1137,33 @@ async function renderAccounts() {
     b.addEventListener("click", () => {
       const u = users.find((x) => x.id === +b.dataset.del);
       if (u) openDelModal(u.id, u.name);
+    }));
+  // Role is edited inline via its Edit button: the Member type cell
+  // swaps for a role select (admin offered only to admins) with
+  // Save/Cancel; an unchanged pick just re-renders, no request.
+  el.querySelectorAll("[data-roledit]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const uid = +b.dataset.roledit;
+      const u = users.find((x) => x.id === uid);
+      const cell = el.querySelector(`[data-rolecell="${uid}"]`);
+      if (!u || !cell || cell.querySelector("select")) return;
+      const roles = ["student", "parent", "mentor"];
+      if (ME && ME.role === "admin") roles.push("admin");
+      if (!roles.includes(u.role)) roles.push(u.role);
+      cell.innerHTML = `<select class="role-sel">${roles.map((r) =>
+        `<option value="${r}"${r === u.role ? " selected" : ""}>${r}</option>`).join("")}</select>
+        <button class="btn small" data-role-save>Save</button>
+        <button class="btn small ghost" data-role-cancel>Cancel</button>`;
+      cell.querySelector("[data-role-cancel]").addEventListener("click", () => renderAccounts());
+      cell.querySelector("[data-role-save]").addEventListener("click", async () => {
+        const role = cell.querySelector("select").value;
+        if (role === u.role) return renderAccounts();
+        try {
+          await PATCH(`/api/users/${uid}`, {role});
+          toast(`Role updated to ${role} for ${u.name}.`);
+          renderAccounts();
+        } catch (e) { toast("Error: " + e.message); }
+      });
     }));
   // WhatsApp is click-to-edit: click a cell to swap it for an input
   // with Save (Enter saves too, Escape cancels back to the table).
@@ -2425,7 +2453,10 @@ async function renderTravel() {
   // person doesn't attend (a partial RSVP not covering that day)
   // shows both pills gray — "not participating", not a gap to
   // fill. The hotel indicator is a dash only when the event has
-  // no hotel block at all.
+  // no hotel block at all. Each row's name carries its RSVP basis
+  // ("going" or "partial · <days>") so a surprising color traces
+  // to its record; a person with several RSVP rows shows each
+  // distinct basis.
   const statusTableHTML = () => {
     const tableDays = evDays.length ? evDays : [dayPayloads[0].day];
     const dpFor = (ds) => dayPayloads.find((d) => d.day === ds) || dayPayloads[0];
@@ -2454,11 +2485,17 @@ async function renderTravel() {
       });
       return s;
     };
+    const basisOf = (a) => a.status === "partial" && a.days && a.days.length
+      ? `partial · ${a.days.map(dayLabel).join(", ")}` : (a.status || "");
     const byName = new Map();
     (t.all_attendees || []).forEach((a) => {
       const k = normName(a.person_name);
-      if (!byName.has(k)) byName.set(k, {name: a.person_name, kind: a.person_kind});
-      else if (a.person_kind === "student") byName.get(k).kind = "student";
+      const basis = basisOf(a);
+      if (!byName.has(k)) byName.set(k, {name: a.person_name, kind: a.person_kind, bases: basis ? [basis] : []});
+      else {
+        if (a.person_kind === "student") byName.get(k).kind = "student";
+        if (basis && !byName.get(k).bases.includes(basis)) byName.get(k).bases.push(basis);
+      }
     });
     const rows = [...byName.values()].sort((a, b) =>
       (a.kind === b.kind ? a.name.localeCompare(b.name) : (a.kind === "student" ? -1 : 1)));
@@ -2469,7 +2506,7 @@ async function renderTravel() {
     <p class="sub">${hotelLine}</p>
     <p class="sub">Green = assigned for that day, red = still needed, gray = not attending that day, — = no hotel block.</p>
     <div style="overflow-x:auto"><table class="acct"><thead><tr><th>Person</th>${tableDays.map((ds, i) => `<th>Day ${i + 1}${ds ? `<div class="sub">${dayLabel(ds)}</div>` : ""}</th>`).join("")}</tr></thead>
-    <tbody>${rows.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.kind === "parent" ? ` <span class="sub">(parent)</span>` : ""}</td>${tableDays.map((ds) => {
+    <tbody>${rows.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.kind === "parent" ? ` <span class="sub">(parent)</span>` : ""}${r.bases.length ? `<div class="sub">${esc(r.bases.join("; "))}</div>` : ""}</td>${tableDays.map((ds) => {
       if (!attNames(ds).has(normName(r.name))) return `<td><span class="pill gray">Hotel</span> <span class="pill gray">Ride</span></td>`;
       const hotel = !t.hotel ? `<span class="sub">—</span>`
         : `<span class="pill ${hotelNames(ds).has(normName(r.name)) ? "green" : "red"}">Hotel</span>`;
