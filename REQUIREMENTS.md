@@ -27,12 +27,13 @@ and `can't make it` do not count as attending.
   the linked member: the self link first, else the first parent link.
   Each row has Reset password (an overlay form: new password + confirm)
   and Reset 2FA (an overlay Yes/No confirm) buttons.
-- **WhatsApp column:** the accounts table has a WhatsApp column next
-  to Phone #. Clicking a cell swaps it for an input with Save (Enter
-  saves too, Escape cancels); saving patches the account
-  (`PATCH /api/users/<id>`, mentor-only) and the table re-renders.
-  Empty clears the handle. The create-account form already had a
-  WhatsApp field; this makes it editable on existing accounts too.
+- **WhatsApp column (display-only):** the accounts table has a
+  WhatsApp column next to Phone #, but mentors no longer edit it
+  there — phone and WhatsApp are self-service, edited by the
+  account owner in Profile (`POST /api/auth/profile`). A mentor
+  sending WhatsApp via `PATCH /api/users/<id>` has it ignored;
+  the endpoint takes role only. The create-account form still
+  sets an initial WhatsApp when the mentor creates the account.
 - **Relationship editor:** the Relationship column is click-to-edit
   for student and parent rows (mentor/admin rows stay read-only).
   Clicking opens tap-to-toggle chips: a parent picks roster students
@@ -45,7 +46,9 @@ and `can't make it` do not count as attending.
   versa. A student's "child of" reads from linked parent accounts
   first, falling back to the member's parent_name string. A student
   with no roster member linked yet can't be edited until a sign-up
-  approval links one.
+  approval links one. (This edits account↔member links only. The
+  roster's family fields — parent name, relationship, parent contact
+  — are not edited here; members edit those themselves in Profile.)
 - **Temporary passwords and forced reset:** any password set by someone
   else — a sign-up temporary password, a mentor-created account's
   password, or a mentor reset — marks the account `must_change_password`.
@@ -101,7 +104,9 @@ and `can't make it` do not count as attending.
   appeared). There is no manual Link/Unlink UI: the relationship is
   shown read-only in the accounts table, and the link endpoints are
   gone. Name matching survives only as the link-creation heuristic,
-  plus a fallback for accounts with no links yet.
+  plus a fallback for accounts with no links yet. Seat and bed
+  assignment is the exception: since the 2026-10-30 cleanup it is
+  mentor-only and reads no ownership — see Travel & logistics.
 - Role rules are enforced on the server, not just hidden in the UI.
   Non-mentors see a names-only people directory (no contact details).
 - Event **Delete** buttons are shown to mentors/admins only (the server
@@ -113,11 +118,14 @@ and `can't make it` do not count as attending.
   link, all roles; no menu entry) with two cards:
   **Profile** (avatar + name + role + email + member since) and
   **General** (editable first/last name, phone, and WhatsApp; a student
-  also edits school and grade on their own roster record; email is
-  read-only since it is the login identity; linked roster entries with
-  kind, school, and subteam — assigned subteam, else ranked
-  preferences). Password change and two-factor management live on the
-  **Security** tab, not on the Profile page.
+  also edits school and grade on their own roster record; any linked
+  member edits the family fields — parent name, relationship, parent
+  phone, parent WhatsApp, parent email — on their linked roster
+  records, and a parent's edit applies to all their children's
+  records; email is read-only since it is the login identity;
+  linked roster entries with kind, school, and subteam — assigned
+  subteam, else ranked preferences). Password change and two-factor
+  management live on the **Security** tab, not on the Profile page.
 - **Avatars are backend-backed, not browser-local.** Photos live in a
   `users.avatar` column as a data URL (fresh DBs get the column from
   `schema.sql`; older DBs gain it from `_migrate`). The frontend resizes
@@ -141,10 +149,12 @@ and `can't make it` do not count as attending.
   `GET /api/users/<uid>/avatar` serves another account's photo to its
   owner or a mentor/admin, 403 for anyone else, 404 when no photo.
   `POST /api/auth/profile` updates phone, WhatsApp, first/last name
-  (the display name is recomputed from them), and — for the caller's
-  own roster record — school and grade (ignored when the account has
-  no self link); absent keys keep their value; email in the body is
-  ignored.
+  (the display name is recomputed from them); school and grade on
+  the caller's own roster record (ignored when the account has no
+  self link); and the family fields — parent name, relationship,
+  parent phone, parent WhatsApp, parent email — on every roster
+  record the account is linked to (self and parent links alike);
+  absent keys keep their value; email in the body is ignored.
 - **Role checks for this round (retest after any refactor):** own upload
   200 and round-trips; another student's photo 403, mentor's 200; own
   delete 200 then 404; contact edit updates phone/WhatsApp but never
@@ -155,7 +165,10 @@ and `can't make it` do not count as attending.
   wrong current password 403; with 2FA on, missing code 403, wrong code
   403, right code 200, recovery code 200 and spent on use; logged-out
   upload 401; non-image and oversized uploads 400; pre-avatar DB gains
-  the column on boot.
+  the column on boot. Family-field edits land on every linked
+  record (a parent's edit updates all their children's rows); a
+  mentor's member PATCH ignores basic-info fields, and a mentor's
+  user PATCH ignores WhatsApp.
 
 ## Two-factor authentication (TOTP; opt-in for students/parents, required for mentors/admins)
 
@@ -411,22 +424,17 @@ and `can't make it` do not count as attending.
   if any covered day is full the whole RSVP waitlists.
 - **Per-day rides and rooms:** Travel shows one **collapsible
   section per trip day** (Day 1 open, the rest closed, with
-  Expand/Collapse all), each with a **carpool table**, a **van
-  table**, and a **rooms table** for that day; Tracking keeps day
-  tabs. Tools stay per-trip. A carpool lists the days it runs
-  (default every day); a rider claims
-  **one seat per person per day** across every vehicle, so riding
-  Car A out Day 1 and Car B back Day 3 is allowed and a same-day
-  seat elsewhere blocks a second claim that day. A driver must be
-  attending on every day their car runs — 'going', or (multi-day
-  only) a partial covering that day — and a driver on Day 1 may
-  ride as a passenger on Day 3 if they aren't driving that day.
-  Waitlist promotion is per-day: freeing a Day 1 seat promotes a
-  Day 1 waitlist row, never a Day 3 one. Team vans have a **per-day
-  driver override** (mentors set a different parent to drive the van
-  on one day, or back to the designated driver); van eligibility for
-  a day still requires that day's driver to be attending that day
-  and not driving a carpool that day. Check-ins are **per person
+  Expand/Collapse all), each with a **carpool table** and a
+  **rooms table** for that day; Tracking keeps day tabs. Tools stay
+  per-trip. A carpool lists the days it runs (default every day);
+  a mentor assigns **one seat per person per day** across every car,
+  so riding Car A out Day 1 and Car B back Day 3 is allowed and a
+  same-day seat elsewhere blocks a second assignment that day. A
+  driver must be attending on every day their car runs — 'going',
+  or (multi-day only) a partial covering that day — and a driver on
+  Day 1 may ride as a passenger on Day 3 if they aren't driving that
+  day. Waitlist promotion is per-day: freeing a Day 1 seat promotes
+  a Day 1 waitlist row, never a Day 3 one. Check-ins are **per person
   per day**, so a 3-day trip credits each day separately (the day is
   required on multi-day events). NULL/empty day sets mean "all days"
   throughout, so pre-multi-day data (single-day events, old claims
@@ -434,21 +442,20 @@ and `can't make it` do not count as attending.
 - **Day tables (Travel layout):** a carpool table row is one car —
   Car/Driver (driver, vehicle make/model/color, departure, return,
   notes), Riders (claimed + waitlisted), Seats (open/total),
-  Actions (claim picker, Edit/Remove). A van table row mirrors it,
-  plus the per-day driver control for mentors. A rooms table row is
-  one room — Room (label, actual room number, beds, per-day
-  capacity), Occupants for that day, Room parent, Actions (place
-  picker, volunteer, Edit for mentors). Below each day's tables,
-  **gap lines** list only who still **needs a ride** and who still
-  **needs a room** that day (waitlisted counts as needing one);
-  placed riders, drivers, and placed students are not repeated.
+  Actions (mentor's assign picker, Edit/Remove). A rooms table row
+  is one room — Room (label, actual room number, beds, per-day
+  capacity), Occupants for that day, Actions (place picker, Edit
+  for mentors). Below each day's rooms table, a **gap line** lists
+  only who still **needs a room** that day (waitlisted counts as
+  needing one); ride gaps live only in the Logistics status table
+  above, and placed riders, drivers, and placed students are not
+  repeated.
   **Tooltips are used sparingly:** vehicle make/model/color are
   visible text and only the license plate hides behind a hover
   tooltip, so nothing decision-relevant is hover-only.
-  **Single-day events** get one carpool table, one van table, and
-  one rooms table with no day sections, and **no hotel section at
-  all** unless a hotel block already exists — a day trip needs no
-  rooms.
+  **Single-day events** get one carpool table and one rooms table
+  with no day sections, and **no hotel section at all** unless a
+  hotel block already exists — a day trip needs no rooms.
 - **Per-day rooms:** like carpools, a room is **allocated for
   specific days** — mentors pick the days when adding a room (all
   checked = every day) and can change them later with Edit, so a
@@ -459,12 +466,10 @@ and `can't make it` do not count as attending.
   capacity counts that day's occupants only, and a student sleeps
   in at most one room per day (placing in the same room for the
   same day twice is a no-op). A student may sleep in different
-  rooms on different nights. The room parent stays per room (not
-  per day), and rooming requests stay per-trip wishes. Dropping a
-  day from a room hides that day's placements (they reappear if
-  the day is added back); removing a student from a day is the
-  occupant's ✕, and a rooming request returns to pending only when
-  the student holds no room on any day anymore. Old placements
+  rooms on different nights. Dropping a day from a room hides that
+  day's placements (they reappear if the day is added back);
+  removing a student from a day is the occupant's ✕, mentors
+  only. Old placements
   (no day recorded) mean every day, so pre-existing rooms keep
   working untouched.
 - **RSVP deadlines are enforced on the server, not just by hiding the
@@ -586,16 +591,14 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   one-time action per event, with checkboxes for the days the car
   runs. A driver who already registered a car for the event can't
   post a second one (409), even for different days — they edit the
-  registered vehicle instead. A driver tied to a team van with seats
-  on ANY day of the event can't also register a carpool: one driver,
-  one vehicle.
+  registered vehicle instead.
 - **Post a ride is collapsed by default** (click the header to show
   the form) and **disappears entirely once the caller has registered
-  a vehicle or drives a team van for the event** — no form, no
-  warning note, so nothing invites a post that would fail. The form
-  returns if the vehicle is removed. The travel payload carries a
-  `me` field (`carpool_id`, `van_driver`) so the frontend hides the
-  form on the server's word; the server enforces the same rules.
+  a vehicle for the event** — no form, no warning note, so nothing
+  invites a post that would fail. The form returns if the vehicle
+  is removed. The travel payload carries a `me` field (`carpool_id`)
+  so the frontend hides the form on the server's word; the server
+  enforces the same rules.
 - **Fleet for Carpool:** a universal viewable section right below the
   Travel & Logistics header (per selected event) listing every
   registered car — driver, vehicle (visible make/model/color, plate
@@ -608,9 +611,9 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   person (students first, then parents, alphabetical) and one column
   per trip day (Day N + date). Each day cell carries two round,
   non-clickable indicators: **Hotel** (green = placed in a room
-  running that day, or room parent that day; red = still needs a
-  room) and **Ride** (green = driving or holding a claimed seat that
-  day — driving counts as a ride; red = still needs a ride). A day
+  running that day; red = still needs a room) and **Ride** (green
+  = driving or holding a claimed seat that day — driving counts
+  as a ride; red = still needs a ride). A day
   the person doesn't attend (a partial RSVP not covering that day)
   shows both pills **gray** — "not participating", not a gap to
   fill. The hotel indicator is a dash only when the event has no
@@ -622,18 +625,17 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   `Name · address · check-in → check-out` (event dates when block
   dates are empty).
 - **Hotel assignments card is mentor-only:** the trip-level card
-  (block info, Add room, rooming requests) renders only for
-  mentors/admins. The rooms tables themselves stay visible to
-  everyone — day-section rooms tables on multi-day events, and a
-  rooms-only card on single-day events with a block — so parents can
-  still place their own student. Students lose the rooming-request
-  form while the card is mentor-only (see open question in GOAL.md).
-- **One seat per person per event, across every vehicle:** a driver
-  can never claim a seat (not their own car, not anyone else's, not
-  a van — they're already driving), and a person already holding a
-  claimed seat on any car or van is not offered on any other ride's
-  picker and is rejected server-side (403 for a driver, 409 for an
-  already-seated rider). A person merely waitlisted on one ride may
+  (block info, Add room) renders only for mentors/admins. The rooms
+  tables themselves stay visible to everyone — day-section rooms
+  tables on multi-day events, and a rooms-only card on single-day
+  events with a block — but read-only: placement is mentor-only,
+  so non-mentors see occupants without any place or remove action.
+- **One seat per person per event, across every car:** a driver
+  can never claim a seat (not their own car, not anyone else's —
+  they're already driving), and a person already holding a claimed
+  seat on any car is not offered on any other ride's picker and is
+  rejected server-side (403 for a driver, 409 for an already-seated
+  rider). A person merely waitlisted on one ride may
   still take an open seat on another; if they do, waitlist promotion
   on the first ride skips them (and promotes the next rider) rather
   than seating them twice.
@@ -644,23 +646,17 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   with it. **The driver is fixed at registration and can never be
   changed** — not even by a mentor (server 400s a driver change);
   changing the days re-checks the driver against the new days (must
-  attend them, must not drive a van on them). Seats can't be lowered
+  attend them). Seats can't be lowered
   below the riders already claimed.
-- Anyone attending can claim a seat; claims beyond capacity go to the
+- **Mentor-only seats (2026-10-30 cleanup, reversing the self-only
+  round):** only mentors/admins assign seats — a mentor picks any
+  attendee for a day from that day's attendee pool. Students and
+  parents have no claim picker and no release action: the Actions
+  cell notes "Riders are assigned by a mentor", and the server
+  403s any non-mentor claim or release (the old `_may_act_for`
+  self-only gate stays in place behind the mentor check, so a
+  future relaxation reuses it). Claims beyond capacity go to the
   carpool waitlist and auto-promote when a seat is released.
-- **Self-only seats (carpools and vans):** a student claims/releases
-  only their own seat; a parent claims/releases only their own seat
-  as a parent rider — parents no longer sign up their children, who
-  sign up through their own student accounts (or a mentor does it
-  for them). Nobody can claim a seat for, or release the seat of,
-  anyone else — the pickers only ever offer the caller's own seat,
-  and the server enforces it (`_may_act_for`) on every claim and
-  release, so a crafted request can't seat or unseat someone else's
-  student. Mentors/admins claim and release for anyone. Legacy
-  name-only seat rows (no member_id) follow the same rule by name:
-  a parent can release only their own parent-kind row (their
-  account name, or the roster parent_name on a linked child), never
-  a student row — the earlier child-name release is reverted.
 - Drivers may optionally add vehicle details — **license plate, color,
   make, model** — shown on the ride card as a hover tooltip so riders can
   spot the car.
@@ -679,7 +675,7 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   and keeps the old seat, so a re-assign can never silently
   downgrade a confirmed seat to a waitlist spot.
 - **Claiming requires that day's RSVP, by name for name-only rows:**
-  a seat claim (carpool or van) checks the claimant's RSVP for the
+  a seat claim (carpool) checks the claimant's RSVP for the
   claimed day — going, or a partial covering it. Name-only claims
   match a name-only RSVP by normalized name; the old lookup took
   the first name-only row of the kind, so a claim for someone not
@@ -699,27 +695,29 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   delete rows. Every tool starts **unassigned** until a mentor or its
   vehicle's driver confirms it.
 - **Assignment is by vehicle id, not driver name**
-  (`tools.vehicle_type` = 'carpool'|'van' + `vehicle_id`). A tool
-  stays with the *car* when a mentor reassigns the car's driver, and
-  deleting a car or van sends its tools back to the pool (reported in
-  the delete response) instead of leaving them pointed at a ghost.
-  Old name-based assignments were migrated once at boot (carpool
-  driver for the event first, else van name; unmatched names —
-  including every carpool wiped by the driver-account clean slate —
-  fell back to unassigned).
+  (`tools.vehicle_type` + `vehicle_id`). A tool stays with the *car*
+  when a mentor reassigns the car's driver, and deleting a car sends
+  its tools back to the pool (reported in the delete response)
+  instead of leaving them pointed at a ghost. Old name-based
+  assignments were migrated once at boot (carpool driver for the
+  event first, else van name; unmatched names — including every
+  carpool wiped by the driver-account clean slate — fell back to
+  unassigned). Since the 2026-10-30 cleanup, new assignments are
+  carpools only: legacy 'van' rows still exist in the database
+  (dormant backend) and show as Unassigned in the UI.
 - **Who can assign/release:** mentors may assign any tool to any
-  event carpool or any team van, and release or move any tool. A
-  parent may only load a vehicle they drive — their own carpool, or a
-  van they are designated to drive — and may only release a tool from
-  their own vehicle; moving a tool off someone else's vehicle is a
-  mentor's job. Students see the table read-only (they used to see
-  Claim buttons, and claim/unclaim had no permission checks at all).
+  event carpool, and release or move any tool. A parent may only
+  load a vehicle they drive — their own carpool — and may only
+  release a tool from their own vehicle; moving a tool off someone
+  else's vehicle is a mentor's job. Students see the table
+  read-only (they used to see Claim buttons, and claim/unclaim had
+  no permission checks at all).
 - **One row = one vehicle, whole quantity.** Splitting a quantity
   across vehicles means two rows (e.g. ×6 and ×4).
 - **Assignment status at a glance:** the Vehicle column shows a red
   **Unassigned** pill while a tool is still in the pool and a green
-  pill naming its car or van once assigned (a vehicle id pointing at
-  a deleted vehicle counts as unassigned).
+  pill naming its car once assigned (a vehicle id pointing at a
+  deleted vehicle counts as unassigned).
 - **Collapse all / Expand all:** the Tool sign-up list has Expand
   all and Collapse all buttons, mirroring the Events RSVP lists.
   Collapsing hides the table and shows a "Tool list collapsed — N
@@ -737,43 +735,23 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   Only columns present in the file overwrite on update. Single-step
   (unlike the roster/events preview-confirm flow) because nothing
   here deletes; the summary is the confirmation record.
-- **Team vans:** mentors manage a team-wide van list in Travel &
-  Logistics. A van has an optional **designated parent driver**
-  (parent account) and **passenger seats** (blank = tools-only).
-  Mentors add, edit (name/notes/driver/seats), and delete vans;
-  deleting a van also releases its riders and unassigns its tools.
-- **Van rides:** a van takes student riders for an event only when
-  it has seats AND its designated driver RSVP'd going for that event
-  AND that driver isn't already driving a carpool for the same event
-  — otherwise the van is tools-only for the event. Eligible vans show
-  as table rows with seats, riders, waitlist, and claim/release,
-  mirroring carpools (capacity → waitlist → auto-promote).
-- **Van driver pickers hide already-driving parents (one driver,
-  one vehicle):** the new/edit van driver dropdown excludes parents
-  driving a carpool any day of the selected event, designated on
-  another seated van, or day-driving another van any day of the
-  event (the van's own current driver stays selectable on edit, so
-  saving never silently clears one). The per-day driver override
-  dropdown is per-day precise: it hides parents driving a carpool
-  THAT day or another van that is actually going that day, and
-  keeps the van's own day driver selectable. The server enforces
-  the same conflicts (409): a designated driver can't be set on a
-  second seated van, and a day-driver override can't go to a parent
-  driving a carpool that day or another van that day. The override
-  stays permissive about RSVPs — a mentor may set it before RSVPs
-  are filed — and a van whose day driver doesn't attend that day
-  simply doesn't run that day.
-- **Needs-a-ride gap line:** under each day's rides tables, Travel
-  lists only the attendees who still **need a ride** that day.
+- **Team vans — removed from the UI (2026-10-30 cleanup):** tools
+  and robots now ship in parents' cars, so the van list, van ride
+  tables, per-day driver overrides, and van options in the tool
+  picker are gone from Travel. The backend endpoints, tables, and
+  server rules (designated drivers, day drivers, van claims,
+  waitlists) remain untouched and dormant, so existing data and
+  old clients don't break — tools that pointed at vans show as
+  Unassigned, and van riders show as needing a ride until a
+  mentor seats them in a car.
+- **Ride gaps live in the Logistics status table:** the day
+  sections no longer carry a needs-a-ride line — the status table
+  above shows each person's ride gap per day (red Ride pill).
   Waitlisted riders count as needing a ride (no seat yet). 'Needs
   ride' means not on any posted ride; a parent driving themselves
-  without posting a carpool still shows as needing one. On a day
-  with no team vans going, the whole van section is omitted —
-  heading, explainer, "no vans yet" nag, and gap line — since the
-  Logistics status table above already shows each person's ride
-  gap per day; days with vans going are unchanged.
+  without posting a carpool still shows as needing one.
 
-### Hotels & room parents
+### Hotels
 
 - The room block is **already booked** by the team; the app only organizes
   who sleeps where.
@@ -785,79 +763,39 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   as the room has. Capacity is derived from the beds: double, queen, and
   king sleep **2** each; a sofa bed sleeps **1** (e.g. 2 queens + 1 sofa
   bed = sleeps 5).
-### Rooming requests
+- **No room-parent role anymore (2026-10-30 cleanup):** rooms hold
+  students and attending mentors only. There is no volunteer
+  button, no mentor picker, no Room parent column, and no bed
+  counted for a parent — capacity is beds only. The backend
+  columns, endpoints, and server rules (one room per parent per
+  night, attendance checks) remain untouched and dormant.
+### Rooming requests — removed from the UI (2026-10-30 cleanup)
 
-- **Families request** rooming (student + preferred roommates, chosen from
-  attending students); **mentors finalize** by placing students into rooms.
-- **Self-only beds:** placing and removing follow the same rule as
-  seats — mentors/admins place or remove anyone; **parents place
-  nobody** (rooms are student/mentor beds — a parent's room role is
-  room parent, volunteered for themself); a **student removes only
-  themself** and places nobody (they file a rooming request
-  instead). The server enforces it on every place and unplace, and
-  the ✕ on an occupant's pill only ever renders for someone allowed
-  to remove that occupant.
-- Only students attending the event can request a room, be listed as a
-  preferred roommate, or be placed in a room. Preferred roommates may be
-  'going' or 'partial' attendees.
-- **Re-assigning a bed moves it:** placing a student in another room
-  for the same day moves their bed there instead of 409ing, and the
-  pickers keep offering already-placed students on other rooms. A
-  move into a full room 409s with the old bed intact.
-- **Mentors can pick a room for themselves:** a mentor attending a
-  trip gets a "(mentor — you)" entry in each day's place picker,
-  filing a name-only occupant row (mentors hold no roster row) after
-  the server checks their own RSVP for that day; the pill shows
-  their name, and they remove it with the same ✕. Existing
+- Rooming requests (a student + preferred roommates, chosen from
+  attending students) are gone entirely: no request form, no
+  "awaiting placement" line, no request management. Placement is
+  mentor-only from the day's attendee pool, so no request step is
+  needed. The backend endpoint and table remain untouched and
+  dormant.
+- **Mentor-only beds:** only mentors/admins place or remove
+  occupants, for anyone; students and parents have no place or
+  remove action. Placement is per day from that day's attendee
+  pool; capacity is per day; one room per person per day; placing
+  in another room for the same day moves the bed; a move into a
+  full room 409s with the old bed intact.
+- Only attending students (going, or a partial covering the day)
+  can be placed in a room.
+- **Re-assigning a bed moves it:** placing a student in another
+  room for the same day moves their bed there instead of 409ing,
+  and the pickers keep offering already-placed students on other
+  rooms. A move into a full room 409s with the old bed intact.
+- **Mentors can pick a room for themselves:** a mentor attending
+  a trip gets a "(mentor — you)" entry in each day's place picker,
+  filing a name-only occupant row (mentors hold no roster row)
+  after the server checks their own RSVP for that day; the pill
+  shows their name, and they remove it with the same ✕. Existing
   databases migrate the occupants table once at boot (nullable
   member + person_name column) without losing rows.
-- **A student requests only for themself:** the form shows "Requesting as
-  <you>" with no student picker, and the student never appears in their
-  own roommate picker (mentors filing on a student's behalf get the same
-  exclusion once they pick the student). The server enforces it: a
-  student filing for anyone else, or listing themself as a roommate, is
-  rejected. Preferred roommates are picked with **tap-to-toggle
-  chips**, not a Ctrl/Cmd-click multi-select, so the form works on
-  phones.
-- **Parents don't see the rooming-request module at all** — they take part
-  as room parents instead. Students see only their own requests; mentors
-  see everyone's, for placement.
-- **Withdrawal:** a student can withdraw their own rooming request while it
-  is **pending**. Once it is **placed/finalized**, only a mentor/admin can
-  remove it.
-- **Room parent** (optional): an adult volunteer who checks a room in,
-  because students under 18 can't check into hotels themselves. Senior
-  rooms may go without one — a room is never blocked for lacking one.
-- Only parents/mentors/admins can volunteer or remove a room parent;
-  students can never be room parents. Volunteering additionally requires
-  the parent to be **attending at least one day the room runs** (a
-  going RSVP, or a partial covering any of the room's days) — a
-  parent attending none of the room's days is refused. Relaxed from
-  the every-day version at Bruce's direction (2026-10-30, after the
-  Jane case): a parent attending part of a room's run qualifies.
-  The same check applies to mentor assignments.
-  Attendance is **person-level, not row-level**: a parent's RSVPs
-  under any of their children (siblings sharing the roster
-  parent_name), under their own account links, or filed name-only
-  under their name all count — a mentor picking one child row must
-  not miss attendance recorded under another.
-- **One room per parent per night:** a parent already room-parent of
-  another room running on any common day can't take a second one, for
-  self-volunteers and mentor assignments alike. Rooms on disjoint
-  days may still share a parent (no night conflict); removing an
-  assignment frees the parent for other rooms.
-- The room parent recorded is always the family's parent, taken from the
-  member record server-side.
-- **A parent volunteers only themself, never another parent:** the
-  parent UI has no family picker for this at all — just a "Volunteer
-  as room parent" button — and the server resolves the caller to
-  their own linked member (or rejects a member that isn't theirs).
-  Removing a room-parent assignment follows the same rule: a parent
-  removes only their own assignment; mentors/admins remove any.
-- **A room parent takes a bed:** an assigned room parent counts 1
-  against the room's capacity every day the room runs, so a 4-bed
-  room with a parent assigned holds at most 3 students. The capacity
-  pill counts the parent's bed (with a tooltip saying so).
 
 ## Data & hosting
 
@@ -900,7 +838,7 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   handles true dupes.
 - **Picker/list dedupe:** every name picker and list collapses
   duplicate rows by normalized name before rendering — the RSVP person
-  picker, the self-RSVP options, carpool/van seat pickers, room
+  picker, the self-RSVP options, carpool seat pickers, room
   placement pickers (placed exclusion is name-aware too), the Travel
   attendee lists, and the room gap lines — so a duplicate row can
   never double-book or double-count while it still exists. The roster

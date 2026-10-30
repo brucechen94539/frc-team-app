@@ -967,11 +967,15 @@ def api_user_avatar(uid):
 @app.route("/api/auth/profile", methods=["POST"])
 def api_auth_profile():
     """Self-service profile update: phone, WhatsApp, first/last name,
-    and — for your own roster record — school and grade. Email stays
-    mentor-managed; absent keys keep their current value, and anything
-    else in the body is ignored. School/grade only land when the
-    account has a roster link of kind 'self' (in practice a student);
-    without one they are ignored, not an error."""
+    and — for your linked roster records — school, grade, and the
+    family fields (parent name, relationship, parent email/phone/
+    WhatsApp). Email stays mentor-managed; absent keys keep their
+    current value, and anything else in the body is ignored.
+    School/grade land on the account's kind='self' record (in
+    practice a student); family fields land on every linked record
+    (self and parent links alike — a parent's contact info is
+    shared across their children's records). Without a link the
+    roster fields are ignored, not an error."""
     u = current_user()
     if not u:
         return err("login required", 401)
@@ -996,6 +1000,30 @@ def api_auth_profile():
             grade = ((b.get("grade") if "grade" in b else mcur["grade"]) or "").strip()[:20]
             execute("UPDATE members SET school=?, grade=? WHERE id=?",
                     (school, grade, link["member_id"]))
+    # Family fields: parent name, relationship, and parent contact —
+    # written to every roster record this account is linked to, so a
+    # parent's contact info stays consistent across their children.
+    fam_keys = ("parent_name", "relationship", "parent_email",
+                "parent_phone", "parent_whatsapp")
+    if any(k in b for k in fam_keys):
+        for t in q_all("SELECT member_id FROM user_members WHERE user_id=?",
+                       (u["id"],)):
+            mcur = q_one("SELECT parent_name, relationship, parent_email,"
+                         " parent_phone, parent_whatsapp FROM members"
+                         " WHERE id=?", (t["member_id"],))
+            if not mcur:
+                continue
+            vals = {}
+            for k, cap in (("parent_name", 120), ("relationship", 60),
+                           ("parent_email", 120), ("parent_phone", 40),
+                           ("parent_whatsapp", 40)):
+                vals[k] = ((b.get(k) if k in b else mcur[k]) or "").strip()[:cap]
+            execute("UPDATE members SET parent_name=?, relationship=?,"
+                    " parent_email=?, parent_phone=?, parent_whatsapp=?"
+                    " WHERE id=?",
+                    (vals["parent_name"], vals["relationship"],
+                     vals["parent_email"], vals["parent_phone"],
+                     vals["parent_whatsapp"], t["member_id"]))
     return jsonify(q_one("SELECT id, name, first_name, last_name, email,"
                          " phone, whatsapp, role FROM users WHERE id=?",
                          (u["id"],)))
@@ -1326,11 +1354,14 @@ def _user_links_map(user_ids=None):
     assigned_subteam, parent_name, prefs, linked_parents}]} for the link
     table. linked_parents is the parent accounts linked to that member
     (kind='parent') — so a student's Relationship can read "child of
-    <parents>" from links, falling back to the parent_name string."""
+    <parents>" from links, falling back to the parent_name string.
+    The family contact fields ride along so Profile can prefill
+    them for self-service editing."""
     sql = ("SELECT um.user_id, um.member_id, um.kind,"
            " m.first_name AS m_first, m.last_name AS m_last,"
            " m.school, m.grade, m.assigned_subteam, m.parent_name,"
-           " m.prefs"
+           " m.relationship, m.parent_email, m.parent_phone,"
+           " m.parent_whatsapp, m.prefs"
            " FROM user_members um JOIN members m ON m.id = um.member_id")
     args = ()
     if user_ids is not None:
@@ -1345,6 +1376,10 @@ def _user_links_map(user_ids=None):
             "school": l["school"], "grade": l["grade"],
             "assigned_subteam": l["assigned_subteam"],
             "parent_name": l["parent_name"],
+            "relationship": l["relationship"],
+            "parent_email": l["parent_email"],
+            "parent_phone": l["parent_phone"],
+            "parent_whatsapp": l["parent_whatsapp"],
             "prefs": l["prefs"]})
     member_ids = {l["member_id"] for links in out.values() for l in links}
     parents_by_member = {}
@@ -1439,8 +1474,9 @@ def api_user_password(uid):
 @app.route("/api/users/<int:uid>", methods=["PATCH"])
 @require_role("mentor", "admin")
 def api_user_patch(uid):
-    """Mentor edit of an account: WhatsApp (inline in the Team
-    accounts table; empty clears it) and member type (role).
+    """Mentor edit of an account: member type (role) only. Phone and
+    WhatsApp are self-service via Profile — a mentor sending them
+    here has them ignored, not applied.
     Role guards: never your own row; only admins grant the admin
     role or change an admin's role; changing the last enabled
     mentor/admin to a non-mentor role is refused. Links are
@@ -1451,14 +1487,6 @@ def api_user_patch(uid):
     if not u:
         return err("user not found", 404)
     b = request.get_json(force=True, silent=True) or {}
-    wa = None
-    wa_set = False
-    if "whatsapp" in b:
-        wa = b.get("whatsapp")
-        if wa is not None and not isinstance(wa, str):
-            return err("whatsapp must be text")
-        wa = (wa or "").strip() or None
-        wa_set = True
     new_role = None
     role_set = False
     if "role" in b:
@@ -1482,12 +1510,9 @@ def api_user_patch(uid):
                 return err("cannot change the role of the last"
                            " mentor/admin", 400)
         role_set = True
-    if not wa_set and not role_set:
+    if not role_set:
         return err("nothing to update")
     out = {"ok": True}
-    if wa_set:
-        execute("UPDATE users SET whatsapp=? WHERE id=?", (wa, uid))
-        out["whatsapp"] = wa
     if role_set:
         execute("UPDATE users SET role=? WHERE id=?", (new_role, uid))
         out["role"] = new_role
@@ -4686,6 +4711,10 @@ def api_carpool_claim(cid):
     u = current_user()
     if not u:
         return err("login required", 401)
+    # Mentor-only assignments: regular users have no claim UI and
+    # cannot claim through the API either.
+    if u["role"] not in ("mentor", "admin"):
+        return err("seat assignments are mentor-only", 403)
     if not _may_act_for(u, b.get("member_id"), b.get("person_kind"),
                         b.get("person_name")):
         return err("you can only claim a seat for yourself", 403)
@@ -4798,6 +4827,8 @@ def api_carpool_claim_delete(clid):
     u = current_user()
     if not u:
         return err("login required", 401)
+    if u["role"] not in ("mentor", "admin"):
+        return err("seat assignments are mentor-only", 403)
     if not _may_act_for(u, cl["member_id"], cl["person_kind"],
                         cl["person_name"]):
         return err("you can only release your own seat", 403)
@@ -5592,11 +5623,9 @@ def api_room_place(rid):
     be allocated for that day, the student must attend that day,
     and a student sleeps in at most one room per day. Placing in
     the same room for the same day twice is a no-op, not an error
-    (the old INSERT OR IGNORE behavior). A room parent takes a bed:
-    an assigned parent counts 1 against capacity that day.
+    (the old INSERT OR IGNORE behavior).
     Placement is mentors/admins for anyone; parents and students
-    place nobody — students file a rooming request, and a mentor
-    places them. Placing in
+    place nobody — a mentor places them. Placing in
     another room for the same day RE-ASSIGNS (moves) the bed instead
     of 409ing. A mentor placing themself has no roster row: member_id
     is null and the caller's own name rides along instead, recorded
@@ -5609,8 +5638,7 @@ def api_room_place(rid):
     if not u:
         return err("login required", 401)
     if u["role"] == "student":
-        return err("students can't place themselves in a room — file a"
-                   " rooming request, or ask a mentor or your parent",
+        return err("room assignments are mentor-only — ask a mentor",
                    403)
     self_place = b.get("member_id") is None
     if self_place:
@@ -5747,10 +5775,8 @@ def api_room_place(rid):
 
 @app.route("/api/room_occupants/<int:oid>", methods=["DELETE"])
 def api_room_unplace(oid):
-    """Remove an occupant: mentors/admins anyone; anyone else only
-    themself (a student their own bed, a mentor their own
-    name-only bed). Anyone else gets 403 — the ✕ on another
-    student's pill is never a live action."""
+    """Remove an occupant: mentors/admins only — room assignments
+    are mentor-only, so regular users have no unplace action."""
     o = q_one("""SELECT o.*, r.hotel_id FROM room_occupants o
                  JOIN rooms r ON r.id = o.room_id WHERE o.id=?""", (oid,))
     if not o:
@@ -5758,6 +5784,8 @@ def api_room_unplace(oid):
     u = current_user()
     if not u:
         return err("login required", 401)
+    if u["role"] not in ("mentor", "admin"):
+        return err("room assignments are mentor-only", 403)
     if not _may_act_for(u, o["member_id"], "student", o["person_name"]):
         return err("you can only remove yourself from a room", 403)
     with _lock:
