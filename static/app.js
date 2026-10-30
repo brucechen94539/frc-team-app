@@ -134,24 +134,27 @@ let ME = null;          // logged-in user ({id,name,email,role}) or null
 let ME_AVATAR = null;   // logged-in user's photo data URL, or null for initials
 let SETUP = false;      // first run: no account has a password yet
 const MENTOR = () => !!(ME && (ME.role === "mentor" || ME.role === "admin"));
-// Own-only seats and beds (mirrors _may_act_for server-side): a
-// student only themself, a parent only their own linked children
-// (student seats) or themself (parent seats). Name-only rows
-// (member_id null, legacy) match by the caller's own account name,
-// or by a linked child's name on a student row for a parent.
+// Self-only seats and beds (mirrors _may_act_for server-side): a
+// student only themself; a parent only themself as a rider (kind
+// "parent" — a parent's own rider row carries their linked child's
+// member_id, so the gate is on kind, not the link; a "student" row
+// is the child's, never the parent's). Name-only rows (member_id
+// null, legacy) match by the caller's own account name, or — for a
+// parent's own rider row — by the roster parent_name recorded on a
+// linked child. Children sign up through their own student
+// accounts, or a mentor does it for them.
 const ownSeat = (x) => {
   if (!ME) return false;
   if (ME.role === "student")
     return (ME.links || []).some((l) => l.kind === "self" && l.member_id === x.member_id)
       || (x.member_id == null && x.person_kind === "student" && normName(x.person_name) === normName(ME.name));
-  if (ME.role === "parent")
-    return (ME.links || []).some((l) => l.kind === "parent" && l.member_id === x.member_id)
-      || (x.member_id == null && x.person_kind === "parent" && normName(x.person_name) === normName(ME.name))
-      // Legacy name-only student rows carry no member_id: match by
-      // the linked child's name, so a parent can still release
-      // their own child's seat. Only their own linked children
-      // qualify, never another family's student.
-      || (x.member_id == null && x.person_kind === "student" && (ME.links || []).some((l) => l.kind === "parent" && normName(l.member_name) === normName(x.person_name)));
+  if (ME.role === "parent") {
+    if (x.person_kind !== "parent") return false;
+    if (x.member_id != null)
+      return (ME.links || []).some((l) => l.kind === "parent" && l.member_id === x.member_id);
+    return normName(x.person_name) === normName(ME.name)
+      || (ME.links || []).some((l) => l.kind === "parent" && normName(l.parent_name) === normName(x.person_name));
+  }
   return false;
 };
 const canReleaseSeat = (x) => MENTOR() || ownSeat(x);
@@ -2442,14 +2445,15 @@ async function renderTravel() {
     const attPeople = dedupePeople(dp.t.attendees || [],
       (a) => `${a.person_kind}:${normName(a.person_name)}`).map((a) => ({member_id: a.member_id,
       kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
-    // Non-mentors only ever see their own people in the picker: a
-    // student themself, a parent their linked children (as student
-    // riders) plus themself (as a parent rider).
+    // Non-mentors only ever see their own seat in the picker: a
+    // student themself, a parent themself as a parent rider (the
+    // parent's own rider row carries their linked child's id, so
+    // the parent entry is keyed by it with kind "parent").
     const ownPeople = new Set();
     if (ME && ME.role === "student")
       (ME.links || []).filter((l) => l.kind === "self").forEach((l) => ownPeople.add(`${l.member_id}:student`));
     if (ME && ME.role === "parent")
-      (ME.links || []).filter((l) => l.kind === "parent").forEach((l) => { ownPeople.add(`${l.member_id}:student`); ownPeople.add(`${l.member_id}:parent`); });
+      (ME.links || []).filter((l) => l.kind === "parent").forEach((l) => { ownPeople.add(`${l.member_id}:parent`); });
     return attPeople.filter((p) => {
       const idKey = `${p.member_id}:${p.kind}`;
       const nameKey = `${normName(cleanAttName(p))}:${p.kind}`;
@@ -2593,12 +2597,8 @@ async function renderTravel() {
     // same-room re-place stays a server no-op).
     let list = dedupePeople((dp.t.attendees || []).filter((a) => a.person_kind === "student"),
       (a) => normName(a.person_name));
-    // Parents only ever see their own student in the place picker;
-    // mentors see everyone attending that day.
-    if (!MENTOR() && ME && ME.role === "parent") {
-      const mine = new Set((ME.links || []).filter((l) => l.kind === "parent").map((l) => l.member_id));
-      list = list.filter((a) => mine.has(a.member_id));
-    }
+    // Only mentors ever see this picker (canPlace above), so it
+    // offers everyone attending that day.
     const opts = list.map((a) => `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
     // A mentor attending this day can pick a room for themself: the
     // "self" value files a name-only placement (mentors hold no
@@ -3525,13 +3525,14 @@ function roomsTableHTML(h, day, placeOpts, parentOpts, opts) {
       <select id="rp-${r.id}-${dayKey}"><option value="">Volunteer as room parent…</option>${parentOpts}</select>
       <button class="btn small" data-rvol="${r.id}" data-rvolday="${day || ""}">Volunteer</button></div>`) : "";
     const editCell = (opts.showEdit && MENTOR()) ? `<div class="row" style="margin-top:4px"><button class="btn small ghost" data-roomedit="${r.id}" data-roomday="${day || ""}">Edit</button></div>` : "";
-    // Placement is mentors (anyone) or parents (own student only);
-    // students place nobody — they file a rooming request instead.
-    const canPlace = MENTOR() || (ME && ME.role === "parent");
+    // Placement is mentors only; parents and students don't place
+    // — students file a rooming request instead, and a mentor
+    // places them.
+    const canPlace = MENTOR();
     const placeCell = canPlace ? `<div class="row"><select id="plc-${r.id}-${dayKey}">
         <option value="">Place a student…</option>${placeOpts}</select>
         <button class="btn small" data-place="${r.id}" data-placeday="${day || ""}">Place</button></div>`
-      : `<span class="sub">Placement is by a mentor or your parent.</span>`;
+      : `<span class="sub">Placement is by a mentor.</span>`;
     return `<tr id="rm-row-${r.id}-${dayKey}"><td><b>${esc(r.label)}</b>
       ${r.room_number ? `<div class="sub">room #${esc(r.room_number)}</div>` : ""}
       ${opts.editableNumber && MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}

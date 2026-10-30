@@ -4023,16 +4023,19 @@ def _own_member_id(u):
 
 
 def _may_act_for(u, member_id, person_kind, person_name=None):
-    """Own-only rule for seats and beds: mentors/admins may act for
-    anyone; a student only for themself (kind 'student'); a parent
-    only for their own linked children — a child rides/sleeps as
-    'student' on the child's row, and the parent themself rides as
-    'parent' on that same row. Name-only rows (member_id None,
-    legacy) match by the caller's own account name — or, for a
-    parent, by a linked child's name on a student row. This is the
-    server enforcement behind every claim/place/release button:
-    the pickers are filtered too, but a crafted request can't
-    seat or unseat someone else's student."""
+    """Self-only rule for seats and beds: mentors/admins may act for
+    anyone; everyone else only for themself. A student acts only
+    for their own student row; a parent acts only for their own
+    rider row (kind 'parent' — a parent's own rider row carries
+    their linked child's member_id, so the gate is on kind, not the
+    link; a 'student' row is the child's, never the parent's).
+    Name-only rows (member_id None, legacy) match by the caller's
+    own account name, or — for a parent's own rider row — by the
+    roster parent_name recorded on a linked child. Children sign up
+    through their own student accounts, or a mentor does it for
+    them. This is the server enforcement behind every
+    claim/place/release button: the pickers are filtered too, but a
+    crafted request can't seat or unseat someone else's student."""
     if not u:
         return False
     if u["role"] in ("mentor", "admin"):
@@ -4046,7 +4049,7 @@ def _may_act_for(u, member_id, person_kind, person_name=None):
         if u["role"] == "student":
             return person_kind == "student" and member_id == student_id
         if u["role"] == "parent":
-            return member_id in parent_ids
+            return person_kind == "parent" and member_id in parent_ids
         return False
     if person_name:
         if _norm_name(person_name) == _norm_name(u["name"]):
@@ -4054,18 +4057,16 @@ def _may_act_for(u, member_id, person_kind, person_name=None):
                 return person_kind == "student"
             if u["role"] == "parent":
                 return person_kind == "parent"
-        if u["role"] == "parent" and person_kind == "student":
-            # Legacy name-only seat rows carry no member_id, so a
-            # parent's link can't match by id — match by the linked
-            # child's name instead. Only the parent's own linked
-            # children qualify, never another family's student.
+        if u["role"] == "parent" and person_kind == "parent":
+            # A parent's own rider row filed under the roster
+            # parent_name, which may differ from the account name.
             for row in q_all(
-                    "SELECT m.first_name, m.last_name FROM user_members um"
+                    "SELECT m.parent_name FROM user_members um"
                     " JOIN members m ON m.id = um.member_id"
                     " WHERE um.user_id=? AND um.kind='parent'",
                     (u["id"],)):
                 if _norm_name(person_name) == _norm_name(
-                        f"{row['first_name']} {row['last_name']}"):
+                        row["parent_name"] or ""):
                     return True
     return False
 
@@ -4687,8 +4688,7 @@ def api_carpool_claim(cid):
         return err("login required", 401)
     if not _may_act_for(u, b.get("member_id"), b.get("person_kind"),
                         b.get("person_name")):
-        return err("you can only claim a seat for yourself or your own"
-                   " student", 403)
+        return err("you can only claim a seat for yourself", 403)
     ev = q_one("SELECT * FROM events WHERE id=?", (c["event_id"],))
     event_days = _event_days(ev) if ev else []
     # The day claimed: required on multi-day events (a seat is
@@ -4786,8 +4786,7 @@ def api_carpool_claim_delete(clid):
         return err("login required", 401)
     if not _may_act_for(u, cl["member_id"], cl["person_kind"],
                         cl["person_name"]):
-        return err("you can only release your own seat (or your own"
-                   " student's)", 403)
+        return err("you can only release your own seat", 403)
     with _lock:
         db = get_db()
         db.execute("DELETE FROM carpool_claims WHERE id=?", (clid,))
@@ -5198,8 +5197,7 @@ def api_van_claim(vid):
         return err("login required", 401)
     if not _may_act_for(u, b.get("member_id"), b.get("person_kind"),
                         b.get("person_name")):
-        return err("you can only claim a seat for yourself or your own"
-                   " student", 403)
+        return err("you can only claim a seat for yourself", 403)
     if not v.get("seats"):
         return err("this van doesn't take riders — set its seats first")
     ev = q_one("SELECT * FROM events WHERE id=?", (b["event_id"],))
@@ -5313,8 +5311,7 @@ def api_van_claim_delete(clid):
         return err("login required", 401)
     if not _may_act_for(u, cl["member_id"], cl["person_kind"],
                         cl["person_name"]):
-        return err("you can only release your own seat (or your own"
-                   " student's)", 403)
+        return err("you can only release your own seat", 403)
     with _lock:
         db = get_db()
         db.execute("DELETE FROM van_claims WHERE id=?", (clid,))
@@ -5570,9 +5567,9 @@ def api_room_place(rid):
     the same room for the same day twice is a no-op, not an error
     (the old INSERT OR IGNORE behavior). A room parent takes a bed:
     an assigned parent counts 1 against capacity that day.
-    Placement is mentors/admins for anyone, and parents for their
-    own student only — students place nobody (they file a rooming
-    request, and a mentor or their parent places them). Placing in
+    Placement is mentors/admins for anyone; parents and students
+    place nobody — students file a rooming request, and a mentor
+    places them. Placing in
     another room for the same day RE-ASSIGNS (moves) the bed instead
     of 409ing. A mentor placing themself has no roster row: member_id
     is null and the caller's own name rides along instead, recorded
@@ -5596,7 +5593,7 @@ def api_room_place(rid):
                        " by name", 400)
     elif u["role"] == "parent" and not _may_act_for(
             u, b["member_id"], "student"):
-        return err("you can only place your own student in a room", 403)
+        return err("only mentors place students in rooms", 403)
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (rm["hotel_id"],))
     ev = q_one("SELECT * FROM events WHERE id=?", (hotel["event_id"],))
     event_days = _event_days(ev) if ev else []
@@ -5723,9 +5720,10 @@ def api_room_place(rid):
 
 @app.route("/api/room_occupants/<int:oid>", methods=["DELETE"])
 def api_room_unplace(oid):
-    """Remove an occupant: mentors/admins anyone; a student only
-    themself; a parent only their own student. Anyone else gets
-    403 — the ✕ on another student's pill is never a live action."""
+    """Remove an occupant: mentors/admins anyone; anyone else only
+    themself (a student their own bed, a mentor their own
+    name-only bed). Anyone else gets 403 — the ✕ on another
+    student's pill is never a live action."""
     o = q_one("""SELECT o.*, r.hotel_id FROM room_occupants o
                  JOIN rooms r ON r.id = o.room_id WHERE o.id=?""", (oid,))
     if not o:
@@ -5734,8 +5732,7 @@ def api_room_unplace(oid):
     if not u:
         return err("login required", 401)
     if not _may_act_for(u, o["member_id"], "student", o["person_name"]):
-        return err("you can only remove yourself (or your own student)"
-                   " from a room", 403)
+        return err("you can only remove yourself from a room", 403)
     with _lock:
         db = get_db()
         db.execute("DELETE FROM room_occupants WHERE id=?", (oid,))

@@ -648,19 +648,19 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   below the riders already claimed.
 - Anyone attending can claim a seat; claims beyond capacity go to the
   carpool waitlist and auto-promote when a seat is released.
-- **Own-only seats (carpools and vans):** a student claims/releases
-  only their own seat; a parent claims/releases only their own
-  student's seat (or their own seat as a parent rider). Nobody can
-  claim a seat for, or release the seat of, another family — the
-  pickers only ever offer the caller's own people, and the server
-  enforces it (`_may_act_for`) on every claim and release, so a
-  crafted request can't seat or unseat someone else's student.
-  Mentors/admins claim and release for anyone. Legacy name-only seat
-  rows (no member_id) follow the same rule by name: a parent can
-  release a student row bearing their own linked child's name, so a
-  parent can remove — and then reassign — their child on a ride or
-  in a room even when the seat was recorded before linking; another
-  family's parent still gets a 403 and sees no release button.
+- **Self-only seats (carpools and vans):** a student claims/releases
+  only their own seat; a parent claims/releases only their own seat
+  as a parent rider — parents no longer sign up their children, who
+  sign up through their own student accounts (or a mentor does it
+  for them). Nobody can claim a seat for, or release the seat of,
+  anyone else — the pickers only ever offer the caller's own seat,
+  and the server enforces it (`_may_act_for`) on every claim and
+  release, so a crafted request can't seat or unseat someone else's
+  student. Mentors/admins claim and release for anyone. Legacy
+  name-only seat rows (no member_id) follow the same rule by name:
+  a parent can release only their own parent-kind row (their
+  account name, or the roster parent_name on a linked child), never
+  a student row — the earlier child-name release is reverted.
 - Drivers may optionally add vehicle details — **license plate, color,
   make, model** — shown on the ride card as a hover tooltip so riders can
   spot the car.
@@ -783,13 +783,14 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
 
 - **Families request** rooming (student + preferred roommates, chosen from
   attending students); **mentors finalize** by placing students into rooms.
-- **Own-only beds:** placing and removing follow the same rule as
-  seats — mentors/admins place or remove anyone; a **parent places
-  or removes only their own student** (the place picker offers only
-  their student); a **student removes only themself** and places
-  nobody (they file a rooming request instead). The server enforces
-  it on every place and unplace, and the ✕ on an occupant's pill
-  only ever renders for someone allowed to remove that occupant.
+- **Self-only beds:** placing and removing follow the same rule as
+  seats — mentors/admins place or remove anyone; **parents place
+  nobody** (rooms are student/mentor beds — a parent's room role is
+  room parent, volunteered for themself); a **student removes only
+  themself** and places nobody (they file a rooming request
+  instead). The server enforces it on every place and unplace, and
+  the ✕ on an occupant's pill only ever renders for someone allowed
+  to remove that occupant.
 - Only students attending the event can request a room, be listed as a
   preferred roommate, or be placed in a room. Preferred roommates may be
   'going' or 'partial' attendees.
