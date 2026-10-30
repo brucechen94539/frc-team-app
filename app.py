@@ -3250,11 +3250,22 @@ def api_rsvps(eid):
             for day in covered:
                 n = 0
                 for r in db.execute(
-                        "SELECT id, member_id, person_kind, status FROM rsvps"
+                        "SELECT id, member_id, person_kind, person_name,"
+                        " status FROM rsvps"
                         " WHERE event_id=? AND status IN ('going','partial')",
                         (eid,)):
-                    if (r["member_id"] == b.get("member_id")
-                            and r["person_kind"] == b["person_kind"]):
+                    # The filer themself is excluded. For name-only
+                    # rows (member_id NULL) that means the same
+                    # normalized name — excluding every NULL row of
+                    # the kind would under-count other name-only
+                    # filers toward capacity.
+                    if r["person_kind"] == b["person_kind"] and (
+                            (b.get("member_id") is not None
+                             and r["member_id"] == b.get("member_id"))
+                            or (b.get("member_id") is None
+                                and r["member_id"] is None
+                                and _norm_name(r["person_name"])
+                                == _norm_name(b.get("person_name")))):
                         continue
                     if _attends_day(r["status"],
                                     days_map.get(r["id"], set()),
@@ -3267,20 +3278,57 @@ def api_rsvps(eid):
             status = "waitlisted"
     with _lock:
         db = get_db()
-        db.execute(
-            """INSERT INTO rsvps (event_id, member_id, person_kind, person_name, status)
-               VALUES (?,?,?,?,?)
-               ON CONFLICT(event_id, member_id, person_kind)
-               DO UPDATE SET person_name=excluded.person_name, status=excluded.status,
-                             created_at=datetime('now')""",
-            (eid, b.get("member_id"), b["person_kind"], b["person_name"], status))
+        if b.get("member_id") is None:
+            # SQLite UNIQUE treats NULLs as distinct, so the
+            # ON CONFLICT clause below never fires for name-only
+            # rows (e.g. a mentor's own RSVP): every re-file would
+            # add a duplicate row instead of updating the old one,
+            # and the follow-up SELECT would fetch the oldest row
+            # of the kind, not the filer's. Match by normalized
+            # name within (event, kind) instead.
+            existing = None
+            for cand in db.execute(
+                    "SELECT id, person_name FROM rsvps WHERE event_id=?"
+                    " AND member_id IS NULL AND person_kind=?",
+                    (eid, b["person_kind"])):
+                if _norm_name(cand["person_name"]) \
+                        == _norm_name(b.get("person_name")):
+                    existing = cand
+                    break
+            if existing is not None:
+                db.execute(
+                    "UPDATE rsvps SET person_name=?, status=?,"
+                    " created_at=datetime('now') WHERE id=?",
+                    (b["person_name"], status, existing["id"]))
+            else:
+                db.execute(
+                    "INSERT INTO rsvps (event_id, member_id, person_kind,"
+                    " person_name, status) VALUES (?,?,?,?,?)",
+                    (eid, None, b["person_kind"], b["person_name"], status))
+        else:
+            db.execute(
+                """INSERT INTO rsvps (event_id, member_id, person_kind, person_name, status)
+                   VALUES (?,?,?,?,?)
+                   ON CONFLICT(event_id, member_id, person_kind)
+                   DO UPDATE SET person_name=excluded.person_name, status=excluded.status,
+                                 created_at=datetime('now')""",
+                (eid, b.get("member_id"), b["person_kind"], b["person_name"], status))
         db.commit()
-        r = db.execute(
-            "SELECT * FROM rsvps WHERE event_id=? AND member_id "
-            + ("IS NULL" if b.get("member_id") is None else "=?")
-            + " AND person_kind=?",
-            tuple([eid] + ([] if b.get("member_id") is None else [b["member_id"]])
-                  + [b["person_kind"]])).fetchone()
+        if b.get("member_id") is None:
+            r = None
+            for cand in db.execute(
+                    "SELECT * FROM rsvps WHERE event_id=? AND member_id"
+                    " IS NULL AND person_kind=?",
+                    (eid, b["person_kind"])):
+                if _norm_name(cand["person_name"]) \
+                        == _norm_name(b.get("person_name")):
+                    r = cand
+                    break
+        else:
+            r = db.execute(
+                "SELECT * FROM rsvps WHERE event_id=? AND member_id=?"
+                " AND person_kind=?",
+                (eid, b["member_id"], b["person_kind"])).fetchone()
         # Only replace the day set when the client sent one — a
         # going re-file without days must not wipe a partial's
         # earlier picks, and a status-only change keeps them too.
@@ -3953,7 +4001,8 @@ def _may_act_for(u, member_id, person_kind, person_name=None):
     only for their own linked children — a child rides/sleeps as
     'student' on the child's row, and the parent themself rides as
     'parent' on that same row. Name-only rows (member_id None,
-    legacy) match by the caller's own account name. This is the
+    legacy) match by the caller's own account name — or, for a
+    parent, by a linked child's name on a student row. This is the
     server enforcement behind every claim/place/release button:
     the pickers are filtered too, but a crafted request can't
     seat or unseat someone else's student."""
@@ -3972,11 +4021,25 @@ def _may_act_for(u, member_id, person_kind, person_name=None):
         if u["role"] == "parent":
             return member_id in parent_ids
         return False
-    if person_name and _norm_name(person_name) == _norm_name(u["name"]):
-        if u["role"] == "student":
-            return person_kind == "student"
-        if u["role"] == "parent":
-            return person_kind == "parent"
+    if person_name:
+        if _norm_name(person_name) == _norm_name(u["name"]):
+            if u["role"] == "student":
+                return person_kind == "student"
+            if u["role"] == "parent":
+                return person_kind == "parent"
+        if u["role"] == "parent" and person_kind == "student":
+            # Legacy name-only seat rows carry no member_id, so a
+            # parent's link can't match by id — match by the linked
+            # child's name instead. Only the parent's own linked
+            # children qualify, never another family's student.
+            for row in q_all(
+                    "SELECT m.first_name, m.last_name FROM user_members um"
+                    " JOIN members m ON m.id = um.member_id"
+                    " WHERE um.user_id=? AND um.kind='parent'",
+                    (u["id"],)):
+                if _norm_name(person_name) == _norm_name(
+                        f"{row['first_name']} {row['last_name']}"):
+                    return True
     return False
 
 

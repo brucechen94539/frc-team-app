@@ -9,6 +9,41 @@ _None right now._
 
 ## Fixed
 
+### Mentors couldn't join events / RSVP for themselves (2026-10-30)
+
+**Reported** (Bruce): mentors can join events and RSVP. **Root
+cause:** the mentor event-card picker offered only roster members
+(`personOptions()`), so a mentor with no roster row had no way to
+RSVP for themself in the UI — even though the API already accepted a
+name-only mentor RSVP. Worse, the server's RSVP upsert never fired
+for name-only rows (SQLite UNIQUE treats NULLs as distinct), so
+re-filing added a duplicate row and the follow-up SELECT fetched the
+oldest name-only row of the kind, mis-attaching partial day picks.
+**Fix:** the mentor picker now leads with a "(mentor — you)" entry
+that files a name-only RSVP under the mentor's account name, and the
+server dedupes name-only RSVPs by normalized name within (event,
+kind) for the upsert, the capacity self-exclusion, and the day-pick
+attach. Verified: 12-check API + browser suite (self-RSVP, re-file
+updates instead of duplicating, partial days land on the right
+name-only row, UI picker + filing).
+
+### Parent couldn't remove/reassign child on ride/hotel (2026-10-30)
+
+**Reported** (Bruce): a parent of a child can remove/reassign the
+child on a ride/hotel. **Root cause (found by probing):** the
+linked-child remove/reassign loop already worked end to end (seat
+and bed release buttons, re-claim, re-place), but legacy name-only
+seat rows (member_id NULL) were unmanageable by parents — the
+own-only rule's name fallback matched only the caller's own account
+name, so a parent saw no release button on, and got a 403 for, a
+student row bearing their child's name. **Fix:** the name fallback
+in `_may_act_for` and `ownSeat` now also matches a parent's linked
+child's name on student rows (carpool and van claims share the
+helper); another family's parent still gets a 403 and sees no
+button. Verified in the same 12-check suite (carpool + van
+name-only release by the own parent, 403 for the other parent,
+linked-child release regression, UI release click).
+
 ### Duplicate members/accounts after remove-and-recreate (2026-10-29, commit da92cb2b)
 
 **Reported** (Bruce): after removing and re-creating users, lists showed

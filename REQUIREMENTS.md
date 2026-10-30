@@ -375,7 +375,12 @@ and `can't make it` do not count as attending.
 - **Students and parents** can RSVP **for themselves only** — the picker
   shows just their own entry (a parent with several children gets one
   entry per child, labeled by child). **Only mentors/admins can RSVP for
-  someone else** (override). The server enforces it: a non-mentor RSVP
+  someone else** (override). **Mentors can also join events and RSVP
+  for themselves:** their picker leads with a "(mentor — you)" entry
+  that files a name-only RSVP under their account name (mentors hold
+  no roster row), and re-filing updates that row instead of adding a
+  duplicate — name-only RSVPs dedupe by normalized name within
+  (event, kind), including their partial day picks. The server enforces it: a non-mentor RSVP
   for anyone else is rejected, matched by member linkage (student record
   or parent_name), with loose name matching so 'zanderchen' matches
   'Zander Chen'. **The name itself is also checked:** the scope check
@@ -650,7 +655,12 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   pickers only ever offer the caller's own people, and the server
   enforces it (`_may_act_for`) on every claim and release, so a
   crafted request can't seat or unseat someone else's student.
-  Mentors/admins claim and release for anyone.
+  Mentors/admins claim and release for anyone. Legacy name-only seat
+  rows (no member_id) follow the same rule by name: a parent can
+  release a student row bearing their own linked child's name, so a
+  parent can remove — and then reassign — their child on a ride or
+  in a room even when the seat was recorded before linking; another
+  family's parent still gets a 403 and sees no release button.
 - Drivers may optionally add vehicle details — **license plate, color,
   make, model** — shown on the ride card as a hover tooltip so riders can
   spot the car.

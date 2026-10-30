@@ -137,7 +137,8 @@ const MENTOR = () => !!(ME && (ME.role === "mentor" || ME.role === "admin"));
 // Own-only seats and beds (mirrors _may_act_for server-side): a
 // student only themself, a parent only their own linked children
 // (student seats) or themself (parent seats). Name-only rows
-// (member_id null, legacy) match by the caller's own account name.
+// (member_id null, legacy) match by the caller's own account name,
+// or by a linked child's name on a student row for a parent.
 const ownSeat = (x) => {
   if (!ME) return false;
   if (ME.role === "student")
@@ -145,7 +146,12 @@ const ownSeat = (x) => {
       || (x.member_id == null && x.person_kind === "student" && normName(x.person_name) === normName(ME.name));
   if (ME.role === "parent")
     return (ME.links || []).some((l) => l.kind === "parent" && l.member_id === x.member_id)
-      || (x.member_id == null && x.person_kind === "parent" && normName(x.person_name) === normName(ME.name));
+      || (x.member_id == null && x.person_kind === "parent" && normName(x.person_name) === normName(ME.name))
+      // Legacy name-only student rows carry no member_id: match by
+      // the linked child's name, so a parent can still release
+      // their own child's seat. Only their own linked children
+      // qualify, never another family's student.
+      || (x.member_id == null && x.person_kind === "student" && (ME.links || []).some((l) => l.kind === "parent" && normName(l.member_name) === normName(x.person_name)));
   return false;
 };
 const canReleaseSeat = (x) => MENTOR() || ownSeat(x);
@@ -2017,7 +2023,15 @@ async function eventCard(e, ro = false) {
   const hc = d.headcounts;
   const closed = eventClosed(e);
   const archived = !!e.archived;
-  const pickerOpts = MENTOR() ? personOptions() : selfRSVPOptions();
+  // Mentors can join events and RSVP for themselves, not just file
+  // for members: their own entry leads the picker. It is a name-only
+  // RSVP (member_id null, adult "parent" kind — mentors hold no
+  // roster row), filed under their account name; the server dedupes
+  // name-only RSVPs by normalized name, so re-filing updates it.
+  const pickerOpts = MENTOR()
+    ? [{member_id: null, kind: "parent", name: ME.name,
+        label: `${ME.name} (mentor — you)`}, ...personOptions()]
+    : selfRSVPOptions();
   const opts = pickerOpts.map((p) =>
     `<option value='${JSON.stringify(p).replace(/'/g, "&#39;")}'>${esc(p.label || p.name)}</option>`).join("");
   // Closed events hide the picker — except for mentors, whose override
@@ -2040,7 +2054,7 @@ async function eventCard(e, ro = false) {
     </div>${eventDays(e).length > 1 ? `<div class="row" style="margin-top:6px"><span class="sub">Partial days:</span>
       ${eventDays(e).map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="rp-day" data-day="${ds}" checked> ${dayLabel(ds)}</label>`).join("")}
       <span class="sub">(all checked = every day; only used for Partial — unchecking a day leaves only Partial enabled)</span></div>` : ""}
-    ${closed ? `<p class="sub">Deadline passed — mentor override: you can still RSVP for others.</p>` : ""}`;
+    ${closed ? `<p class="sub">Deadline passed — mentor override: you can still RSVP for others or yourself.</p>` : ""}`;
   else pickerRow = `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
   const scope = selfScope();
   const row = (r) => {
