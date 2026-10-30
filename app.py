@@ -450,6 +450,31 @@ def _migrate(db):
                 SELECT id, room_id, member_id, placed_at
                 FROM room_occupants_old""")
             db.execute("DROP TABLE room_occupants_old")
+        # Name-only occupants (a mentor placing themself) need a
+        # person_name column, and member_id must be nullable for
+        # them — SQLite can't relax NOT NULL in place, so rebuild
+        # once. Runs after the day rebuild above, so the old table
+        # always has a day column by now.
+        occ_cols = {r[1] for r in db.execute(
+            "PRAGMA table_info(room_occupants)")}
+        if occ_cols and "person_name" not in occ_cols:
+            db.execute("ALTER TABLE room_occupants"
+                       " RENAME TO room_occupants_old")
+            db.execute("""CREATE TABLE room_occupants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                room_id INTEGER NOT NULL REFERENCES rooms(id)
+                    ON DELETE CASCADE,
+                member_id INTEGER REFERENCES members(id)
+                    ON DELETE SET NULL,
+                day TEXT,
+                person_name TEXT,
+                placed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(room_id, member_id, day))""")
+            db.execute("""INSERT INTO room_occupants
+                (id, room_id, member_id, day, placed_at)
+                SELECT id, room_id, member_id, day, placed_at
+                FROM room_occupants_old""")
+            db.execute("DROP TABLE room_occupants_old")
         db.commit()
         db.commit()
 
@@ -3732,8 +3757,10 @@ def api_travel(eid):
             # is small.
             rm["days"] = sorted(room_days.get(rm["id"], set()))
             rm["occupants"] = q_all(
-                """SELECT o.id, o.member_id, o.day, m.first_name, m.last_name
-                   FROM room_occupants o JOIN members m ON m.id = o.member_id
+                """SELECT o.id, o.member_id, o.day, o.person_name,
+                   m.first_name, m.last_name
+                   FROM room_occupants o LEFT JOIN members m
+                   ON m.id = o.member_id
                    WHERE o.room_id=? ORDER BY o.id""", (rm["id"],))
         hotel["rooms"] = rooms
         reqs = q_all(
@@ -4326,6 +4353,40 @@ def _has_claimed_seat_day(db, eid, member_id, person_kind, person_name,
     return False
 
 
+def _move_claims_db(db, eid, member_id, person_kind, person_name, day,
+                    event_days):
+    """Re-assign (move) a rider's seat: delete the person's existing
+    claimed/waitlisted rows covering `day` on every vehicle, so the
+    caller can insert the new claim right after, in the same lock,
+    making the move atomic. A freed claimed seat promotes that
+    vehicle's first eligible waitlisted rider, exactly like a
+    release. Returns True when anything moved. Same-vehicle
+    duplicates are rejected before this runs, so every row removed
+    here sits on another vehicle."""
+    moved = False
+    for row in db.execute(
+            "SELECT cc.* FROM carpool_claims cc JOIN carpools c"
+            " ON c.id = cc.carpool_id WHERE c.event_id=?", (eid,)):
+        if _claim_day_matches(row["day"], day) and _claim_matches(
+                row, member_id, person_kind, person_name):
+            db.execute("DELETE FROM carpool_claims WHERE id=?",
+                       (row["id"],))
+            moved = True
+            if row["status"] == "claimed":
+                _promote_waitlist_db(db, "carpool", row["carpool_id"],
+                                     eid, row["day"], event_days)
+    for row in db.execute(
+            "SELECT * FROM van_claims WHERE event_id=?", (eid,)):
+        if _claim_day_matches(row["day"], day) and _claim_matches(
+                row, member_id, person_kind, person_name):
+            db.execute("DELETE FROM van_claims WHERE id=?", (row["id"],))
+            moved = True
+            if row["status"] == "claimed":
+                _promote_waitlist_db(db, "van", row["van_id"],
+                                     eid, row["day"], event_days)
+    return moved
+
+
 def _claimed_count_day(db, table, id_col, vid, day):
     """Claimed seats on one vehicle for one day (NULL-day rows count
     on every day)."""
@@ -4687,16 +4748,21 @@ def api_carpool_claim(cid):
                           b.get("person_kind"), b["person_name"]):
             return err("drivers can't claim a seat on a day they're"
                        " driving", 403)
-        # One seat per person per DAY, across every vehicle: a seat
-        # already claimed on another carpool or a van for this day
-        # blocks this one; a seat on another day does not.
-        if _has_claimed_seat_day(db, c["event_id"], b.get("member_id"),
-                                 b.get("person_kind"), b["person_name"],
-                                 day):
-            return err("already has a seat for that day — on another"
-                       " car or van", 409)
+        # Re-assign (move): claiming on another vehicle for the same
+        # day moves the rider instead of 409ing — except a move from
+        # a confirmed seat into a full vehicle, which would silently
+        # downgrade the seat to a waitlist spot, so that keeps the
+        # old seat and 409s.
         taken = _claimed_count_day(db, "carpool_claims", "carpool_id",
                                    cid, day)
+        if taken >= c["seats"] and _has_claimed_seat_day(
+                db, c["event_id"], b.get("member_id"), b.get("person_kind"),
+                b.get("person_name"), day):
+            return err("that ride is full for that day — your current"
+                       " seat is kept", 409)
+        moved = _move_claims_db(db, c["event_id"], b.get("member_id"),
+                                b.get("person_kind"), b.get("person_name"),
+                                day, event_days)
         status = "claimed" if taken < c["seats"] else "waitlisted"
         cur = db.execute(
             "INSERT INTO carpool_claims (carpool_id, member_id, person_kind,"
@@ -4705,7 +4771,9 @@ def api_carpool_claim(cid):
              status, day))
         db.commit()
         clid = cur.lastrowid
-    return jsonify(q_one("SELECT * FROM carpool_claims WHERE id=?", (clid,))), 201
+    d = dict(q_one("SELECT * FROM carpool_claims WHERE id=?", (clid,)))
+    d["moved"] = moved
+    return jsonify(d), 201
 
 
 @app.route("/api/carpool_claims/<int:clid>", methods=["DELETE"])
@@ -5205,16 +5273,23 @@ def api_van_claim(vid):
                           b.get("person_kind"), b["person_name"]):
             return err("drivers can't claim a seat on a day they're"
                        " driving", 403)
-        if _has_claimed_seat_day(db, b["event_id"], b.get("member_id"),
-                                 b.get("person_kind"), b["person_name"],
-                                 day):
-            return err("already has a seat for that day — on another"
-                       " car or van", 409)
+        # Re-assign (move), mirroring carpools: claiming on another
+        # vehicle for the same day moves the rider instead of 409ing,
+        # except a move from a confirmed seat into a full vehicle,
+        # which keeps the old seat and 409s.
         # Van capacity is per (van, event, day), scoped to this event.
         taken = sum(1 for r in db.execute(
             "SELECT day FROM van_claims WHERE van_id=? AND event_id=?"
             " AND status='claimed'", (vid, b["event_id"])).fetchall()
             if _claim_day_matches(r["day"], day))
+        if taken >= v["seats"] and _has_claimed_seat_day(
+                db, b["event_id"], b.get("member_id"), b.get("person_kind"),
+                b.get("person_name"), day):
+            return err("that ride is full for that day — your current"
+                       " seat is kept", 409)
+        moved = _move_claims_db(db, b["event_id"], b.get("member_id"),
+                                b.get("person_kind"), b.get("person_name"),
+                                day, event_days)
         status = "claimed" if taken < v["seats"] else "waitlisted"
         cur = db.execute(
             "INSERT INTO van_claims (van_id, event_id, member_id,"
@@ -5223,7 +5298,9 @@ def api_van_claim(vid):
              b["person_name"], status, day))
         db.commit()
         clid = cur.lastrowid
-    return jsonify(q_one("SELECT * FROM van_claims WHERE id=?", (clid,))), 201
+    d = dict(q_one("SELECT * FROM van_claims WHERE id=?", (clid,)))
+    d["moved"] = moved
+    return jsonify(d), 201
 
 
 @app.route("/api/van_claims/<int:clid>", methods=["DELETE"])
@@ -5495,10 +5572,12 @@ def api_room_place(rid):
     an assigned parent counts 1 against capacity that day.
     Placement is mentors/admins for anyone, and parents for their
     own student only — students place nobody (they file a rooming
-    request, and a mentor or their parent places them)."""
+    request, and a mentor or their parent places them). Placing in
+    another room for the same day RE-ASSIGNS (moves) the bed instead
+    of 409ing. A mentor placing themself has no roster row: member_id
+    is null and the caller's own name rides along instead, recorded
+    as a name-only occupant row."""
     b = request.get_json(force=True)
-    if not b.get("member_id"):
-        return err("member_id required")
     rm = q_one("SELECT * FROM rooms WHERE id=?", (rid,))
     if not rm:
         return err("room not found", 404)
@@ -5509,7 +5588,13 @@ def api_room_place(rid):
         return err("students can't place themselves in a room — file a"
                    " rooming request, or ask a mentor or your parent",
                    403)
-    if u["role"] == "parent" and not _may_act_for(
+    self_place = b.get("member_id") is None
+    if self_place:
+        if u["role"] not in ("mentor", "admin") or not b.get("person_name") \
+                or _norm_name(b.get("person_name")) != _norm_name(u["name"]):
+            return err("member_id required — mentors place themselves"
+                       " by name", 400)
+    elif u["role"] == "parent" and not _may_act_for(
             u, b["member_id"], "student"):
         return err("you can only place your own student in a room", 403)
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (rm["hotel_id"],))
@@ -5538,28 +5623,66 @@ def api_room_place(rid):
         # Attending ON THAT DAY, not just the trip: a partial
         # attending only Day 3 can't be placed on Day 1.
         days_map = _rsvp_days_map(db, hotel["event_id"])
-        rsvp = db.execute(
-            "SELECT id, status FROM rsvps WHERE event_id=? AND member_id=?"
-            " AND person_kind='student'",
-            (hotel["event_id"], b["member_id"])).fetchone()
+        if self_place:
+            # The mentor's own RSVP is name-only (parent kind, null
+            # member): match it by normalized name.
+            rsvp = None
+            for cand in db.execute(
+                    "SELECT id, status, person_name FROM rsvps"
+                    " WHERE event_id=? AND member_id IS NULL"
+                    " AND person_kind='parent'", (hotel["event_id"],)):
+                if _norm_name(cand["person_name"]) \
+                        == _norm_name(b.get("person_name")):
+                    rsvp = cand
+                    break
+        else:
+            rsvp = db.execute(
+                "SELECT id, status FROM rsvps WHERE event_id=? AND member_id=?"
+                " AND person_kind='student'",
+                (hotel["event_id"], b["member_id"])).fetchone()
         if not rsvp or not _attends_day(rsvp["status"],
                                         days_map.get(rsvp["id"], set()),
                                         day, event_days):
-            return err("only students attending on that day can be placed"
+            return err("only people attending on that day can be placed"
                        " — RSVP for that day first")
-        # Already placed for this day? Same room = no-op; another
-        # room = one room per person per day.
+        # Who is being placed, for matching existing placements:
+        # the member row, or — for a mentor placing themself — the
+        # name-only row. Matching by normalized name too means a
+        # duplicate roster row for the same student moves instead
+        # of double-placing them.
+        if self_place:
+            my_name = _norm_name(b.get("person_name"))
+        else:
+            mrow = db.execute(
+                "SELECT first_name, last_name FROM members WHERE id=?",
+                (b["member_id"],)).fetchone()
+            my_name = _norm_name(
+                f"{mrow['first_name']} {mrow['last_name']}") if mrow else None
+
+        def _is_mine(r):
+            if self_place:
+                return r["member_id"] is None and r["person_name"] \
+                    and _norm_name(r["person_name"]) == my_name
+            if r["member_id"] is not None \
+                    and r["member_id"] == b["member_id"]:
+                return True
+            return bool(my_name and r["member_id"] is not None
+                        and r["first_name"]
+                        and _norm_name(
+                            f"{r['first_name']} {r['last_name']}") == my_name)
+
         placed = db.execute(
-            """SELECT o.room_id, o.day FROM room_occupants o
+            """SELECT o.id, o.room_id, o.day, o.member_id, o.person_name,
+               m.first_name, m.last_name FROM room_occupants o
                JOIN rooms r ON r.id = o.room_id
-               WHERE r.hotel_id=? AND o.member_id=?""",
-            (rm["hotel_id"], b["member_id"])).fetchall()
-        if any(r["room_id"] == rid
+               LEFT JOIN members m ON m.id = o.member_id
+               WHERE r.hotel_id=?""", (rm["hotel_id"],)).fetchall()
+        # Already placed for this day? Same room = no-op; another
+        # room = re-assign (move), handled below after the capacity
+        # check so a move into a full room keeps the old bed.
+        if any(_is_mine(r) and r["room_id"] == rid
                and _occupant_day_matches(r["day"], day) for r in placed):
             return jsonify({"ok": True}), 201
-        if any(r["room_id"] != rid
-               and _occupant_day_matches(r["day"], day) for r in placed):
-            return err("already placed in another room for that day", 409)
         occ = db.execute(
             "SELECT day FROM room_occupants WHERE room_id=?",
             (rid,)).fetchall()
@@ -5575,14 +5698,27 @@ def api_room_place(rid):
                if _occupant_day_matches(r["day"], day)) \
                 + parent_takes >= rm["capacity"]:
             return err("room is full for that day", 409)
+        # Move: free the old bed(s) for this day first, then insert.
+        # Capacity was checked above, so a move into a full room
+        # already 409'd with the old bed intact.
+        moved = False
+        for r in placed:
+            if _is_mine(r) and r["room_id"] != rid \
+                    and _occupant_day_matches(r["day"], day):
+                db.execute("DELETE FROM room_occupants WHERE id=?",
+                           (r["id"],))
+                moved = True
         db.execute(
-            "INSERT INTO room_occupants (room_id, member_id, day)"
-            " VALUES (?,?,?)", (rid, b["member_id"], day))
-        db.execute("UPDATE rooming_requests SET status='placed'"
-                   " WHERE hotel_id=? AND member_id=?",
-                   (rm["hotel_id"], b["member_id"]))
+            "INSERT INTO room_occupants (room_id, member_id, day, person_name)"
+            " VALUES (?,?,?,?)",
+            (rid, b.get("member_id"), day,
+             b.get("person_name") if self_place else None))
+        if b.get("member_id") is not None:
+            db.execute("UPDATE rooming_requests SET status='placed'"
+                       " WHERE hotel_id=? AND member_id=?",
+                       (rm["hotel_id"], b["member_id"]))
         db.commit()
-    return jsonify({"ok": True}), 201
+    return jsonify({"ok": True, "moved": moved}), 201
 
 
 @app.route("/api/room_occupants/<int:oid>", methods=["DELETE"])
@@ -5597,7 +5733,7 @@ def api_room_unplace(oid):
     u = current_user()
     if not u:
         return err("login required", 401)
-    if not _may_act_for(u, o["member_id"], "student"):
+    if not _may_act_for(u, o["member_id"], "student", o["person_name"]):
         return err("you can only remove yourself (or your own student)"
                    " from a room", 403)
     with _lock:

@@ -669,6 +669,15 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   promotes the first waitlisted person who doesn't already hold a seat
   on any vehicle or drive for the event (see the one-seat-per-event
   rule above).
+- **Re-assigning a seat moves it:** claiming a rider on another
+  vehicle for the same day moves their seat there instead of 409ing
+  — the old row is deleted (a freed confirmed seat promotes that
+  vehicle's first eligible waitlisted rider, exactly like a
+  release) and the new claim is inserted atomically, so the pickers
+  keep offering already-seated riders on other vehicles. The one
+  exception: moving from a confirmed seat into a full vehicle 409s
+  and keeps the old seat, so a re-assign can never silently
+  downgrade a confirmed seat to a waitlist spot.
   Databases with pre-existing duplicates are collapsed on server boot
   (earliest claimed row kept, else earliest waitlisted row).
 - **Clean slate (2026-10-28):** when the driver-account model shipped,
@@ -784,6 +793,17 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
 - Only students attending the event can request a room, be listed as a
   preferred roommate, or be placed in a room. Preferred roommates may be
   'going' or 'partial' attendees.
+- **Re-assigning a bed moves it:** placing a student in another room
+  for the same day moves their bed there instead of 409ing, and the
+  pickers keep offering already-placed students on other rooms. A
+  move into a full room 409s with the old bed intact.
+- **Mentors can pick a room for themselves:** a mentor attending a
+  trip gets a "(mentor — you)" entry in each day's place picker,
+  filing a name-only occupant row (mentors hold no roster row) after
+  the server checks their own RSVP for that day; the pill shows
+  their name, and they remove it with the same ✕. Existing
+  databases migrate the occupants table once at boot (nullable
+  member + person_name column) without losing rows.
 - **A student requests only for themself:** the form shows "Requesting as
   <you>" with no student picker, and the student never appears in their
   own roommate picker (mentors filing on a student's behalf get the same

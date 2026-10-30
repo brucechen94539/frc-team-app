@@ -2429,13 +2429,11 @@ async function renderTravel() {
     const driverNames = new Set([
       ...dp.t.carpools.map((c) => normName(c.driver_name)),
       ...dp.t.event_vans.map((v) => normName(v.driver_name))]);
-    const claimed = new Set();
-    const collect = (claims) => (claims || []).forEach((x) => {
-      claimed.add(`${x.member_id}:${x.person_kind}`);
-      claimed.add(`${normName(x.person_name)}:${x.person_kind}`);
-    });
-    dp.t.carpools.forEach((c) => collect(c.claims));
-    dp.t.event_vans.forEach((v) => collect(v.claims));
+    // No claimed-elsewhere exclusion: a rider already seated on
+    // another vehicle for this day stays offered here, and claiming
+    // them MOVES their seat (the server deletes the old row, with
+    // waitlist promotion, and inserts the new one). Only this
+    // vehicle's own rows stay excluded, below.
     const own = new Set();
     (ownRows || []).forEach((x) => {
       own.add(`${x.member_id}:${x.person_kind}`);
@@ -2457,7 +2455,6 @@ async function renderTravel() {
       const nameKey = `${normName(cleanAttName(p))}:${p.kind}`;
       if (!MENTOR() && !ownPeople.has(idKey)) return false;
       if (p.kind === "parent" && driverNames.has(normName(cleanAttName(p)))) return false;
-      if (claimed.has(idKey) || claimed.has(nameKey)) return false;
       if (own.has(idKey) || own.has(nameKey)) return false;
       return true;
     }).map(optJSON).join("");
@@ -2590,18 +2587,11 @@ async function renderTravel() {
   // for a day lists only the rooms allocated for it, with that
   // day's occupants and per-day capacity.
   const placeOptsForDay = (dp) => {
-    const placed = placedIdsForDay(t.hotel, dp.day);
-    // Name-aware too: a duplicate row for an already-placed student
-    // must not reappear in the picker under its other row id.
-    const placedNames = new Set();
-    (t.hotel.rooms || []).forEach((r) => {
-      if (!roomRunsDay(r, dp.day)) return;
-      (r.occupants || []).forEach((o) => {
-        if (occMatchesDay(o, dp.day)) placedNames.add(normName(`${o.first_name} ${o.last_name}`));
-      });
-    });
-    let list = dedupePeople((dp.t.attendees || []).filter((a) => a.person_kind === "student"
-      && !placed.has(a.member_id) && !placedNames.has(normName(a.person_name))),
+    // No placed exclusion: a student already placed in another room
+    // for this day stays offered here, and placing them MOVES their
+    // bed (the server deletes the old row and inserts the new one;
+    // same-room re-place stays a server no-op).
+    let list = dedupePeople((dp.t.attendees || []).filter((a) => a.person_kind === "student"),
       (a) => normName(a.person_name));
     // Parents only ever see their own student in the place picker;
     // mentors see everyone attending that day.
@@ -2609,7 +2599,14 @@ async function renderTravel() {
       const mine = new Set((ME.links || []).filter((l) => l.kind === "parent").map((l) => l.member_id));
       list = list.filter((a) => mine.has(a.member_id));
     }
-    return list.map((a) => `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
+    const opts = list.map((a) => `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
+    // A mentor attending this day can pick a room for themself: the
+    // "self" value files a name-only placement (mentors hold no
+    // roster row), and the server checks their own RSVP for the day.
+    if (MENTOR() && (dp.t.attendees || []).some((a) => a.person_kind === "parent" && normName(a.person_name) === normName(ME.name))) {
+      return `<option value="self">${esc(ME.name)} (mentor — you)</option>` + opts;
+    }
+    return opts;
   };
   const roomsDaySection = (dp) => `
     <h4>Rooms</h4>
@@ -3064,7 +3061,7 @@ async function renderTravel() {
       const r = await POST(`/api/carpools/${b.dataset.claim}/claims`, {
         member_id: p.member_id, person_kind: p.kind, day,
         person_name: p.name.replace(/ \((student|parent)\)$/, "")});
-      toast(r.status === "waitlisted" ? "Car is full — added to the waitlist." : "Seat claimed.");
+      toast(r.status === "waitlisted" ? "Car is full — added to the waitlist." : (r.moved ? "Seat moved." : "Seat claimed."));
       renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   }));
@@ -3178,7 +3175,7 @@ async function renderTravel() {
         event_id: travelEventId, member_id: p.member_id, person_kind: p.kind,
         day,
         person_name: p.name.replace(/ \((student|parent)\)$/, "")});
-      toast(r.status === "waitlisted" ? "Van is full — added to the waitlist." : "Seat claimed.");
+      toast(r.status === "waitlisted" ? "Van is full — added to the waitlist." : (r.moved ? "Seat moved." : "Seat claimed."));
       renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   }));
@@ -3368,11 +3365,14 @@ async function renderTravel() {
     const day = b.dataset.placeday || null;
     const sel = $("plc-" + b.dataset.place + "-" + (day || "all"));
     if (!sel) return;
-    const mid = parseInt(sel.value, 10);
-    if (!mid) return toast("Pick a student to place.");
+    const selfPlace = sel.value === "self";
+    const mid = selfPlace ? null : parseInt(sel.value, 10);
+    if (!selfPlace && !mid) return toast("Pick a student to place.");
     try {
-      await POST(`/api/rooms/${b.dataset.place}/occupants`, {member_id: mid, day});
-      toast("Placed."); renderTravel();
+      const r = await POST(`/api/rooms/${b.dataset.place}/occupants`,
+        selfPlace ? {member_id: null, person_name: ME.name, day}
+                  : {member_id: mid, day});
+      toast(r.moved ? "Moved to this room." : "Placed."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
   }));
   v.querySelectorAll("[data-unplace]").forEach((a) => a.addEventListener("click", async (e) => {
@@ -3499,8 +3499,12 @@ function roomsTableHTML(h, day, placeOpts, parentOpts, opts) {
   return `<div style="overflow-x:auto"><table class="acct" style="margin-top:8px"><thead><tr><th>Room</th><th>Occupants</th><th>Room parent</th><th>Actions</th></tr></thead><tbody>
   ${rooms.map((r) => {
     const occ = (r.occupants || []).filter((o) => occMatchesDay(o, day));
-    const occPills = occ.map((o) =>
-      `<span class="pill">${esc(o.first_name)} ${esc(o.last_name)}${canReleaseSeat({member_id: o.member_id, person_kind: "student"}) ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`).join("");
+    const occPills = occ.map((o) => {
+      // Name-only occupants (a mentor placed themself) carry
+      // person_name; member rows carry first/last names.
+      const oname = o.person_name || [o.first_name, o.last_name].filter(Boolean).join(" ");
+      return `<span class="pill">${esc(oname)}${canReleaseSeat({member_id: o.member_id, person_kind: "student"}) ? ` <a href="#" data-unplace="${o.id}" title="remove">\u2715</a>` : ""}</span>`;
+    }).join("");
     // A parent may only remove their OWN assignment; mentors/admins
     // may remove any. Own = a linked member id, or (legacy rows with
     // no parent_member_id recorded) a linked member's parent_name.

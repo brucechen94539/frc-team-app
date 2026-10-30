@@ -9,6 +9,40 @@ _None right now._
 
 ## Fixed
 
+### Parent still couldn't re-assign students on rides/hotel (2026-10-30)
+
+**Reported** (Bruce): parent still not able to re-assign students.
+**Root cause (found by probing):** release-then-place already
+worked, but a direct re-assign was a dead end — the claim and place
+pickers excluded anyone already seated/placed for that day, so the
+only path was finding the tiny ✕ first. **Fix:** claiming on
+another vehicle, or placing in another room, for the same day now
+MOVES the seat/bed atomically (old row deleted, freed confirmed
+seats promote the old vehicle's first eligible waitlisted rider,
+new row inserted), and the pickers keep offering already-assigned
+riders on other vehicles. Guard: moving from a confirmed seat/bed
+into a full vehicle/room 409s and keeps the old one, so a re-assign
+can never silently downgrade to a waitlist spot. Verified: 22-check
+API + browser suite (car→car, car→van, van→car moves with
+promotion on both, full-target guards, room→room move, UI moves).
+
+### Mentor couldn't pick a room (2026-10-30)
+
+**Reported** (Bruce): mentor is not able to pick a room yet. **Root
+cause (found by probing):** placing a student worked, but a mentor
+could never be placed themself — the place picker only offers
+student attendees, and the place endpoint required a member_id, so
+a mentor's own RSVP (parent-kind, name-only, from the self-RSVP
+fix) had no path to a bed. **Fix:** mentors attending a trip get a
+"(mentor — you)" entry in each day's place picker, filing a
+name-only occupant row (`room_occupants.person_name`, member
+nullable — existing databases rebuild the table once at boot
+without losing rows, verified on a downgraded copy); the server
+checks the mentor's own RSVP for the day, and the pill shows their
+name with the usual ✕. Non-mentor self-placement is still rejected,
+and self-placement without an RSVP is rejected. Verified in the
+same 22-check suite.
+
 ### Mentors couldn't join events / RSVP for themselves (2026-10-30, commit 1fb595d2)
 
 **Reported** (Bruce): mentors can join events and RSVP. **Root

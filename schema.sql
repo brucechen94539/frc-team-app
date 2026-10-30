@@ -213,8 +213,11 @@ CREATE TABLE IF NOT EXISTS rooms (
 CREATE TABLE IF NOT EXISTS room_occupants (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   room_id    INTEGER NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-  member_id  INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  member_id  INTEGER REFERENCES members(id) ON DELETE SET NULL,
+  -- NULL member_id + person_name = a name-only occupant: a mentor
+  -- placing themself (mentors hold no roster row).
   day        TEXT,  -- NULL = placed every day (legacy, pre-per-day rooms)
+  person_name TEXT,
   placed_at  TEXT NOT NULL DEFAULT (datetime('now')),
   UNIQUE(room_id, member_id, day)
 );
