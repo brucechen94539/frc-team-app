@@ -667,7 +667,11 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   carpool waitlist and auto-promote when a seat is released.
   Room placement is mentor-only the same way — the server refuses
   every non-mentor place/unplace, including a parent placing their
-  own child, which the old self-only gate used to allow.
+  own child, which the old self-only gate used to allow. The two
+  mentor pickers carry parallel prompts: "Place rider…" for
+  carpool seats, "Place occupant…" for room beds (the carpool
+  prompt starts unselected, so claiming requires picking a rider
+  first).
 - Drivers may optionally add vehicle details — **license plate, color,
   make, model** — shown on the ride card as a hover tooltip so riders can
   spot the car.
@@ -761,6 +765,18 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   Waitlisted riders count as needing a ride (no seat yet). 'Needs
   ride' means not on any posted ride; a parent driving themselves
   without posting a carpool still shows as needing one.
+- **Logistics status has two more read-only tables (2026-10-30):**
+  under the per-person status table, **Cars, riders & tools** —
+  one row per vehicle per day it runs (Day | Vehicle | Driver |
+  Tools / robots | Riders), with stable per-trip vehicle numbers,
+  tools loaded in that vehicle (tools are per-trip, so the same
+  tools show on every day the vehicle runs), and claimed riders
+  seated that day (waitlisted are not riders yet; unassigned tools
+  appear in no vehicle's row) — and **Hotel rooms** — one row per
+  room per day it is allocated for (Day | Room | Capacity x/y |
+  Occupants), including empty rooms. Both are visible to everyone
+  and carry no actions; events with no vehicles or no hotel block
+  show a note instead of rows.
 
 ### Hotels
 
@@ -775,9 +791,11 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   king sleep **2** each; a sofa bed sleeps **1** (e.g. 2 queens + 1 sofa
   bed = sleeps 5).
 - **No room-parent role anymore (2026-10-30 cleanup):** rooms hold
-  students and attending mentors only. There is no volunteer
-  button, no mentor picker, no Room parent column, and no bed
-  counted for a parent — capacity is beds only. The backend
+  students, attending parents (by name, since the 2026-10-30
+  follow-up opened placement to every attendee for the day), and
+  attending mentors. There is no volunteer button, no mentor
+  picker, no Room parent column, and no bed counted for a parent
+  as a role — capacity is beds only. The backend
   columns, endpoints, and server rules (one room per parent per
   night, attendance checks) remain untouched and dormant.
 ### Rooming requests — removed from the UI (2026-10-30 cleanup)

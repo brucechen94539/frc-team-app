@@ -2452,7 +2452,7 @@ async function renderTravel() {
     const claimCell = !MENTOR()
       ? `<span class="sub">Riders are assigned by a mentor.</span>`
       : (cpsOpts
-        ? `<div class="row"><select id="cps-${c.id}-${dayKey}">${cpsOpts}</select>
+        ? `<div class="row"><select id="cps-${c.id}-${dayKey}"><option value="">Place rider…</option>${cpsOpts}</select>
           <button class="btn small" data-claim="${c.id}" data-claimday="${dp.day || ""}">Claim seat</button></div>`
         : `<span class="sub">Everyone attending is already driving or seated on another ride.</span>`);
     const editCell = (MENTOR() || c.driver_user_id === ME.id)
@@ -2605,6 +2605,60 @@ async function renderTravel() {
       return `<td>${hotel} ${ride}</td>`;
     }).join("")}</tr>`).join("") || `<tr><td colspan="${tableDays.length + 1}"><span class="sub">Nobody RSVP'd yet.</span></td></tr>`}</tbody></table></div></div>`;
   };
+  // Logistics tables 2 and 3: read-only holistic views under the
+  // status table, visible to everyone, with no actions. Table 2 is
+  // one row per vehicle per day it runs — driver, tools loaded in
+  // that vehicle (tools are per-trip, so the same tools show on
+  // every day the vehicle runs), and riders seated that day
+  // (claimed seats only; waitlisted people are not riders yet).
+  // Vehicle numbers are stable across days (first-seen order in
+  // the trip). Table 3 is one row per room per day it is allocated
+  // for — capacity as x/y and that day's occupants.
+  const logisticsDayCell = (ds, di) => `<b>Day ${di + 1}</b>${ds ? `<div class="sub">${dayLabel(ds)}</div>` : ""}`;
+  const logisticsCarsHTML = () => {
+    const tableDays = evDays.length ? evDays : [dayPayloads[0].day];
+    const dpFor = (ds) => dayPayloads.find((d) => d.day === ds) || dayPayloads[0];
+    const tripTools = dayPayloads[0].t.tools || [];
+    const numOf = new Map();
+    tableDays.forEach((ds) => (dpFor(ds).t.carpools || []).forEach((c) => {
+      if (!numOf.has(c.id)) numOf.set(c.id, numOf.size + 1);
+    }));
+    const rows = [];
+    tableDays.forEach((ds, di) => {
+      (dpFor(ds).t.carpools || []).forEach((c) => {
+        rows.push({ds, di, num: numOf.get(c.id), c,
+          tools: tripTools.filter((x) => x.vehicle_type === "carpool" && x.vehicle_id === c.id),
+          riders: (c.claims || []).map((x) => x.person_name)});
+      });
+    });
+    return `<div class="card"><h3>Cars, riders &amp; tools</h3>
+    <p class="sub">One row per vehicle per day it runs.</p>
+    ${rows.length ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Day</th><th>Vehicle</th><th>Driver</th><th>Tools / robots</th><th>Riders</th></tr></thead>
+    <tbody>${rows.map((r) => `<tr><td>${logisticsDayCell(r.ds, r.di)}</td>
+      <td><b>Vehicle ${r.num}</b>${vehicleLine(r.c.vehicle)}</td>
+      <td><b>${esc(r.c.driver_name)}</b></td>
+      <td>${r.tools.length ? r.tools.map((x) => `<div>${esc(x.name)}${x.qty > 1 ? ` ×${x.qty}` : ""}</div>`).join("") : '<span class="sub">—</span>'}</td>
+      <td>${r.riders.length ? r.riders.map((n) => `<div>${esc(n)}</div>`).join("") : '<span class="sub">—</span>'}</td></tr>`).join("")}</tbody></table></div>`
+    : `<p class="sub">No vehicles posted for this event yet.</p>`}</div>`;
+  };
+  const logisticsRoomsHTML = () => {
+    if (!t.hotel) return `<div class="card"><h3>Hotel rooms</h3><p class="sub">No hotel block for this event.</p></div>`;
+    const tableDays = evDays.length ? evDays : [dayPayloads[0].day];
+    const rows = [];
+    tableDays.forEach((ds, di) => {
+      (t.hotel.rooms || []).filter((r) => roomRunsDay(r, ds)).forEach((r) => {
+        rows.push({ds, di, r, occ: (r.occupants || []).filter((o) => occMatchesDay(o, ds))});
+      });
+    });
+    return `<div class="card"><h3>Hotel rooms</h3>
+    <p class="sub">One row per room per day it is allocated for.</p>
+    ${rows.length ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Day</th><th>Room</th><th>Capacity</th><th>Occupants</th></tr></thead>
+    <tbody>${rows.map((r) => `<tr><td>${logisticsDayCell(r.ds, r.di)}</td>
+      <td><b>${esc(r.r.label)}</b>${r.r.room_number ? `<div class="sub">room #${esc(r.r.room_number)}</div>` : ""}</td>
+      <td><span class="pill ${r.occ.length >= r.r.capacity ? "red" : "green"}">${r.occ.length}/${r.r.capacity}</span></td>
+      <td>${r.occ.length ? r.occ.map((o) => `<div>${esc(o.person_name || [o.first_name, o.last_name].filter(Boolean).join(" "))}</div>`).join("") : '<span class="sub">—</span>'}</td></tr>`).join("")}</tbody></table></div>`
+    : `<p class="sub">No rooms allocated for this event yet.</p>`}</div>`;
+  };
   // Fleet for Carpool: every car registered for this event, visible
   // to everyone. Edit / Remove belong to the driver (or a mentor);
   // riders are the union of claimed seats across the trip days.
@@ -2640,6 +2694,8 @@ async function renderTravel() {
   ${multi ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" id="td-expand-all">Expand all days</button><button class="btn small ghost" id="td-collapse-all">Collapse all days</button></div>` : ""}</div>
 
   ${statusTableHTML()}
+  ${logisticsCarsHTML()}
+  ${logisticsRoomsHTML()}
   ${fleetHTML()}
   ${postRideCard}
 
@@ -2920,6 +2976,7 @@ async function renderTravel() {
     const day = b.dataset.claimday || null;
     const sel = $("cps-" + b.dataset.claim + "-" + (day || "all"));
     if (!sel) return;
+    if (!sel.value) return toast("Pick a rider to place.");
     const p = JSON.parse(sel.value.replace(/&#39;/g, "'"));
     try {
       const r = await POST(`/api/carpools/${b.dataset.claim}/claims`, {
@@ -3114,7 +3171,7 @@ async function renderTravel() {
     const selfPlace = sel.value === "self";
     const parentPlace = sel.value.startsWith("parent:");
     const mid = (selfPlace || parentPlace) ? null : parseInt(sel.value, 10);
-    if (!selfPlace && !parentPlace && !mid) return toast("Pick someone to place.");
+    if (!selfPlace && !parentPlace && !mid) return toast("Pick an occupant to place.");
     try {
       const r = await POST(`/api/rooms/${b.dataset.place}/occupants`,
         selfPlace ? {member_id: null, person_name: ME.name, day}
@@ -3229,7 +3286,7 @@ function roomsTableHTML(h, day, placeOpts, opts) {
     // Placement is mentors only.
     const canPlace = MENTOR();
     const placeCell = canPlace ? `<div class="row"><select id="plc-${r.id}-${dayKey}">
-        <option value="">Place someone…</option>${placeOpts}</select>
+        <option value="">Place occupant…</option>${placeOpts}</select>
         <button class="btn small" data-place="${r.id}" data-placeday="${day || ""}">Place</button></div>`
       : `<span class="sub">Placement is by a mentor.</span>`;
     return `<tr id="rm-row-${r.id}-${dayKey}"><td><b>${esc(r.label)}</b>
