@@ -3325,6 +3325,34 @@ def api_rsvp_delete(rid):
     return jsonify({"deleted": rid, "promoted": promoted})
 
 
+@app.route("/api/my-rsvps")
+def api_my_rsvps():
+    """The signed-in account's own RSVPs, for the calendar's RSVP'd-day
+    marks: one row per RSVP in link scope (own student record + children
+    a parent is linked to), plus name-matched rows for legacy name-only
+    records. Days come from rsvp_days; an empty list means the RSVP
+    covers every day of the event (going, or partial with no picks).
+    The frontend marks going/partial days only."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    student_id, parent_ids = _self_rsvp_scope(u)
+    ids = set(parent_ids)
+    if student_id:
+        ids.add(student_id)
+    uname = _norm_name(u["name"])
+    days = {}
+    for d in q_all("SELECT rsvp_id, day FROM rsvp_days"):
+        days.setdefault(d["rsvp_id"], []).append(d["day"])
+    out = []
+    for r in q_all("SELECT id, event_id, status, member_id, person_name"
+                   " FROM rsvps"):
+        if r["member_id"] in ids or _norm_name(r["person_name"]) == uname:
+            out.append({"event_id": r["event_id"], "status": r["status"],
+                        "days": sorted(days.get(r["id"], []))})
+    return jsonify(out)
+
+
 # ----------------------------------------------------------------------------
 # Tracking: check-ins, hours, tasks
 # ----------------------------------------------------------------------------

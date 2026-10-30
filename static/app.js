@@ -1617,7 +1617,7 @@ async function renderAnnouncements() {
 
 /* Month grid over the filtered events: an overview above the list.
    Clicking a title jumps to that event's card below. */
-function eventCalendarHtml(list) {
+function eventCalendarHtml(list, myRsvps) {
   const now = new Date();
   const cur = eventCalCursor ||
     `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
@@ -1634,13 +1634,27 @@ function eventCalendarHtml(list) {
       (byDay[ds] = byDay[ds] || []).push(e);
     }
   }
+  // The viewer's own attending RSVPs, grouped by event: an empty day
+  // list covers every day of the event (going, or partial with no
+  // picks), mirroring the server's attendance rule.
+  const mine = new Map();
+  for (const r of (myRsvps || [])) {
+    if (r.status !== "going" && r.status !== "partial") continue;
+    if (!mine.has(r.event_id)) mine.set(r.event_id, []);
+    mine.get(r.event_id).push(new Set(r.days || []));
+  }
+  const covers = (e, ds) =>
+    (mine.get(e.id) || []).some((dset) => dset.size === 0 || dset.has(ds));
   const cells = [];
+  let anyMark = false;
   for (let i = 0; i < startDay; i++) cells.push(`<div class="cal-cell empty"></div>`);
   for (let d = 1; d <= days; d++) {
     const ds = `${cur}-${String(d).padStart(2, "0")}`;
     const evs = byDay[ds] || [];
     const today = ds === now.toISOString().slice(0, 10) ? " today" : "";
-    cells.push(`<div class="cal-cell${today}"><b>${d}</b>
+    const rsvpd = evs.some((e) => covers(e, ds));
+    if (rsvpd) anyMark = true;
+    cells.push(`<div class="cal-cell${today}${rsvpd ? " rsvpd" : ""}"><span class="cal-day"${rsvpd ? ` title="You RSVP'd for an event this day"` : ""}>${d}</span>
       ${evs.slice(0, 3).map((e) => `<a href="#ev-card-${e.id}" class="cal-ev">${esc(e.title)}</a>`).join("")}
       ${evs.length > 3 ? `<span class="sub">+${evs.length - 3} more</span>` : ""}</div>`);
   }
@@ -1653,7 +1667,8 @@ function eventCalendarHtml(list) {
   <div class="cal-grid">
     ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => `<div class="cal-head">${d}</div>`).join("")}
     ${cells.join("")}
-  </div></div>`;
+  </div>
+  ${anyMark ? `<p class="sub" style="margin-top:8px"><span style="color:var(--accent-text)">●</span> Indigo date = you or your student RSVP'd going / partial for an event that day.</p>` : ""}</div>`;
 }
 
 async function renderEvents() {
@@ -1727,7 +1742,7 @@ async function renderEvents() {
     <button class="btn small ${eventCalMode ? "ghost" : ""}" id="ev-list-view">List</button>
     <button class="btn small ${eventCalMode ? "" : "ghost"}" id="ev-cal-view">Calendar</button>
   </div></div>
-  ${eventCalMode ? eventCalendarHtml(list) : ""}
+  ${eventCalMode ? eventCalendarHtml(list, await GET("/api/my-rsvps").catch(() => [])) : ""}
   <div id="ev-list">${cards.join("")}</div>
   <div class="card"><button class="btn small ghost" id="ev-arch-toggle">Show archived seasons</button>
   <div id="ev-arch" class="hidden" style="margin-top:10px"></div></div>`;

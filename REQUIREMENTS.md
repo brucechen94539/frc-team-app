@@ -332,6 +332,20 @@ and `can't make it` do not count as attending.
   events use the event time and session hours for the duration, events
   with a date but no parsable time become all-day events, and dateless
   events are rejected (400).
+- **Calendar titles wrap, columns stay equal:** event titles in
+  calendar cells wrap onto multiple lines (`overflow-wrap: break-word`)
+  instead of truncating with an ellipsis, and the grid uses
+  `minmax(0, 1fr)` columns with `min-width: 0` cells, so all seven
+  columns keep the same width no matter how long a title is.
+- **Calendar marks your RSVP'd days:** a day whose date number sits in
+  a filled indigo circle means you (or your student, for a parent)
+  RSVP'd going or partial covering that day — going covers every day
+  of the event, partial covers only its picked days (an unspecified
+  partial covers every day, matching the attendance rule). Maybe,
+  waitlisted, and can't-make-it RSVPs do not mark. The data comes from
+  `GET /api/my-rsvps` (the signed-in account's RSVPs in link scope,
+  with day picks; mentors without linked members see no marks), and a
+  legend under the grid explains the mark whenever any day is marked.
 - **Seasons:** events carry a `season` (NULL = current season). The main
   lists — Events, Tracking and Travel pickers — show current-season
   events only. Mentors close a season with **Archive season…** (a name
