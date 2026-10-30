@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### Room-parent check missed attendance recorded under another child row (2026-10-30)
+### Room-parent check missed attendance recorded under another child row (2026-10-30, commit ad713481)
 
 **Reported** (Bruce, mentor's view): Jane should be allowed as room
 parent for a room running Sat 11/21 + Sun 11/22, but the mentor got
