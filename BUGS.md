@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### Parent still couldn't re-assign students on rides/hotel (2026-10-30)
+### Parent still couldn't re-assign students on rides/hotel (2026-10-30, commit 53bf7925)
 
 **Reported** (Bruce): parent still not able to re-assign students.
 **Root cause (found by probing):** release-then-place already
@@ -26,7 +26,7 @@ can never silently downgrade to a waitlist spot. Verified: 22-check
 API + browser suite (car→car, car→van, van→car moves with
 promotion on both, full-target guards, room→room move, UI moves).
 
-### Mentor couldn't pick a room (2026-10-30)
+### Mentor couldn't pick a room (2026-10-30, commit 53bf7925)
 
 **Reported** (Bruce): mentor is not able to pick a room yet. **Root
 cause (found by probing):** placing a student worked, but a mentor
