@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### Mentors couldn't join events / RSVP for themselves (2026-10-30)
+### Mentors couldn't join events / RSVP for themselves (2026-10-30, commit 1fb595d2)
 
 **Reported** (Bruce): mentors can join events and RSVP. **Root
 cause:** the mentor event-card picker offered only roster members
@@ -27,7 +27,7 @@ attach. Verified: 12-check API + browser suite (self-RSVP, re-file
 updates instead of duplicating, partial days land on the right
 name-only row, UI picker + filing).
 
-### Parent couldn't remove/reassign child on ride/hotel (2026-10-30)
+### Parent couldn't remove/reassign child on ride/hotel (2026-10-30, commit 1fb595d2)
 
 **Reported** (Bruce): a parent of a child can remove/reassign the
 child on a ride/hotel. **Root cause (found by probing):** the
