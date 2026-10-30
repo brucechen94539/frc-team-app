@@ -5846,15 +5846,25 @@ def api_room_parent(rid):
     rdays = {r["day"] for r in q_all(
         "SELECT day FROM room_days WHERE room_id=?", (rid,))}
     room_days = sorted(rdays) if rdays else event_days
-    # The parent's attendance: RSVPs under the resolved member, plus
-    # — for a self-volunteering parent — under any of their linked
-    # children (they may have RSVP'd under another child).
-    check_ids = {m["id"]} | (set(parent_ids) if u["role"] == "parent" else set())
-    rsvp_rows = q_all(
-        "SELECT id, status FROM rsvps WHERE event_id=? AND member_id IN (%s)"
-        " AND person_kind='parent'"
-        % ",".join("?" * len(check_ids)),
-        tuple([hotel["event_id"]] + sorted(check_ids)))
+    # The parent's attendance is PERSON-level, not row-level: RSVPs
+    # under the resolved member, under siblings sharing the roster
+    # parent_name (a mentor picks one child row, but the parent may
+    # have RSVP'd under another child), under a self-volunteering
+    # parent's linked children, and name-only rows filed under the
+    # parent's name. A mentor picking one child row must not miss
+    # attendance recorded under another.
+    sib_ids = {mm["id"] for mm in q_all(
+        "SELECT id, parent_name FROM members")
+        if _norm_name(mm["parent_name"]) == _norm_name(pname)}
+    check_ids = {m["id"]} | sib_ids \
+        | (set(parent_ids) if u["role"] == "parent" else set())
+    rsvp_rows = [r for r in q_all(
+        "SELECT id, member_id, person_name, status FROM rsvps"
+        " WHERE event_id=? AND person_kind='parent'",
+        (hotel["event_id"],))
+        if r["member_id"] in check_ids
+        or (r["member_id"] is None
+            and _norm_name(r["person_name"]) == _norm_name(pname))]
     day_sets = {}
     if rsvp_rows:
         for rd in q_all(

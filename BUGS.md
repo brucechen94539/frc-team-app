@@ -9,6 +9,21 @@ _None right now._
 
 ## Fixed
 
+### Room-parent check missed attendance recorded under another child row (2026-10-30)
+
+**Reported** (Bruce, mentor's view): Jane should be allowed as room
+parent for a room running Sat 11/21 + Sun 11/22, but the mentor got
+"not attending 2026-11-21". **Root cause:** the per-day room-parent
+check looked only at the picked member's RSVP row, but a parent's
+attendance is person-level — a mentor picks one child row, while
+the parent may have RSVP'd under another child (or name-only).
+**Fix:** the check now unions the picked member, siblings sharing
+the roster parent_name, the caller's own account links, and
+name-only parent rows filed under the parent's name — while the
+per-day rule itself stays strict (a sibling partial missing a room
+day is still refused). Verified in a 4-check targeted suite plus a
+clean rerun of the 20-check room-parent suite.
+
 ### One parent could be room parent of multiple rooms (2026-10-30, commit d8cc0b4f)
 
 **Reported** (Bruce, with screenshot): one parent can be hotel room

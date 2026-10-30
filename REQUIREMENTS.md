@@ -834,6 +834,11 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   RSVP, or a partial covering each of the room's days) — the old
   trip-level check let a partial parent volunteer for nights they
   don't attend. The same per-day check applies to mentor assignments.
+  Attendance is **person-level, not row-level**: a parent's RSVPs
+  under any of their children (siblings sharing the roster
+  parent_name), under their own account links, or filed name-only
+  under their name all count — a mentor picking one child row must
+  not miss attendance recorded under another.
 - **One room per parent per night:** a parent already room-parent of
   another room running on any common day can't take a second one, for
   self-volunteers and mentor assignments alike. Rooms on disjoint
