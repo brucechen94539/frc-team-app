@@ -9,6 +9,48 @@ _None right now._
 
 ## Fixed
 
+### One parent could be room parent of multiple rooms (2026-10-30)
+
+**Reported** (Bruce, with screenshot): one parent can be hotel room
+parent multiple times — Jessica Ting on three rooms at once. **Root
+cause:** the room-parent assignment had no uniqueness rule at all,
+so any parent could stack rooms. **Fix:** one room per parent per
+night — a parent already room-parent of another room running on any
+common day is refused, for self-volunteers and mentor assignments
+alike. Rooms on disjoint days may still share a parent (no night
+conflict); removing an assignment frees the parent. Verified in the
+20-check API + browser suite (overlapping refusals, disjoint
+allowance, removal frees, UI toasts).
+
+### Room parent could volunteer for days they don't attend (2026-10-30)
+
+**Reported** (Bruce): volunteering as room parent should only happen
+when the parent RSVP'd for that specific day — Jane, not in the
+event some days, could still sign up, and the mentor override had
+the same hole. **Root cause:** the assignment checked attendance
+only at trip level (`is_attending`: any going/partial RSVP), never
+per day. **Fix:** a room parent must now attend every day the room
+runs (going, or a partial covering each of the room's days),
+checked for self-volunteers and mentor assignments alike — across
+the resolved member's RSVPs plus, for a self-volunteering parent,
+their other linked children. Verified in the same 20-check suite
+(partial parent refused for an every-day room, allowed for a room
+on her day, mentor override refused, UI toasts).
+
+### Seat claims didn't check the claimant's own RSVP for name-only rows (2026-10-30)
+
+**Reported** (Bruce): similar logic for claims — when not in the
+event, shouldn't be able to claim a seat. **Root cause:** for
+name-only claims (member_id NULL), the carpool and van endpoints
+fetched the first name-only RSVP row of the kind instead of
+matching by name, so a claim for someone not in the event passed
+whenever any other name-only filer was attending. Member claims
+were already correctly gated (no row, or a wrong-day partial, is
+rejected). **Fix:** name-only claims now match a name-only RSVP by
+normalized name in both endpoints. Verified in the same 20-check
+suite (ghost claims refused on car and van with a decoy row
+present, name-matched claims accepted, member regressions green).
+
 ### Parent still couldn't re-assign students on rides/hotel (2026-10-30, commit 53bf7925)
 
 **Reported** (Bruce): parent still not able to re-assign students.

@@ -4715,13 +4715,27 @@ def api_carpool_claim(cid):
         # Attending ON THAT DAY, not just the trip: a partial
         # attending only Day 3 can't claim a Day 1 seat.
         days_map = _rsvp_days_map(db, c["event_id"])
-        rsvp = db.execute(
-            "SELECT id, status FROM rsvps WHERE event_id=? AND member_id"
-            + (" IS NULL" if b.get("member_id") is None else "=?")
-            + " AND person_kind=?",
-            tuple([c["event_id"]]
-                  + ([] if b.get("member_id") is None else [b["member_id"]])
-                  + [b.get("person_kind")])).fetchone()
+        if b.get("member_id") is None:
+            # Name-only claims must match a name-only RSVP BY NAME:
+            # fetching the first null row of the kind let a claim
+            # for someone not in the event ride on another
+            # name-only filer's attendance.
+            rsvp = None
+            for cand in db.execute(
+                    "SELECT id, status, person_name FROM rsvps"
+                    " WHERE event_id=? AND member_id IS NULL"
+                    " AND person_kind=?",
+                    (c["event_id"], b.get("person_kind"))):
+                if _norm_name(cand["person_name"]) \
+                        == _norm_name(b["person_name"]):
+                    rsvp = cand
+                    break
+        else:
+            rsvp = db.execute(
+                "SELECT id, status FROM rsvps WHERE event_id=? AND member_id=?"
+                " AND person_kind=?",
+                (c["event_id"], b["member_id"],
+                 b.get("person_kind"))).fetchone()
         if not rsvp or not _attends_day(rsvp["status"],
                                         days_map.get(rsvp["id"], set()),
                                         day, event_days):
@@ -5240,13 +5254,26 @@ def api_van_claim(vid):
                 return err("the van's driver is already driving a"
                            " carpool on that day")
         days_map = _rsvp_days_map(db, b["event_id"])
-        rsvp = db.execute(
-            "SELECT id, status FROM rsvps WHERE event_id=? AND member_id"
-            + (" IS NULL" if b.get("member_id") is None else "=?")
-            + " AND person_kind=?",
-            tuple([b["event_id"]]
-                  + ([] if b.get("member_id") is None else [b["member_id"]])
-                  + [b.get("person_kind")])).fetchone()
+        if b.get("member_id") is None:
+            # Name-only rides must match a name-only RSVP BY NAME —
+            # same hole as carpools: the first null row of the kind
+            # is not the claimant's attendance.
+            rsvp = None
+            for cand in db.execute(
+                    "SELECT id, status, person_name FROM rsvps"
+                    " WHERE event_id=? AND member_id IS NULL"
+                    " AND person_kind=?",
+                    (b["event_id"], b.get("person_kind"))):
+                if _norm_name(cand["person_name"]) \
+                        == _norm_name(b["person_name"]):
+                    rsvp = cand
+                    break
+        else:
+            rsvp = db.execute(
+                "SELECT id, status FROM rsvps WHERE event_id=? AND member_id=?"
+                " AND person_kind=?",
+                (b["event_id"], b["member_id"],
+                 b.get("person_kind"))).fetchone()
         if not rsvp or not _attends_day(rsvp["status"],
                                         days_map.get(rsvp["id"], set()),
                                         day, event_days):
@@ -5809,9 +5836,58 @@ def api_room_parent(rid):
     if not pname:
         return err("choose a family with a parent on record")
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (room["hotel_id"],))
-    if not is_attending(hotel["event_id"], m["id"], "parent"):
+    # Per-day attendance: a room parent must attend EVERY day this
+    # room runs (empty day set = every event day). The old
+    # trip-level check let a partial parent — there only some days
+    # — volunteer for nights they don't attend. Applies to mentor
+    # assignments exactly like self-volunteers.
+    ev = q_one("SELECT * FROM events WHERE id=?", (hotel["event_id"],))
+    event_days = _event_days(ev) if ev else []
+    rdays = {r["day"] for r in q_all(
+        "SELECT day FROM room_days WHERE room_id=?", (rid,))}
+    room_days = sorted(rdays) if rdays else event_days
+    # The parent's attendance: RSVPs under the resolved member, plus
+    # — for a self-volunteering parent — under any of their linked
+    # children (they may have RSVP'd under another child).
+    check_ids = {m["id"]} | (set(parent_ids) if u["role"] == "parent" else set())
+    rsvp_rows = q_all(
+        "SELECT id, status FROM rsvps WHERE event_id=? AND member_id IN (%s)"
+        " AND person_kind='parent'"
+        % ",".join("?" * len(check_ids)),
+        tuple([hotel["event_id"]] + sorted(check_ids)))
+    day_sets = {}
+    if rsvp_rows:
+        for rd in q_all(
+                "SELECT rsvp_id, day FROM rsvp_days WHERE rsvp_id IN (%s)"
+                % ",".join("?" * len(rsvp_rows)),
+                tuple(r["id"] for r in rsvp_rows)):
+            day_sets.setdefault(rd["rsvp_id"], set()).add(rd["day"])
+    if event_days and room_days:
+        for d in room_days:
+            if not any(_attends_day(r["status"], day_sets.get(r["id"], set()),
+                                    d, event_days) for r in rsvp_rows):
+                return err("room parents must attend every day this room"
+                           " runs (not attending " + d + ")")
+    elif not any(r["status"] in ("going", "partial") for r in rsvp_rows):
         return err("room-parent volunteers must RSVP as attending"
                    " for this event first")
+    # One room per parent per night: a parent already room-parent
+    # of another room running on any common day can't take this
+    # one — for self-volunteers and mentor assignments alike.
+    # Rooms on disjoint days may still share a parent (no night
+    # conflict).
+    for other in q_all(
+            "SELECT id, parent_member_id, parent_name FROM rooms"
+            " WHERE hotel_id=? AND id<>?", (room["hotel_id"], rid)):
+        if other["parent_member_id"] != m["id"] \
+                and _norm_name(other["parent_name"] or "") != _norm_name(pname):
+            continue
+        odays = {r["day"] for r in q_all(
+            "SELECT day FROM room_days WHERE room_id=?", (other["id"],))}
+        odays = sorted(odays) if odays else event_days
+        if set(odays) & set(room_days):
+            return err("this parent is already room parent of another"
+                       " room on those days")
     execute("UPDATE rooms SET parent_member_id=?, parent_name=? WHERE id=?",
             (m["id"], pname, rid))
     return jsonify({"ok": True})

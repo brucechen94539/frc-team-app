@@ -678,6 +678,12 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   exception: moving from a confirmed seat into a full vehicle 409s
   and keeps the old seat, so a re-assign can never silently
   downgrade a confirmed seat to a waitlist spot.
+- **Claiming requires that day's RSVP, by name for name-only rows:**
+  a seat claim (carpool or van) checks the claimant's RSVP for the
+  claimed day — going, or a partial covering it. Name-only claims
+  match a name-only RSVP by normalized name; the old lookup took
+  the first name-only row of the kind, so a claim for someone not
+  in the event could ride on another name-only filer's attendance.
   Databases with pre-existing duplicates are collapsed on server boot
   (earliest claimed row kept, else earliest waitlisted row).
 - **Clean slate (2026-10-28):** when the driver-account model shipped,
@@ -824,7 +830,15 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   rooms may go without one — a room is never blocked for lacking one.
 - Only parents/mentors/admins can volunteer or remove a room parent;
   students can never be room parents. Volunteering additionally requires
-  the parent to be **attending** (parent RSVP = going for that event).
+  the parent to be **attending every day the room runs** (a going
+  RSVP, or a partial covering each of the room's days) — the old
+  trip-level check let a partial parent volunteer for nights they
+  don't attend. The same per-day check applies to mentor assignments.
+- **One room per parent per night:** a parent already room-parent of
+  another room running on any common day can't take a second one, for
+  self-volunteers and mentor assignments alike. Rooms on disjoint
+  days may still share a parent (no night conflict); removing an
+  assignment frees the parent for other rooms.
 - The room parent recorded is always the family's parent, taken from the
   member record server-side.
 - **A parent volunteers only themself, never another parent:** the
