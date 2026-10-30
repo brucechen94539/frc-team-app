@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### One parent could be room parent of multiple rooms (2026-10-30)
+### One parent could be room parent of multiple rooms (2026-10-30, commit d8cc0b4f)
 
 **Reported** (Bruce, with screenshot): one parent can be hotel room
 parent multiple times — Jessica Ting on three rooms at once. **Root
@@ -22,7 +22,7 @@ conflict); removing an assignment frees the parent. Verified in the
 20-check API + browser suite (overlapping refusals, disjoint
 allowance, removal frees, UI toasts).
 
-### Room parent could volunteer for days they don't attend (2026-10-30)
+### Room parent could volunteer for days they don't attend (2026-10-30, commit d8cc0b4f)
 
 **Reported** (Bruce): volunteering as room parent should only happen
 when the parent RSVP'd for that specific day — Jane, not in the
@@ -37,7 +37,7 @@ their other linked children. Verified in the same 20-check suite
 (partial parent refused for an every-day room, allowed for a room
 on her day, mentor override refused, UI toasts).
 
-### Seat claims didn't check the claimant's own RSVP for name-only rows (2026-10-30)
+### Seat claims didn't check the claimant's own RSVP for name-only rows (2026-10-30, commit d8cc0b4f)
 
 **Reported** (Bruce): similar logic for claims — when not in the
 event, shouldn't be able to claim a seat. **Root cause:** for
