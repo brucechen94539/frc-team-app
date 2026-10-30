@@ -830,10 +830,12 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   rooms may go without one — a room is never blocked for lacking one.
 - Only parents/mentors/admins can volunteer or remove a room parent;
   students can never be room parents. Volunteering additionally requires
-  the parent to be **attending every day the room runs** (a going
-  RSVP, or a partial covering each of the room's days) — the old
-  trip-level check let a partial parent volunteer for nights they
-  don't attend. The same per-day check applies to mentor assignments.
+  the parent to be **attending at least one day the room runs** (a
+  going RSVP, or a partial covering any of the room's days) — a
+  parent attending none of the room's days is refused. Relaxed from
+  the every-day version at Bruce's direction (2026-10-30, after the
+  Jane case): a parent attending part of a room's run qualifies.
+  The same check applies to mentor assignments.
   Attendance is **person-level, not row-level**: a parent's RSVPs
   under any of their children (siblings sharing the roster
   parent_name), under their own account links, or filed name-only

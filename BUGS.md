@@ -22,7 +22,10 @@ the roster parent_name, the caller's own account links, and
 name-only parent rows filed under the parent's name — while the
 per-day rule itself stays strict (a sibling partial missing a room
 day is still refused). Verified in a 4-check targeted suite plus a
-clean rerun of the 20-check room-parent suite.
+clean rerun of the 20-check room-parent suite. **Relaxed later the
+same day** (Bruce's direction, commit below): the rule is now
+"attends at least one day the room runs" — see REQUIREMENTS; the
+person-level union above still stands.
 
 ### One parent could be room parent of multiple rooms (2026-10-30, commit d8cc0b4f)
 

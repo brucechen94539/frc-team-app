@@ -5836,11 +5836,12 @@ def api_room_parent(rid):
     if not pname:
         return err("choose a family with a parent on record")
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (room["hotel_id"],))
-    # Per-day attendance: a room parent must attend EVERY day this
-    # room runs (empty day set = every event day). The old
-    # trip-level check let a partial parent — there only some days
-    # — volunteer for nights they don't attend. Applies to mentor
-    # assignments exactly like self-volunteers.
+    # Attendance, relaxed (Bruce, 2026-10-30): a room parent must
+    # attend AT LEAST ONE day this room runs (empty day set = every
+    # event day). The every-day version blocked parents who attend
+    # part of a room's run; a parent attending none of the room's
+    # days is still refused. Applies to mentor assignments exactly
+    # like self-volunteers.
     ev = q_one("SELECT * FROM events WHERE id=?", (hotel["event_id"],))
     event_days = _event_days(ev) if ev else []
     rdays = {r["day"] for r in q_all(
@@ -5873,11 +5874,11 @@ def api_room_parent(rid):
                 tuple(r["id"] for r in rsvp_rows)):
             day_sets.setdefault(rd["rsvp_id"], set()).add(rd["day"])
     if event_days and room_days:
-        for d in room_days:
-            if not any(_attends_day(r["status"], day_sets.get(r["id"], set()),
-                                    d, event_days) for r in rsvp_rows):
-                return err("room parents must attend every day this room"
-                           " runs (not attending " + d + ")")
+        if not any(_attends_day(r["status"], day_sets.get(r["id"], set()),
+                                d, event_days)
+                   for r in rsvp_rows for d in room_days):
+            return err("room parents must attend at least one day this"
+                       " room runs")
     elif not any(r["status"] in ("going", "partial") for r in rsvp_rows):
         return err("room-parent volunteers must RSVP as attending"
                    " for this event first")
