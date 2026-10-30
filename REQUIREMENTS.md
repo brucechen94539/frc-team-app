@@ -462,16 +462,24 @@ and `can't make it` do not count as attending.
   room not needed on the first or last day simply doesn't appear
   in that day's table. **Placement is per day, like a carpool
   seat:** the day is required on multi-day events, the room must
-  be allocated for that day, the student must attend that day,
-  capacity counts that day's occupants only, and a student sleeps
+  be allocated for that day, the person must attend that day,
+  capacity counts that day's occupants only, and a person sleeps
   in at most one room per day (placing in the same room for the
-  same day twice is a no-op). A student may sleep in different
+  same day twice is a no-op). A person may sleep in different
   rooms on different nights. Dropping a day from a room hides that
   day's placements (they reappear if the day is added back);
-  removing a student from a day is the occupant's ✕, mentors
+  removing an occupant from a day is the occupant's ✕, mentors
   only. Old placements
   (no day recorded) mean every day, so pre-existing rooms keep
-  working untouched.
+  working untouched. **Who can be placed:** every attendee for
+  that day — students by roster row, and attending parents by
+  name (name-only occupant rows, like a mentor placing themself),
+  since parents hold no roster row and the room-parent role is
+  gone; a parent's RSVP row (filed under the parent's name) is
+  what establishes the parent's attendance, not the child's. The
+  "Needs a room" gap line and the status table's Hotel pill match
+  parents by name, so a placed parent shows as housed and stops
+  listing as needing a room.
 - **RSVP deadlines are enforced on the server, not just by hiding the
   buttons:** once an event's deadline passes, non-mentors get a 403
   filing an RSVP (the UI hides their picker and shows an "RSVP closed"
@@ -657,6 +665,9 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   self-only gate stays in place behind the mentor check, so a
   future relaxation reuses it). Claims beyond capacity go to the
   carpool waitlist and auto-promote when a seat is released.
+  Room placement is mentor-only the same way — the server refuses
+  every non-mentor place/unplace, including a parent placing their
+  own child, which the old self-only gate used to allow.
 - Drivers may optionally add vehicle details — **license plate, color,
   make, model** — shown on the ride card as a hover tooltip so riders can
   spot the car.

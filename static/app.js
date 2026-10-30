@@ -2477,22 +2477,30 @@ async function renderTravel() {
   // for a day lists only the rooms allocated for it, with that
   // day's occupants and per-day capacity.
   const placeOptsForDay = (dp) => {
-    // No placed exclusion: a student already placed in another room
+    // No placed exclusion: a person already placed in another room
     // for this day stays offered here, and placing them MOVES their
     // bed (the server deletes the old row and inserts the new one;
     // same-room re-place stays a server no-op).
     let list = dedupePeople((dp.t.attendees || []).filter((a) => a.person_kind === "student"),
       (a) => normName(a.person_name));
     // Only mentors ever see this picker (canPlace above), so it
-    // offers everyone attending that day.
+    // offers everyone attending that day: students by member_id,
+    // and parents by name. Parents hold no roster row, so a parent
+    // is filed as a name-only occupant (like a mentor placing
+    // themself) — without this, parents would have no bed at all
+    // now that the room-parent role is gone.
     const opts = list.map((a) => `<option value="${a.member_id}">${esc(a.person_name)}</option>`).join("");
+    const meName = MENTOR() ? normName(ME.name) : null;
+    const parentOpts = dedupePeople((dp.t.attendees || []).filter((a) => a.person_kind === "parent" && normName(a.person_name) !== meName),
+      (a) => normName(a.person_name))
+      .map((a) => `<option value="parent:${esc(a.person_name)}">${esc(a.person_name)} (parent)</option>`).join("");
     // A mentor attending this day can pick a room for themself: the
     // "self" value files a name-only placement (mentors hold no
     // roster row), and the server checks their own RSVP for the day.
     if (MENTOR() && (dp.t.attendees || []).some((a) => a.person_kind === "parent" && normName(a.person_name) === normName(ME.name))) {
-      return `<option value="self">${esc(ME.name)} (mentor — you)</option>` + opts;
+      return `<option value="self">${esc(ME.name)} (mentor — you)</option>` + opts + parentOpts;
     }
-    return opts;
+    return opts + parentOpts;
   };
   const roomsDaySection = (dp) => `
     <h4>Rooms</h4>
@@ -2563,7 +2571,7 @@ async function renderTravel() {
       (t.hotel.rooms || []).forEach((rm) => {
         if (!roomRunsDay(rm, ds)) return;
         (rm.occupants || []).forEach((o) => {
-          if (occMatchesDay(o, ds)) s.add(normName(`${o.first_name} ${o.last_name}`));
+          if (occMatchesDay(o, ds)) s.add(normName(o.person_name || `${o.first_name} ${o.last_name}`));
         });
       });
       return s;
@@ -3104,11 +3112,13 @@ async function renderTravel() {
     const sel = $("plc-" + b.dataset.place + "-" + (day || "all"));
     if (!sel) return;
     const selfPlace = sel.value === "self";
-    const mid = selfPlace ? null : parseInt(sel.value, 10);
-    if (!selfPlace && !mid) return toast("Pick a student to place.");
+    const parentPlace = sel.value.startsWith("parent:");
+    const mid = (selfPlace || parentPlace) ? null : parseInt(sel.value, 10);
+    if (!selfPlace && !parentPlace && !mid) return toast("Pick someone to place.");
     try {
       const r = await POST(`/api/rooms/${b.dataset.place}/occupants`,
         selfPlace ? {member_id: null, person_name: ME.name, day}
+        : parentPlace ? {member_id: null, person_name: sel.value.slice("parent:".length), day}
                   : {member_id: mid, day});
       toast(r.moved ? "Moved to this room." : "Placed."); renderTravel();
     } catch (e) { toast("Error: " + e.message); }
@@ -3176,21 +3186,29 @@ function placedIdsForDay(h, day) {
   return ids;
 }
 function roomGapHTML(h, dayAttendees, day) {
-  const students = dedupePeople((dayAttendees || []).filter((a) => a.person_kind === "student"),
+  // Everyone attending that day can hold a bed now — students by
+  // member row, parents by name-only row — so the gap line lists
+  // every unplaced attendee, not just students.
+  const people = dedupePeople((dayAttendees || []).filter((a) => a.person_kind === "student" || a.person_kind === "parent"),
     (a) => normName(a.person_name));
   const placed = placedIdsForDay(h, day);
   // Name-aware like the place picker: a duplicate row must not list
-  // its person as needing a room when the other row is placed, or as
-  // awaiting when the other row already requested.
+  // its person as needing a room when the other row is placed.
+  // Name-only occupants (mentors, placed parents) carry person_name,
+  // not first/last names.
   const placedNames = new Set();
   (h.rooms || []).forEach((r) => {
     if (!roomRunsDay(r, day)) return;
     (r.occupants || []).forEach((o) => {
-      if (occMatchesDay(o, day)) placedNames.add(normName(`${o.first_name} ${o.last_name}`));
+      if (occMatchesDay(o, day)) placedNames.add(normName(o.person_name || `${o.first_name} ${o.last_name}`));
     });
   });
-  const isPlaced = (a) => placed.has(a.member_id) || placedNames.has(normName(a.person_name));
-  const needs = students.filter((a) => !isPlaced(a));
+  // A parent row's member_id is their child's id — the child's bed
+  // is not the parent's bed — so parent rows match by name only.
+  const isPlaced = (a) => a.person_kind === "parent"
+    ? placedNames.has(normName(a.person_name))
+    : (placed.has(a.member_id) || placedNames.has(normName(a.person_name)));
+  const needs = people.filter((a) => !isPlaced(a));
   return `<p class="sub">Needs a room: ${needs.length ? needs.map((a) => esc(a.person_name)).join(", ") : "everyone has a room."}</p>`;
 }
 function roomsTableHTML(h, day, placeOpts, opts) {
@@ -3211,13 +3229,13 @@ function roomsTableHTML(h, day, placeOpts, opts) {
     // Placement is mentors only.
     const canPlace = MENTOR();
     const placeCell = canPlace ? `<div class="row"><select id="plc-${r.id}-${dayKey}">
-        <option value="">Place a student…</option>${placeOpts}</select>
+        <option value="">Place someone…</option>${placeOpts}</select>
         <button class="btn small" data-place="${r.id}" data-placeday="${day || ""}">Place</button></div>`
       : `<span class="sub">Placement is by a mentor.</span>`;
     return `<tr id="rm-row-${r.id}-${dayKey}"><td><b>${esc(r.label)}</b>
       ${r.room_number ? `<div class="sub">room #${esc(r.room_number)}</div>` : ""}
       ${opts.editableNumber && MENTOR() ? `<input class="mini" id="rn-${r.id}" value="${esc(r.room_number || "")}" placeholder="actual room #" style="max-width:120px">` : ""}
-      <div><span class="pill ${occ.length >= r.capacity ? "red" : "green"}>${occ.length}/${r.capacity} occupied</span></div>
+      <div><span class="pill ${occ.length >= r.capacity ? "red" : "green"}">${occ.length}/${r.capacity} occupied</span></div>
       ${bedSummary(r.beds) ? `<div class="sub">${esc(bedSummary(r.beds))}</div>` : ""}
       ${opts.showEdit ? `<div class="sub">Runs: ${(r.days && r.days.length ? r.days.map(dayLabel).join(", ") : "every day")}</div>` : ""}</td>
       <td>${occPills || '<span class="sub">empty</span>'}</td>
@@ -3255,7 +3273,7 @@ function hotelHeaderHTML(h) {
 function hotelHTML(h, args) {
   return `${hotelHeaderHTML(h)}
   <h3>Room status</h3>
-  <p class="sub">Who still needs a room for this trip. Placed students show in the table below.</p>
+  <p class="sub">Who still needs a room for this trip. Placed members show in the table below.</p>
   ${roomGapHTML(h, args.dayAttendees, args.day)}
   <h3>Rooms</h3>
   <p class="sub">The block is already booked.</p>

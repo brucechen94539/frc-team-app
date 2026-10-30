@@ -5627,9 +5627,13 @@ def api_room_place(rid):
     Placement is mentors/admins for anyone; parents and students
     place nobody — a mentor places them. Placing in
     another room for the same day RE-ASSIGNS (moves) the bed instead
-    of 409ing. A mentor placing themself has no roster row: member_id
-    is null and the caller's own name rides along instead, recorded
-    as a name-only occupant row."""
+    of 409ing. Name-only placements (member_id null) cover a mentor
+    placing themself and a mentor placing an attending parent by
+    name: parents hold no roster row of their own, and a parent's
+    RSVP row — filed under the parent's name, member_id = their
+    child — is what establishes the parent's attendance. A student
+    name never matches a name-only placement; students are placed
+    by member_id."""
     b = request.get_json(force=True)
     rm = q_one("SELECT * FROM rooms WHERE id=?", (rid,))
     if not rm:
@@ -5637,18 +5641,17 @@ def api_room_place(rid):
     u = current_user()
     if not u:
         return err("login required", 401)
-    if u["role"] == "student":
+    # Mentor-only, no exceptions: the old self-only gate
+    # (_may_act_for) used to let a parent place their own child,
+    # which the mentor-only rule retired — the frontend hides the
+    # picker for regular users, and the server refuses them here.
+    if u["role"] not in ("mentor", "admin"):
         return err("room assignments are mentor-only — ask a mentor",
                    403)
     self_place = b.get("member_id") is None
-    if self_place:
-        if u["role"] not in ("mentor", "admin") or not b.get("person_name") \
-                or _norm_name(b.get("person_name")) != _norm_name(u["name"]):
-            return err("member_id required — mentors place themselves"
-                       " by name", 400)
-    elif u["role"] == "parent" and not _may_act_for(
-            u, b["member_id"], "student"):
-        return err("only mentors place students in rooms", 403)
+    if self_place and not b.get("person_name"):
+        return err("member_id required — mentors place by name"
+                   " only for attending parents", 400)
     hotel = q_one("SELECT * FROM hotels WHERE id=?", (rm["hotel_id"],))
     ev = q_one("SELECT * FROM events WHERE id=?", (hotel["event_id"],))
     event_days = _event_days(ev) if ev else []
@@ -5676,13 +5679,17 @@ def api_room_place(rid):
         # attending only Day 3 can't be placed on Day 1.
         days_map = _rsvp_days_map(db, hotel["event_id"])
         if self_place:
-            # The mentor's own RSVP is name-only (parent kind, null
-            # member): match it by normalized name.
+            # Name-only placements match a parent-kind RSVP by
+            # normalized name: the mentor's own name-only RSVP
+            # (member_id NULL), or an attending parent's RSVP
+            # (member_id = their child — the RSVP is the parent
+            # attending, not the child). A student name never
+            # matches here; students are placed by member_id.
             rsvp = None
             for cand in db.execute(
                     "SELECT id, status, person_name FROM rsvps"
-                    " WHERE event_id=? AND member_id IS NULL"
-                    " AND person_kind='parent'", (hotel["event_id"],)):
+                    " WHERE event_id=? AND person_kind='parent'",
+                    (hotel["event_id"],)):
                 if _norm_name(cand["person_name"]) \
                         == _norm_name(b.get("person_name")):
                     rsvp = cand
