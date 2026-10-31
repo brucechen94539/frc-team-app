@@ -9,6 +9,27 @@ _None right now._
 
 ## Fixed
 
+### Dropdowns showed a squiggly zigzag fill (2026-10-30, commit TBD)
+
+**Reported** (Bruce, with screenshots): the Role dropdown in Team
+accounts and the Driver dropdown in Post a ride showed a squiggly
+zigzag pattern filling the whole field instead of a single chevron.
+**Root cause:** the custom chevron rule (`select`, background image
++ `no-repeat` + right position) lost to the `.field` rule's
+`background:var(--fieldbg)` shorthand — shorthand resets
+background-image/repeat/position, and `.field select` (class +
+element) outranks bare `select`. Browsers resolved the conflict
+differently: Chromium dropped the chevron entirely (computed
+`backgroundImage: none`), while Bruce's browser tiled the 12px
+chevron across the field, which reads as a zigzag. **Fix:** the
+`.field` rule now uses `background-color` (which touches nothing
+else), and the select rule pins `background-size:12px 8px` for
+good measure — so the chevron is exactly one mark, right-aligned,
+in every browser. Verified by computed style (image present,
+`no-repeat`, right 12px center, 12px 8px) plus light-theme
+screenshots of both reported dropdowns. Every `.field` select
+(the create-event Type dropdown included) gets the same fix.
+
 ### Room-parent check missed attendance recorded under another child row (2026-10-30, commit ad713481)
 
 **Reported** (Bruce, mentor's view): Jane should be allowed as room
