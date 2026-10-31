@@ -19,6 +19,14 @@ and `can't make it` do not count as attending.
 - First run: if no account has a password, the login page offers one-time
   admin-account creation.
 - Mentors/admins create and reset team accounts (Mentor Queue → Team accounts).
+- **Team accounts is collapsed by default (2026-10-30):** the
+  section opens collapsed in Mentor Queue; the ▸/▾ header toggle
+  expands it, and the open state survives re-renders. Manually
+  creating an account there prefills the password with the team
+  default `test1234!`, shown masked in the password field, and
+  the field resets to that default after each successful create
+  (a mentor-set password is a temporary password the new account
+  must change at first login).
   The accounts list is a table: first/last name, username (the account's
   display name), email, phone, member type (the role), school, grade, team
   (the linked roster member's subteam), and relationship to other members
@@ -480,13 +488,18 @@ and `can't make it` do not count as attending.
   "Needs a room" gap line and the status table's Hotel pill match
   parents by name, so a placed parent shows as housed and stops
   listing as needing a room.
-- **RSVP deadlines are enforced on the server, not just by hiding the
-  buttons:** once an event's deadline passes, non-mentors get a 403
-  filing an RSVP (the UI hides their picker and shows an "RSVP closed"
-  pill). Mentors/admins still see the picker on closed events with a
-  "mentor override" note and may file late RSVPs. Releasing a seat
-  (removing an RSVP) stays allowed after the deadline, since it only
-  frees a spot for the waitlist.
+- **RSVP deadline freeze (2026-10-30):** once an event's deadline
+  passes, no RSVP changes at all — filing, changing, or removing an
+  RSVP gets a server 403 for every role, including mentors/admins
+  (this retires the old mentor override). The event card keeps its
+  RSVP picker and buttons visible but deactivated/grayed out
+  (disabled controls, plus a "RSVPs are frozen" note), and the
+  Remove buttons on RSVP rows are disabled the same way. Closed is
+  judged by local date on both sides (the server's local date and
+  the browser's local date), so buttons never freeze hours early on
+  PDT evenings. The deadline freezes RSVPs only: carpools, rooms,
+  tools, check-ins, and Archive all keep working after it passes —
+  logistics is exactly what happens after RSVPs close.
 - **Closed events leave the regular user's Events view:** once an
   event's RSVP is closed, its card is hidden from students and parents
   entirely; mentors/admins keep seeing it. Travel & Logistics and
@@ -584,11 +597,17 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
 - Only **parents, mentors, and admins** can define a ride (driver,
   seats, departure point/time, return plan). Students cannot post rides.
 - **The driver is always an account, never free text**
-  (`carpools.driver_user_id`). **Everyone posts only their own
-  vehicle** — the Driver name field is grayed out and auto-filled
-  with the session user's name, and the server 403s any
-  `driver_user_id` that isn't the caller. Posting for another parent
-  (the old mentor driver pool) is disabled.
+  (`carpools.driver_user_id`). **Parents post only their own
+  vehicle** — their Driver field is grayed out and auto-filled
+  with their name, and the server 403s a non-mentor
+  `driver_user_id` that isn't the caller. **Mentors/admins get a
+  Driver dropdown in Post a ride (2026-10-30):** "Myself" plus
+  every parent account, so a mentor can post a car on a parent's
+  behalf instead of being limited to their own. The server allows
+  a mentor-posted foreign driver only when the target is a parent
+  account (anything else, including students, is a 400); the
+  attendance and one-vehicle rules below are then judged on the
+  chosen driver, not the poster.
 - A **driver must be attending themselves**: a parent driver's account
   name must have a parent RSVP = going for that event (or a partial
   covering every day the car runs, on multi-day events).

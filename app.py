@@ -3236,6 +3236,12 @@ def api_rsvps(eid):
                 "cant": sum(1 for r in rsvps if r["status"] == "cant"),
             },
         })
+    # RSVP deadline freeze (2026-10-30): once the deadline date has
+    # passed, no RSVP changes at all — not even mentors (this retires
+    # the old mentor override). Same closed rule as Archive: the
+    # deadline date must be strictly before today.
+    if ev["deadline"] and ev["deadline"] < datetime.date.today().isoformat():
+        return err("RSVP deadline has passed — RSVPs are frozen", 403)
     b = request.get_json(force=True)
     if b.get("person_kind") not in ("student", "parent") or not b.get("person_name"):
         return err("person_kind (student|parent) and person_name required")
@@ -3421,6 +3427,9 @@ def api_rsvp_delete(rid):
     u = current_user()
     if not u:
         return err("login required", 401)
+    ev = q_one("SELECT * FROM events WHERE id=?", (r["event_id"],))
+    if ev and ev["deadline"] and ev["deadline"] < datetime.date.today().isoformat():
+        return err("RSVP deadline has passed — RSVPs are frozen", 403)
     if u["role"] not in ("mentor", "admin"):
         student_id, parent_ids = _self_rsvp_scope(u)
         mine = (r["person_kind"] == "student" and r["member_id"] == student_id) \
@@ -4520,12 +4529,24 @@ def api_carpool_create():
         return err("seats must be a number")
     if seats < 1:
         return err("seats required")
-    # Driver resolution — one vehicle per driver per event, and the
-    # driver is always the session user: mentors post their own
-    # vehicle too, and posting for another parent is disabled.
-    if b.get("driver_user_id") and b.get("driver_user_id") != me["id"]:
-        return err("you can only post your own vehicle", 403)
-    driver_uid, driver_name = me["id"], me["name"]
+    # Driver resolution — one vehicle per driver per event. Parents
+    # post only their own vehicle; mentors/admins may also post for
+    # a parent, picking them from the Post a ride driver dropdown
+    # (2026-10-30: supersedes the old mentors-own-only rule).
+    driver_uid, driver_name, driver_role = me["id"], me["name"], me["role"]
+    want_driver = b.get("driver_user_id")
+    if want_driver is not None:
+        try:
+            want_driver = int(want_driver)
+        except (TypeError, ValueError):
+            return err("driver_user_id must be a user id")
+    if want_driver and want_driver != me["id"]:
+        if me["role"] not in MENTOR_ROLES:
+            return err("you can only post your own vehicle", 403)
+        target = q_one("SELECT * FROM users WHERE id=?", (want_driver,))
+        if not target or target["role"] != "parent":
+            return err("the driver must be a parent account", 400)
+        driver_uid, driver_name, driver_role = target["id"], target["name"], "parent"
     ev = q_one("SELECT * FROM events WHERE id=?", (b["event_id"],))
     if not ev:
         return err("event not found", 404)
@@ -4538,7 +4559,8 @@ def api_carpool_create():
     # or (multi-day only) a partial covering that day. Mentors skip
     # this check: staff attendance isn't tracked via parent RSVPs,
     # and a mentor driving their own car is attending by definition.
-    if me["role"] not in MENTOR_ROLES:
+    # For a mentor-posted parent driver, the check runs on the parent.
+    if driver_role not in MENTOR_ROLES:
         with _lock:
             db = get_db()
             for d in (run_days or [None]):

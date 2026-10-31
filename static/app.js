@@ -77,6 +77,7 @@ function toast(msg) {
 let SUBTEAMS = [];
 let rosterCache = [];   // approved members
 let queueFilter = "pending";
+let teamAcctsOpen = false;
 let rosterSearch = "", rosterSubteam = "";
 let eventFilter = "all", eventSearch = "";
 let eventCalMode = false, eventCalCursor = "";
@@ -955,7 +956,8 @@ async function renderQueue() {
     <p class="sub">Disabled accounts awaiting final deletion — approve to delete the account for good, decline to keep it disabled.</p>
     <div id="dr-list"><span class="sub">Loading…</span></div>
   </div>
-  <div class="card"><h3>Team accounts</h3>
+  <div class="card"><h3><button class="btn small ghost" id="ac-toggle">${teamAcctsOpen ? "▾" : "▸"}</button> Team accounts</h3>
+  <div id="ac-body" class="${teamAcctsOpen ? "" : "hidden"}">
     <p class="sub">Logins for mentors, parents and students \u2014 separate from sign-up applications. Only mentors/admins see this.</p>
     <div id="ac-list"><span class="sub">Loading\u2026</span></div>
     <div class="grid3" style="margin-top:12px">
@@ -970,19 +972,23 @@ async function renderQueue() {
       <div class="field"><label>WhatsApp</label><input id="ac-whatsapp"></div>
     </div>
     <div class="grid2">
-      <div class="field"><label>Password <span class="hint">(8+ chars)</span></label><input id="ac-pass" type="password"></div>
+      <div class="field"><label>Password <span class="hint">(8+ chars, prefilled)</span></label><input id="ac-pass" type="password" value="test1234!"></div>
       <div class="field"><label>&nbsp;</label><div class="row">
         <button class="btn small" id="ac-add">Create account</button>
       </div></div>
     </div>
     <p class="sub">Reset password and Reset 2FA are per-row buttons in the table above.</p>
-  </div>
+  </div></div>
   <div class="card"><h3>Duplicate cleanup</h3>
     <p class="sub">Remove + re-create cycles leave two approved rows or two accounts for one person, and the lists show the name twice. Pick the row to keep per group: merging re-points RSVPs, seats, rooms, check-ins and links to it, then deletes the other rows (the survivor's own record fields are kept; rows that would collide after re-pointing are dropped and counted). A duplicate account whose driving collides with the survivor's is skipped with a reason.</p>
     <div id="dup-list"><span class="sub">Loading…</span></div>
   </div>`;
   v.querySelectorAll("[data-f]").forEach((b) =>
     b.addEventListener("click", () => { queueFilter = b.dataset.f; renderQueue(); }));
+  // Team accounts is collapsed by default; the toggle survives
+  // re-renders via the module flag, like the create zones.
+  const _act = $("ac-toggle");
+  if (_act) _act.addEventListener("click", () => { teamAcctsOpen = !teamAcctsOpen; renderQueue(); });
   $("q-clear").addEventListener("click", async () => {
     if (!confirm("Delete all sample entries?")) return;
     const r = await DEL("/api/members/sample");
@@ -1306,7 +1312,8 @@ async function renderAccounts() {
         password: $("ac-pass").value});
       toast("Account created.");
       $("ac-first").value = $("ac-last").value = $("ac-email").value
-        = $("ac-phone").value = $("ac-whatsapp").value = $("ac-pass").value = "";
+        = $("ac-phone").value = $("ac-whatsapp").value = "";
+      $("ac-pass").value = "test1234!";
       renderAccounts();
     } catch (e) { toast("Error: " + e.message); }
   };
@@ -1885,6 +1892,8 @@ async function renderEvents() {
   // day pick can never land as a full 'going' on the logistics
   // board. Single-day cards have no day boxes and are unaffected.
   const syncRsvpButtons = (card) => {
+    // A frozen (past-deadline) card never re-enables its buttons.
+    if (card.querySelector("[data-frozen]")) return;
     const boxes = [...card.querySelectorAll("input.rp-day")];
     if (!boxes.length) return;
     const all = boxes.every((x) => x.checked);
@@ -2021,11 +2030,18 @@ async function createEvent() {
   } catch (e) { toast("Error: " + e.message); }
 }
 
-// RSVP closed = deadline passed (UTC date, same rule the server uses
-// for Archive). Non-mentors never see closed cards (renderEvents
-// filters them); mentors/admins see them with an Archive button.
+// RSVP closed = deadline passed (local date, same rule the server
+// uses for Archive). Local, not UTC: the server judges by its own
+// local date, so a UTC comparison would freeze buttons hours early
+// on PDT evenings, when UTC has already ticked to the next day.
+// Non-mentors never see closed cards (renderEvents filters them);
+// mentors/admins see them with an Archive button.
+const todayLocal = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
 function eventClosed(e) {
-  return !!(e.deadline && e.deadline < new Date().toISOString().slice(0, 10));
+  return !!(e.deadline && e.deadline < todayLocal());
 }
 
 async function eventCard(e, ro = false) {
@@ -2054,17 +2070,16 @@ async function eventCard(e, ro = false) {
   if (ro) pickerRow = "";
   else if (archived) pickerRow = `<p class="sub">Archived — updates disabled. Unarchive to make changes.</p>`;
   else if (clubBlocked) pickerRow = `<p class="sub">Club events are only for BASIS Independent Fremont students.</p>`;
-  else if (closed && !MENTOR()) pickerRow = "";
-  else if (pickerOpts.length) pickerRow = `<div class="row">
-      <select id="rp-${e.id}">${opts}</select>
-      <button class="btn small" data-rsvp="${e.id}" data-want="going">RSVP Going</button>
-      <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe">Maybe</button>
-      <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial">Partial (multi-day)</button>
-      <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant">Can't make it</button>
+  else if (pickerOpts.length) pickerRow = `<div class="row"${closed ? ' data-frozen="1"' : ""}>
+      <select id="rp-${e.id}"${closed ? " disabled" : ""}>${opts}</select>
+      <button class="btn small" data-rsvp="${e.id}" data-want="going"${closed ? " disabled" : ""}>RSVP Going</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe"${closed ? " disabled" : ""}>Maybe</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial"${closed ? " disabled" : ""}>Partial (multi-day)</button>
+      <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant"${closed ? " disabled" : ""}>Can't make it</button>
     </div>${eventDays(e).length > 1 ? `<div class="row" style="margin-top:6px"><span class="sub">Partial days:</span>
-      ${eventDays(e).map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="rp-day" data-day="${ds}" checked> ${dayLabel(ds)}</label>`).join("")}
+      ${eventDays(e).map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="rp-day" data-day="${ds}" checked${closed ? " disabled" : ""}> ${dayLabel(ds)}</label>`).join("")}
       <span class="sub">(all checked = every day; only used for Partial — unchecking a day leaves only Partial enabled)</span></div>` : ""}
-    ${closed ? `<p class="sub">Deadline passed — mentor override: you can still RSVP for others or yourself.</p>` : ""}`;
+    ${closed ? `<p class="sub">RSVP deadline has passed — RSVPs are frozen.</p>` : ""}`;
   else pickerRow = `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
   const scope = selfScope();
   const row = (r) => {
@@ -2081,7 +2096,7 @@ async function eventCard(e, ro = false) {
       <span>${esc(r.person_name)} <span class="sub">(${r.person_kind})</span></span>
       ${r.status === "partial" && r.days && r.days.length && eventDays(e).length > 1
         ? `<span class="sub">${r.days.map(dayLabel).join(", ")}</span>` : ""}
-      ${canRemove ? `<button class="btn small ghost" data-unrsvp="${r.id}">Remove</button>` : ""}</div>`;
+      ${canRemove ? `<button class="btn small ghost" data-unrsvp="${r.id}"${closed ? " disabled" : ""}>Remove</button>` : ""}</div>`;
   };
   return `<div class="card" id="ev-card-${e.id}">
     <div class="row"><b>${esc(e.title)}</b>
@@ -2377,6 +2392,12 @@ async function renderTravel() {
   const v = $("view-travel");
   await loadPeople();
   const events = await GET("/api/events");
+  // Mentor driver dropdown: parent accounts, for posting a ride on
+  // a parent's behalf. Parents never see it (and never fetch it).
+  const parentUsers = MENTOR()
+    ? (await GET("/api/users").catch(() => [])).filter((u) => u.role === "parent")
+        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+    : [];
   if (!events.some((e) => e.id === travelEventId)) travelEventId = events.length ? events[0].id : null;
   if (!events.length) {
     $("view-travel").innerHTML =
@@ -2576,7 +2597,9 @@ async function renderTravel() {
     ${evDays.map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="cp-day" data-day="${ds}" checked> ${dayLabel(ds)}</label>`).join("")}
     <span class="sub">(all checked = every day)</span></div>` : ""}
   <div class="grid3">
-    <div class="field"><label>Driver name</label><input id="cp-driver" disabled value="${esc(ME.name)}"><span class="hint">You, auto-filled</span></div>
+    <div class="field"><label>Driver</label>${MENTOR()
+      ? `<select id="cp-driver"><option value="">Myself (${esc(ME.name)})</option>${parentUsers.map((u) => `<option value="${u.id}">${esc(u.name)}</option>`).join("")}</select><span class="hint">Pick a parent to post their car, or yourself</span>`
+      : `<input id="cp-driver" disabled value="${esc(ME.name)}"><span class="hint">You, auto-filled</span>`}</div>
     <div class="field"><label>Seats *</label><input id="cp-seats" inputmode="numeric" placeholder="4"></div>
     <div class="field"><label>Departure point</label><input id="cp-from" placeholder="School lot"></div>
     <div class="field"><label>Departure time</label><input id="cp-dt" placeholder="Thu 3:30 PM"></div>
@@ -2888,7 +2911,13 @@ async function renderTravel() {
       return_info: $("cp-ret").value.trim(), notes: $("cp-notes").value.trim(),
       vehicle: {plate: $("cp-vplate").value.trim(), color: $("cp-vcolor").value.trim(),
         make: $("cp-vmake").value.trim(), model: $("cp-vmodel").value.trim()}};
-    // The driver is always the session user; the server enforces it.
+    // Mentors/admins may post for a parent chosen in the driver
+    // dropdown; everyone else drives their own car (the server
+    // enforces both rules, including the driver's RSVP attendance).
+    const drvSel = $("cp-driver");
+    if (drvSel && drvSel.tagName === "SELECT" && drvSel.value) {
+      body.driver_user_id = parseInt(drvSel.value, 10);
+    }
     // Multi-day: the checked days are the days this car runs; all
     // checked (the default) means every day.
     const dayBoxes = [...document.querySelectorAll("input.cp-day")];
