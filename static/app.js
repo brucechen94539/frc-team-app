@@ -1698,7 +1698,8 @@ async function renderEvents() {
         <div class="field"><label>Type</label><select id="e-type">
           ${types.map((t) => `<option value="${t}">${t[0].toUpperCase() + t.slice(1)}</option>`).join("")}</select></div>
         <div class="field"><label>Date</label><input id="e-date" type="date"></div>
-        <div class="field"><label>End date <span class="hint">(multi-day trips)</span></label><input id="e-end" type="date"></div>
+        <div class="field"><label><input id="e-multi" type="checkbox"> Multiple days</label><span class="hint">check for multi-day trips</span></div>
+        <div class="field" id="e-end-wrap" style="display:none"><label>End date</label><input id="e-end" type="date"></div>
         <div class="field"><label>Time</label><input id="e-time" placeholder="6:00 PM"></div>
         <div class="field"><label>Location</label><input id="e-loc"></div>
         <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label>
@@ -1707,6 +1708,10 @@ async function renderEvents() {
         <div class="field"><label>Repeat weekly <span class="hint">(weeks, 1 = once, max 12)</span></label>
           <input id="e-repeat" inputmode="numeric" value="1"></div>
       </div>
+      <div class="row mo" style="gap:16px;flex-wrap:wrap"><span class="sub">Travel &amp; Logistics shows only what the event needs:</span>
+        <label><input id="e-need-hotel" type="checkbox" checked> Hotel rooms needed</label>
+        <label><input id="e-need-rides" type="checkbox" checked> Carpool rides needed</label>
+        <label><input id="e-need-tools" type="checkbox" checked> Tools / robots needed</label></div>
       <div class="field mo"><label>Notes</label><textarea id="e-notes"></textarea></div>
       <div class="row mo"><button class="btn" id="e-create">Create event</button>
         <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button>
@@ -1832,6 +1837,12 @@ async function renderEvents() {
   const _ew = $("e-workshop"); if (_ew) _ew.addEventListener("click", () => {
     $("e-loc").value = "4285 Santa Monica Terrace, Fremont, CA 94539";
   });
+  // Multi-day toggle: the end date only shows (and only counts)
+  // when the event spans more than one day.
+  const _em = $("e-multi"); if (_em) _em.addEventListener("change", () => {
+    $("e-end-wrap").style.display = _em.checked ? "" : "none";
+    if (!_em.checked) $("e-end").value = "";
+  });
   // Club defaults: Mondays 4:00 PM, only when the mentor hasn't typed
   // anything yet; the note reminds them of the BIF-only rule.
   const _et = $("e-type"); if (_et) _et.addEventListener("change", () => {
@@ -1932,6 +1943,7 @@ async function renderEvents() {
       $("e-notes").value = e.notes || "";
       $("e-date").value = "";
       $("e-end").value = "";
+      if ($("e-multi")) { $("e-multi").checked = false; $("e-end-wrap").style.display = "none"; }
       $("e-dead").value = "";
       $("e-title").scrollIntoView();
       toast("Copied — pick a new date and save.");
@@ -1939,6 +1951,13 @@ async function renderEvents() {
   v.querySelectorAll("[data-editev]").forEach((b) =>
     b.addEventListener("click", () =>
       v.querySelector(`#ef-${b.dataset.editev}`).classList.toggle("hidden")));
+  v.querySelectorAll(".ef-multi").forEach((cb) =>
+    cb.addEventListener("change", () => {
+      const f = cb.closest('[id^="ef-"]');
+      const wrap = f && f.querySelector(".ef-end-wrap");
+      if (wrap) wrap.style.display = cb.checked ? "" : "none";
+      if (!cb.checked && f) f.querySelector(".ef-end").value = "";
+    }));
   v.querySelectorAll("[data-cancelev]").forEach((b) =>
     b.addEventListener("click", () =>
       v.querySelector(`#ef-${b.dataset.cancelev}`).classList.add("hidden")));
@@ -1946,13 +1965,17 @@ async function renderEvents() {
     b.addEventListener("click", async () => {
       const f = v.querySelector(`#ef-${b.dataset.saveev}`);
       const q = (sel) => f.querySelector(sel).value;
+      const qc = (sel) => f.querySelector(sel).checked;
       try {
         await PATCH(`/api/events/${b.dataset.saveev}`, {title: q(".ef-title").trim(),
           type: q(".ef-type"), date: q(".ef-date").trim(),
-          end_date: q(".ef-end").trim(),
+          end_date: qc(".ef-multi") ? q(".ef-end").trim() : "",
           time: q(".ef-time").trim(), location: q(".ef-loc").trim(),
           capacity: q(".ef-cap").trim(), deadline: q(".ef-dead").trim(),
-          session_hours: q(".ef-hours").trim(), notes: q(".ef-notes").trim()});
+          session_hours: q(".ef-hours").trim(), notes: q(".ef-notes").trim(),
+          needs_hotel: qc(".ef-need-hotel") ? 1 : 0,
+          needs_rides: qc(".ef-need-rides") ? 1 : 0,
+          needs_tools: qc(".ef-need-tools") ? 1 : 0});
         toast("Event updated."); renderEvents();
       } catch (err) { toast("Error: " + err.message); }
     }));
@@ -1961,11 +1984,16 @@ async function renderEvents() {
 async function createEvent() {
   const val = (id) => $(id).value.trim();
   if (!val("e-title")) return toast("Title is required.");
+  const multiDay = $("e-multi") && $("e-multi").checked;
+  if (multiDay && !val("e-end")) return toast("Pick an end date for a multi-day event.");
   const base = {title: val("e-title"), type: $("e-type").value,
-    date: val("e-date"), end_date: val("e-end"), time: val("e-time"),
+    date: val("e-date"), end_date: multiDay ? val("e-end") : "", time: val("e-time"),
     location: val("e-loc"),
     capacity: val("e-cap") ? parseInt(val("e-cap"), 10) : null,
-    deadline: val("e-dead"), notes: val("e-notes")};
+    deadline: val("e-dead"), notes: val("e-notes"),
+    needs_hotel: $("e-need-hotel").checked ? 1 : 0,
+    needs_rides: $("e-need-rides").checked ? 1 : 0,
+    needs_tools: $("e-need-tools").checked ? 1 : 0};
   // Weekly repeat: pure calendar math (UTC) so timezones can't shift
   // the day; the deadline shifts with the event. Dateless events
   // ignore repeat — a series without dates is meaningless.
@@ -2075,13 +2103,18 @@ async function eventCard(e, ro = false) {
         <div class="field"><label>Type</label><select class="ef-type">
           ${["meeting", "build", "competition", "outreach", "club"].map((t) => `<option value="${t}" ${e.type === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
         <div class="field"><label>Date</label><input class="ef-date" type="date" value="${esc(e.date || "")}"></div>
-        <div class="field"><label>End date <span class="hint">(multi-day)</span></label><input class="ef-end" type="date" value="${esc(e.end_date || "")}"></div>
+        <div class="field ef-end-wrap" style="${e.end_date ? "" : "display:none"}"><label>End date</label><input class="ef-end" type="date" value="${esc(e.end_date || "")}"></div>
         <div class="field"><label>Time</label><input class="ef-time" value="${esc(e.time || "")}"></div>
         <div class="field"><label>Location</label><input class="ef-loc" value="${esc(e.location || "")}"></div>
         <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label><input class="ef-cap" inputmode="numeric" value="${e.capacity === null || e.capacity === undefined ? "" : e.capacity}"></div>
         <div class="field"><label>RSVP deadline</label><input class="ef-dead" type="date" value="${esc(e.deadline || "")}"></div>
         <div class="field"><label>Session hours</label><input class="ef-hours" inputmode="decimal" value="${e.session_hours === null || e.session_hours === undefined ? "" : e.session_hours}"></div>
       </div>
+      <div class="row" style="gap:16px;flex-wrap:wrap">
+        <label><input class="ef-multi" type="checkbox" ${e.end_date ? "checked" : ""}> Multiple days</label>
+        <label><input class="ef-need-hotel" type="checkbox" ${e.needs_hotel === 0 ? "" : "checked"}> Hotel rooms needed</label>
+        <label><input class="ef-need-rides" type="checkbox" ${e.needs_rides === 0 ? "" : "checked"}> Carpool rides needed</label>
+        <label><input class="ef-need-tools" type="checkbox" ${e.needs_tools === 0 ? "" : "checked"}> Tools / robots needed</label></div>
       <div class="field"><label>Notes</label><textarea class="ef-notes">${esc(e.notes || "")}</textarea></div>
       <div class="row"><button class="btn small" data-saveev="${e.id}">Save changes</button>
         <button class="btn small ghost" data-cancelev="${e.id}">Cancel</button></div>
@@ -2368,6 +2401,14 @@ async function renderTravel() {
     dayPayloads.push({day: p.day || evDays[0] || null, t: p});
   }
   const t = dayPayloads[0].t;
+  // Event "needs" flags: only an explicit 0 opts a section out —
+  // old rows and old clients carry no flags and keep everything,
+  // as before. The travel payload's event row carries them; the
+  // events list row is the fallback.
+  const evNeeds = t.event || ev0 || {};
+  const needsHotel = evNeeds.needs_hotel !== 0;
+  const needsRides = evNeeds.needs_rides !== 0;
+  const needsTools = evNeeds.needs_tools !== 0;
   const ev = t.event;
   // Day-section open state: Day 1 open, the rest closed; reset when
   // the picked event changes. Toggling a section flips visibility
@@ -2506,9 +2547,16 @@ async function renderTravel() {
     <h4>Rooms</h4>
     ${roomsTableHTML(t.hotel, dp.day, placeOptsForDay(dp), {editableNumber: false, showEdit: true})}
     ${roomGapHTML(t.hotel, dp.t.attendees, dp.day)}`;
-  const daySection = (dp, idx) => `
+  const daySection = (dp, idx) => {
+    // Day sections only carry what the event needs: rides tables
+    // when rides are needed, rooms tables when a hotel is needed
+    // and a block exists. A day with neither renders nothing.
+    const body = `${needsRides ? ridesTables(dp) : ""}${needsHotel && t.hotel ? roomsDaySection(dp) : ""}`;
+    if (!body) return "";
+    return `
   <div class="card"><h3><button class="btn small ghost" data-tdaysec="${dp.day}">${openTravelDays.has(dp.day) ? "▾" : "▸"}</button> Day ${idx + 1} · ${dayLabel(dp.day)}</h3>
-  <div id="tday-body-${dp.day}" class="${openTravelDays.has(dp.day) ? "" : "hidden"}">${ridesTables(dp)}${t.hotel ? roomsDaySection(dp) : ""}</div></div>`;
+  <div id="tday-body-${dp.day}" class="${openTravelDays.has(dp.day) ? "" : "hidden"}">${body}</div></div>`;
+  };
   // Post a ride: one vehicle per driver per event, collapsed by
   // default, and gone entirely once the caller already registered
   // a car for this event — the form never reappears after
@@ -2595,13 +2643,14 @@ async function renderTravel() {
       : "No hotel block for this event.";
     return `<div class="card"><h3>Logistics status</h3>
     <p class="sub">${hotelLine}</p>
-    <p class="sub">Green = assigned for that day, red = still needed, gray = not attending that day, — = no hotel block.</p>
+    <p class="sub">Green = assigned for that day, red = still needed, gray = not attending that day, — = not needed or no hotel block.</p>
     <div style="overflow-x:auto"><table class="acct"><thead><tr><th>Person</th>${tableDays.map((ds, i) => `<th>Day ${i + 1}${ds ? `<div class="sub">${dayLabel(ds)}</div>` : ""}</th>`).join("")}</tr></thead>
     <tbody>${rows.map((r) => `<tr><td><b>${esc(r.name)}</b>${r.kind === "parent" ? ` <span class="sub">(parent)</span>` : ""}${r.bases.length ? `<div class="sub">${esc(r.bases.join("; "))}</div>` : ""}</td>${tableDays.map((ds) => {
       if (!attNames(ds).has(normName(r.name))) return `<td><span class="pill gray">Hotel</span> <span class="pill gray">Ride</span></td>`;
-      const hotel = !t.hotel ? `<span class="sub">—</span>`
+      const hotel = (!needsHotel || !t.hotel) ? `<span class="sub">—</span>`
         : `<span class="pill ${hotelNames(ds).has(normName(r.name)) ? "green" : "red"}">Hotel</span>`;
-      const ride = `<span class="pill ${rideNames(ds).has(normName(r.name)) ? "green" : "red"}">Ride</span>`;
+      const ride = !needsRides ? `<span class="sub">—</span>`
+        : `<span class="pill ${rideNames(ds).has(normName(r.name)) ? "green" : "red"}">Ride</span>`;
       return `<td>${hotel} ${ride}</td>`;
     }).join("")}</tr>`).join("") || `<tr><td colspan="${tableDays.length + 1}"><span class="sub">Nobody RSVP'd yet.</span></td></tr>`}</tbody></table></div></div>`;
   };
@@ -2625,16 +2674,18 @@ async function renderTravel() {
     }));
     const rows = [];
     tableDays.forEach((ds, di) => {
-      (dpFor(ds).t.carpools || []).forEach((c) => {
+      const dayCars = (dpFor(ds).t.carpools || []);
+      dayCars.forEach((c, ci) => {
         rows.push({ds, di, num: numOf.get(c.id), c,
           tools: tripTools.filter((x) => x.vehicle_type === "carpool" && x.vehicle_id === c.id),
-          riders: (c.claims || []).map((x) => x.person_name)});
+          riders: (c.claims || []).map((x) => x.person_name),
+          span: ci === 0 ? dayCars.length : 0});
       });
     });
     return `<div class="card"><h3>Cars, riders &amp; tools</h3>
     <p class="sub">One row per vehicle per day it runs.</p>
     ${rows.length ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Day</th><th>Vehicle</th><th>Driver</th><th>Tools / robots</th><th>Riders</th></tr></thead>
-    <tbody>${rows.map((r) => `<tr><td>${logisticsDayCell(r.ds, r.di)}</td>
+    <tbody>${rows.map((r) => `<tr class="lday-${r.di % 2 === 0 ? "odd" : "even"}">${r.span ? `<td rowspan="${r.span}">${logisticsDayCell(r.ds, r.di)}</td>` : ""}
       <td><b>Vehicle ${r.num}</b>${vehicleLine(r.c.vehicle)}</td>
       <td><b>${esc(r.c.driver_name)}</b></td>
       <td>${r.tools.length ? r.tools.map((x) => `<div>${esc(x.name)}${x.qty > 1 ? ` ×${x.qty}` : ""}</div>`).join("") : '<span class="sub">—</span>'}</td>
@@ -2646,14 +2697,16 @@ async function renderTravel() {
     const tableDays = evDays.length ? evDays : [dayPayloads[0].day];
     const rows = [];
     tableDays.forEach((ds, di) => {
-      (t.hotel.rooms || []).filter((r) => roomRunsDay(r, ds)).forEach((r) => {
-        rows.push({ds, di, r, occ: (r.occupants || []).filter((o) => occMatchesDay(o, ds))});
+      const dayRooms = (t.hotel.rooms || []).filter((r) => roomRunsDay(r, ds));
+      dayRooms.forEach((r, ri) => {
+        rows.push({ds, di, r, occ: (r.occupants || []).filter((o) => occMatchesDay(o, ds)),
+          span: ri === 0 ? dayRooms.length : 0});
       });
     });
     return `<div class="card"><h3>Hotel rooms</h3>
     <p class="sub">One row per room per day it is allocated for.</p>
     ${rows.length ? `<div style="overflow-x:auto"><table class="acct"><thead><tr><th>Day</th><th>Room</th><th>Capacity</th><th>Occupants</th></tr></thead>
-    <tbody>${rows.map((r) => `<tr><td>${logisticsDayCell(r.ds, r.di)}</td>
+    <tbody>${rows.map((r) => `<tr class="lday-${r.di % 2 === 0 ? "odd" : "even"}">${r.span ? `<td rowspan="${r.span}">${logisticsDayCell(r.ds, r.di)}</td>` : ""}
       <td><b>${esc(r.r.label)}</b>${r.r.room_number ? `<div class="sub">room #${esc(r.r.room_number)}</div>` : ""}</td>
       <td><span class="pill ${r.occ.length >= r.r.capacity ? "red" : "green"}">${r.occ.length}/${r.r.capacity}</span></td>
       <td>${r.occ.length ? r.occ.map((o) => `<div>${esc(o.person_name || [o.first_name, o.last_name].filter(Boolean).join(" "))}</div>`).join("") : '<span class="sub">—</span>'}</td></tr>`).join("")}</tbody></table></div>`
@@ -2687,23 +2740,7 @@ async function renderTravel() {
       <td>${acts || '<span class="sub">—</span>'}</td></tr>`;
     }).join("")}</tbody></table></div>` : `<p class="sub">No cars registered yet.</p>`}</div>`;
   };
-  v.innerHTML = `
-  <div class="card"><h2>Travel &amp; Logistics</h2>
-  <p class="sub">${multi ? "Each trip day expands to its own rides and rooms tables. Tools are for the whole trip." : "Carpools, tool sign-up, and hotel assignments — organized per event."}</p>
-  <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div>
-  ${multi ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" id="td-expand-all">Expand all days</button><button class="btn small ghost" id="td-collapse-all">Collapse all days</button></div>` : ""}</div>
-
-  ${statusTableHTML()}
-  ${logisticsCarsHTML()}
-  ${logisticsRoomsHTML()}
-  ${fleetHTML()}
-  ${postRideCard}
-
-  ${multi
-    ? dayPayloads.map((dp, i) => daySection(dp, i)).join("")
-    : `<div class="card"><h3>Carpools</h3>${ridesTables(dayPayloads[0])}</div>`}
-
-  <div class="card"><h3>Tool sign-up</h3>
+  const toolsCardHTML = () => `<div class="card"><h3>Tool sign-up</h3>
   <p class="sub">Mentors list what the event needs; tools ride in event carpools. Every tool starts unassigned until a mentor or its vehicle's driver confirms it.</p>
   <div class="row mo">
     <input id="tl-name" placeholder="Tool or gear needed *" style="flex:2;min-width:160px">
@@ -2761,9 +2798,34 @@ async function renderTravel() {
   }).join("")}</tbody></table></div>` : '<p class="sub">Nothing listed yet.</p>'}
   </div>
   <p id="tl-collapsed-note" class="sub ${toolsListCollapsed && t.tools.length ? "" : "hidden"}" style="margin-top:8px">Tool list collapsed — ${t.tools.length} tool(s) hidden.</p>
-  </div>
+  </div>`;
+  v.innerHTML = `
+  <div class="card"><h2>Travel &amp; Logistics</h2>
+  ${(() => {
+    const dayParts = [];
+    if (needsRides) dayParts.push("rides");
+    if (needsHotel) dayParts.push("rooms");
+    const blurb = multi
+      ? `${dayParts.length ? `Each trip day expands to its own ${dayParts.join(" and ")} tables.` : ""}${needsTools ? " Tools are for the whole trip." : ""}`.trim()
+      : [needsRides ? "Carpools" : null, needsTools ? "tool sign-up" : null, needsHotel ? "hotel assignments" : null].filter(Boolean).join(", ");
+    return blurb ? `<p class="sub">${multi ? blurb : `${blurb} — organized per event.`}</p>` : "";
+  })()}
+  <div class="bubbles">${events.map((e) => `<button class="bubble ${e.id === travelEventId ? "active" : ""}" data-ev="${e.id}">${esc(e.title)}</button>`).join("")}</div>
+  ${multi && (needsRides || needsHotel) ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" id="td-expand-all">Expand all days</button><button class="btn small ghost" id="td-collapse-all">Collapse all days</button></div>` : ""}</div>
 
-  ${(t.hotel || multi) && MENTOR() ? `<div class="card"><h3>Hotel assignments</h3>
+  ${statusTableHTML()}
+  ${needsRides ? logisticsCarsHTML() : ""}
+  ${needsHotel ? logisticsRoomsHTML() : ""}
+  ${needsRides ? fleetHTML() : ""}
+  ${needsRides ? postRideCard : ""}
+
+  ${multi
+    ? dayPayloads.map((dp, i) => daySection(dp, i)).join("")
+    : (needsRides ? `<div class="card"><h3>Carpools</h3>${ridesTables(dayPayloads[0])}</div>` : "")}
+
+  ${needsTools ? toolsCardHTML() : ""}
+
+  ${needsHotel && (t.hotel || multi) && MENTOR() ? `<div class="card"><h3>Hotel assignments</h3>
   ${t.hotel ? (multi
     ? hotelTopHTML(t.hotel, {evDays})
     : hotelHTML(t.hotel, {day: dayPayloads[0].day, dayAttendees: dayPayloads[0].t.attendees, placeOpts: placeOptsForDay(dayPayloads[0])})) : `
@@ -2778,7 +2840,7 @@ async function renderTravel() {
       <textarea id="h-notes"></textarea></div>
     <button class="btn small mo" id="h-add">Save hotel block</button>`}
   </div>` : ""}
-  ${!MENTOR() && t.hotel && !multi ? `<div class="card"><h3>Hotel assignments</h3>
+  ${needsHotel && !MENTOR() && t.hotel && !multi ? `<div class="card"><h3>Hotel assignments</h3>
   ${roomsTableHTML(t.hotel, dayPayloads[0].day, placeOptsForDay(dayPayloads[0]), {editableNumber: true, showEdit: false})}
   </div>` : ""}`;
   v.querySelectorAll("[data-ev]").forEach((b) => b.addEventListener("click", () => {

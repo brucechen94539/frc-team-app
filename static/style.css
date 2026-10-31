@@ -436,3 +436,12 @@ input[type="radio"]:disabled{opacity:.45;cursor:default}
 .create-zone .create-toggle .sub{font-weight:400}
 .create-zone.collapsed .create-body{display:none}
 .create-zone:not(.collapsed) .create-body{margin-top:14px}
+
+/* Logistics tables 2/3 day bands: each day's rows share one shade so
+   a day's block reads as a group. Odd days lean further from the
+   card base than even days: dark theme lightens (50% / 25% toward
+   white), light theme darkens (50% / 25% toward black). */
+.lday-odd td{background:color-mix(in srgb, var(--card) 50%, white)}
+.lday-even td{background:color-mix(in srgb, var(--card) 75%, white)}
+[data-theme="light"] .lday-odd td{background:color-mix(in srgb, var(--card) 50%, black)}
+[data-theme="light"] .lday-even td{background:color-mix(in srgb, var(--card) 75%, black)}

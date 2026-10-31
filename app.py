@@ -373,6 +373,13 @@ def _migrate(db):
         # rebuild (guarded on the missing column) never runs there.
         if "end_date" not in event_cols:
             db.execute("ALTER TABLE events ADD COLUMN end_date TEXT")
+        # 2026-10-30: event "needs" flags — which Travel sections an
+        # event uses. Old rows default to all needed, so nothing
+        # disappears on existing events.
+        for _col in ("needs_hotel", "needs_rides", "needs_tools"):
+            if _col not in event_cols:
+                db.execute(f"ALTER TABLE events ADD COLUMN {_col}"
+                           " INTEGER NOT NULL DEFAULT 1")
         for tbl, col in (("carpool_claims", "day"),
                          ("van_claims", "day")):
             cols = {r[1] for r in db.execute(
@@ -2942,14 +2949,21 @@ def api_events():
         return err(range_err)
     defaults = {"meeting": 2, "build": 4, "competition": 8, "outreach": 3,
                 "club": 1}
+    # Needs flags: absent = needed (old clients and the create form's
+    # checked defaults both land here); explicit falsy = not needed.
+    def _need(key):
+        v = b.get(key)
+        return 1 if v is None else (1 if v else 0)
     eid = execute(
         """INSERT INTO events (title, type, date, time, location, capacity,
-           deadline, session_hours, notes, end_date, sample)
-           VALUES (?,?,?,?,?,?,?,?,?,?,0)""",
+           deadline, session_hours, notes, end_date, sample,
+           needs_hotel, needs_rides, needs_tools)
+           VALUES (?,?,?,?,?,?,?,?,?,?,0,?,?,?)""",
         (b["title"], b.get("type", "meeting"), b.get("date"), b.get("time"),
          b.get("location"), b.get("capacity"), b.get("deadline"),
          b.get("session_hours", defaults.get(b.get("type", "meeting"), 2)),
-         b.get("notes"), end_s))
+         b.get("notes"), end_s,
+         _need("needs_hotel"), _need("needs_rides"), _need("needs_tools")))
     execute("UPDATE events SET code=? WHERE id=?", (f"EVT-{200 + eid}", eid))
     return jsonify(q_one("SELECT * FROM events WHERE id=?", (eid,))), 201
 
@@ -3117,6 +3131,12 @@ def api_event(eid):
                     return err(f"{col} must be YYYY-MM-DD")
             sets.append(f"{col}=?")
             args.append(raw)
+    for col in ("needs_hotel", "needs_rides", "needs_tools"):
+        if col in b:
+            if b[col] not in (0, 1, True, False):
+                return err(f"{col} must be 0 or 1")
+            sets.append(f"{col}=?")
+            args.append(1 if b[col] else 0)
     # Validate the combined range, not just each field alone: a new
     # end_date must still be >= the (possibly unchanged) start date.
     new_date = b.get("date", ev["date"])

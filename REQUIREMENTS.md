@@ -777,6 +777,34 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   Occupants), including empty rooms. Both are visible to everyone
   and carry no actions; events with no vehicles or no hotel block
   show a note instead of rows.
+- **Tables 2/3 day presentation (2026-10-30):** the Day cell is
+  one entry per day, not repeated per row — it spans all of that
+  day's rows (rowspan) and appears only on the day's first row.
+  Each day's rows share one band shade so the day reads as a
+  group: odd days lean further from the card base than even days
+  (dark theme: 50% lighter on odd days, 25% lighter on even days;
+  light theme: 50% darker on odd days, 25% darker on even days).
+- **Event "needs" flags (2026-10-30):** creating an event offers
+  three checked-by-default checkboxes — Hotel rooms needed,
+  Carpool rides needed, Tools / robots needed — stored as
+  `needs_hotel` / `needs_rides` / `needs_tools` on the event and
+  editable in the event Edit form. Travel & Logistics shows only
+  what the event needs: hotel sections (hotel card, rooms tables
+  in day sections, Hotel rooms table) only when hotel is needed,
+  carpool sections (day-section carpool tables, Cars table, Fleet,
+  Post a ride) only when rides are needed, the Tool sign-up card
+  only when tools are needed. The status table shows a dash for
+  an unneeded category instead of a red pill, and the Travel
+  header text lists only the needed sections. Old events default
+  to all three needed, so nothing disappears on existing events.
+  The API does not block creating a car, hotel, or tool for an
+  unneeded category — the sections are only hidden in the UI.
+- **Multiple-days checkbox (2026-10-30):** the event create and
+  Edit forms carry a "Multiple days" checkbox; the End date field
+  only shows (and only counts) when it is checked. Unchecking
+  clears the end date, so a multi-day event reverts to
+  single-day. The checkbox is form UX only — multi-day itself is
+  still derived from `end_date`.
 
 ### Hotels
 

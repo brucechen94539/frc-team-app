@@ -88,6 +88,9 @@ CREATE TABLE IF NOT EXISTS events (
   season       TEXT,                 -- NULL = current season; set when archived
   end_date     TEXT,                 -- multi-day: last day, YYYY-MM-DD;
                                    -- NULL = single-day (date only)
+  needs_hotel  INTEGER NOT NULL DEFAULT 1,  -- Travel shows hotel sections
+  needs_rides  INTEGER NOT NULL DEFAULT 1,  -- Travel shows carpool sections
+  needs_tools  INTEGER NOT NULL DEFAULT 1,  -- Travel shows tool sign-up
   archived     INTEGER NOT NULL DEFAULT 0,  -- 1 = frozen: no updates
                                    -- (distinct from season archiving)
   sample       INTEGER NOT NULL DEFAULT 0
