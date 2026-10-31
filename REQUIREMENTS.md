@@ -722,14 +722,19 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   attend them). Seats can't be lowered
   below the riders already claimed.
 - **Mentor-only seats (2026-10-30 cleanup, reversing the self-only
-  round):** only mentors/admins assign seats — a mentor picks any
-  attendee for a day from that day's attendee pool. Students and
-  parents have no claim picker and no release action: the Actions
-  cell notes "Riders are assigned by a mentor", and the server
-  403s any non-mentor claim or release (the old `_may_act_for`
-  self-only gate stays in place behind the mentor check, so a
-  future relaxation reuses it). Claims beyond capacity go to the
-  carpool waitlist and auto-promote when a seat is released.
+  round), with a driver exception (2026-10-31):** mentors/admins
+  assign seats anywhere; **a parent driving a car also assigns and
+  releases riders on their own car only** — the driver sees the
+  "Place rider…" picker on their own car's rows (the same RSVP'd
+  attendees-for-that-day pool mentors see) and the ✕ release on its
+  rider pills, while other cars show "Riders are assigned by the
+  driver or a mentor." and no picker. The server gate is
+  mentor/admin OR the car's `driver_user_id` (legacy cars with no
+  driver id stay mentor-only); drivers skip the self-only
+  `_may_act_for` check, and every other rule is unchanged —
+  attendance on that day, capacity/waitlist, one seat per person
+  per day, moves, and waitlist promotion. Non-drivers get a 403
+  ("only a mentor or the car's driver can assign seats").
   Room placement is mentor-only the same way — the server refuses
   every non-mentor place/unplace, including a parent placing their
   own child, which the old self-only gate used to allow. The two

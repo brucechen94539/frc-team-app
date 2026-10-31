@@ -4814,12 +4814,16 @@ def api_carpool_claim(cid):
     u = current_user()
     if not u:
         return err("login required", 401)
-    # Mentor-only assignments: regular users have no claim UI and
-    # cannot claim through the API either.
-    if u["role"] not in ("mentor", "admin"):
-        return err("seat assignments are mentor-only", 403)
-    if not _may_act_for(u, b.get("member_id"), b.get("person_kind"),
-                        b.get("person_name")):
+    # Mentors/admins assign anywhere; a parent driving this car
+    # assigns riders on their own car. Everyone else has no claim
+    # UI and cannot claim through the API either.
+    is_driver = c["driver_user_id"] is not None \
+        and c["driver_user_id"] == u["id"]
+    if u["role"] not in ("mentor", "admin") and not is_driver:
+        return err("only a mentor or the car's driver can assign seats",
+                   403)
+    if not is_driver and not _may_act_for(u, b.get("member_id"),
+                        b.get("person_kind"), b.get("person_name")):
         return err("you can only claim a seat for yourself", 403)
     ev = q_one("SELECT * FROM events WHERE id=?", (c["event_id"],))
     event_days = _event_days(ev) if ev else []
@@ -4930,10 +4934,15 @@ def api_carpool_claim_delete(clid):
     u = current_user()
     if not u:
         return err("login required", 401)
-    if u["role"] not in ("mentor", "admin"):
-        return err("seat assignments are mentor-only", 403)
-    if not _may_act_for(u, cl["member_id"], cl["person_kind"],
-                        cl["person_name"]):
+    car = q_one("SELECT driver_user_id FROM carpools WHERE id=?",
+                (cl["carpool_id"],))
+    is_driver = car and car["driver_user_id"] is not None \
+        and car["driver_user_id"] == u["id"]
+    if u["role"] not in ("mentor", "admin") and not is_driver:
+        return err("only a mentor or the car's driver can assign seats",
+                   403)
+    if not is_driver and not _may_act_for(u, cl["member_id"],
+                        cl["person_kind"], cl["person_name"]):
         return err("you can only release your own seat", 403)
     with _lock:
         db = get_db()

@@ -2481,7 +2481,7 @@ async function renderTravel() {
   // seat here (they hold no seat yet), and the server skips them on
   // promotion if they have since been seated elsewhere.
   const cleanAttName = (p) => p.name.replace(/ \((student|parent)\)$/, "");
-  const claimOptsForDay = (dp, ownRows) => {
+  const claimOptsForDay = (dp, ownRows, car) => {
     const driverNames = new Set(
       dp.t.carpools.map((c) => normName(c.driver_name)));
     // No claimed-elsewhere exclusion: a rider already seated on
@@ -2497,10 +2497,9 @@ async function renderTravel() {
     const attPeople = dedupePeople(dp.t.attendees || [],
       (a) => `${a.person_kind}:${normName(a.person_name)}`).map((a) => ({member_id: a.member_id,
       kind: a.person_kind, name: `${a.person_name} (${a.person_kind})`}));
-    // Non-mentors only ever see their own seat in the picker: a
-    // student themself, a parent themself as a parent rider (the
-    // parent's own rider row carries their linked child's id, so
-    // the parent entry is keyed by it with kind "parent").
+    // Non-mentors only ever see their own seat in the picker — except
+    // a driver on their own car, who sees every attendee like a mentor.
+    const canAssign = MENTOR() || (car && ME && car.driver_user_id === ME.id);
     const ownPeople = new Set();
     if (ME && ME.role === "student")
       (ME.links || []).filter((l) => l.kind === "self").forEach((l) => ownPeople.add(`${l.member_id}:student`));
@@ -2509,7 +2508,7 @@ async function renderTravel() {
     return attPeople.filter((p) => {
       const idKey = `${p.member_id}:${p.kind}`;
       const nameKey = `${normName(cleanAttName(p))}:${p.kind}`;
-      if (!MENTOR() && !ownPeople.has(idKey)) return false;
+      if (!canAssign && !ownPeople.has(idKey)) return false;
       if (p.kind === "parent" && driverNames.has(normName(cleanAttName(p)))) return false;
       if (own.has(idKey) || own.has(nameKey)) return false;
       return true;
@@ -2534,15 +2533,18 @@ async function renderTravel() {
   // plate only as a hover tooltip), departure, return, notes.
   const carRow = (dp, c) => {
     const dayKey = dp.day || "all";
+    // Drivers assign on their own car; everyone else sees the
+    // picker only through a mentor. (Room unplace keeps its own
+    // mentor-only rule via canReleaseSeat — untouched here.)
+    const canAssign = MENTOR() || c.driver_user_id === ME.id;
     const riders = c.claims.map((x) =>
-      `<span class="pill">${esc(x.person_name)}${canReleaseSeat(x) ? ` <a href="#" data-unclaim="${x.id}" title="release">✕</a>` : ""}</span>`).join("")
+      `<span class="pill">${esc(x.person_name)}${canAssign ? ` <a href="#" data-unclaim="${x.id}" title="release">✕</a>` : ""}</span>`).join("")
       || '<span class="sub">none yet</span>';
     const wait = c.waitlist.length ? `<div style="margin-top:4px">Waitlist: ${c.waitlist.map((x) =>
-      `<span class="pill amber">${esc(x.person_name)}${canReleaseSeat(x) ? ` <a href="#" data-unclaim="${x.id}" title="remove">✕</a>` : ""}</span>`).join("")}</div>` : "";
-    const cpsOpts = claimOptsForDay(dp, [...c.claims, ...c.waitlist]);
-    // Mentor-only assignments: regular users see no picker at all.
-    const claimCell = !MENTOR()
-      ? `<span class="sub">Riders are assigned by a mentor.</span>`
+      `<span class="pill amber">${esc(x.person_name)}${canAssign ? ` <a href="#" data-unclaim="${x.id}" title="remove">✕</a>` : ""}</span>`).join("")}</div>` : "";
+    const cpsOpts = claimOptsForDay(dp, [...c.claims, ...c.waitlist], c);
+    const claimCell = !canAssign
+      ? `<span class="sub">Riders are assigned by the driver or a mentor.</span>`
       : (cpsOpts
         ? `<div class="row"><select id="cps-${c.id}-${dayKey}"><option value="">Place rider…</option>${cpsOpts}</select>
           <button class="btn small" data-claim="${c.id}" data-claimday="${dp.day || ""}">Claim seat</button></div>`
