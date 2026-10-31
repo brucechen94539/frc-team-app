@@ -355,7 +355,7 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); closePartReview(); closePcEditModal(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); closePartReview(); closePcEditModal(); closeRqModal(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
@@ -3579,7 +3579,7 @@ function subsystemOptionsHTML(parts) {
 function partRowHTML(p, alt) {
   const cost = p.cost_each == null ? "—" : "$" + Number(p.cost_each).toFixed(2);
   const mentorBtns = MENTOR() ? ` <button class="btn small ghost" data-editpart="${p.id}">Edit</button> <button class="btn small danger" data-delpart="${p.id}">Delete</button>` : "";
-  const reqBtn = ME && ME.role !== "parent" ? `<button class="btn small" data-reqpart="${p.id}">Req. part</button>` : "";
+  const reqBtn = ME && ME.role !== "parent" ? `<button class="btn small" data-reqpart="${p.id}">Request</button>` : "";
   const acts = reqBtn + mentorBtns;
   const altCls = alt ? ' class="alt"' : "";
   return `<tr data-sub="${esc(p.subsystems || "")}"${altCls}>
@@ -3927,18 +3927,9 @@ function bindPartsView(v) {
   });
 
   qa("[data-reqpart]").forEach((b) => b.addEventListener("click", () => {
-    const sel = q("#pf-part");
-    sel.value = b.dataset.reqpart;
-    syncRequestForm();
-    switchPartsTab("requests");
-    reqFormOpen = true;
-    const card = q("#pf-form-card");
-    if (card) {
-      card.classList.remove("collapsed");
-      const g = card.querySelector(".ct-plus");
-      if (g) g.textContent = "－";
-      card.scrollIntoView();
-    }
+    const p = partsData.parts.find((x) => String(x.id) === b.dataset.reqpart);
+    if (!p) return;
+    openRqModal(p);
   }));
 
   qa("[data-reqfilter]").forEach((b) => b.addEventListener("click", () => filterReqRows(b.dataset.reqfilter)));
@@ -4132,6 +4123,48 @@ if (_peSubmit) _peSubmit.addEventListener("click", async () => {
 });
 const _peCancel = $("pe-cancel");
 if (_peCancel) _peCancel.addEventListener("click", closePcEditModal);
+
+let rqPartId = null;
+
+function openRqModal(p) {
+  rqPartId = p.id;
+  const cost = p.cost_each == null ? "no recorded cost" : "$" + Number(p.cost_each).toFixed(2) + " each";
+  const link = p.order_link ? ` — <a href="${esc(p.order_link)}" target="_blank" rel="noopener">Order link ↗</a>` : "";
+  const skuPart = p.sku ? " (" + esc(p.sku) + ")" : "";
+  const line = $("rq-part-line");
+  if (line) line.innerHTML = "From the catalog: " + esc(p.name) + skuPart + " · " + cost + link;
+  const set = (id, v2) => { const el = $(id); if (el) el.value = v2; };
+  set("rq-qty", 1); set("rq-method", "Order"); set("rq-comp", "");
+  set("rq-deliver", ME ? ME.name : ""); set("rq-est", ""); set("rq-notes", "");
+  const m = $("rq-modal");
+  if (m) m.classList.add("open");
+}
+
+function closeRqModal() {
+  const m = $("rq-modal");
+  if (m) m.classList.remove("open");
+  rqPartId = null;
+}
+
+const _rqModal = $("rq-modal");
+if (_rqModal) _rqModal.addEventListener("click", (e) => { if (e.target === _rqModal) closeRqModal(); });
+const _rqSubmit = $("rq-submit");
+if (_rqSubmit) _rqSubmit.addEventListener("click", async () => {
+  if (!rqPartId) return;
+  const body = {
+    part_id: rqPartId,
+    qty: parseInt($("rq-qty").value || "1", 10),
+    method: $("rq-method").value,
+    major_component: $("rq-comp").value.trim(),
+    deliver_to: $("rq-deliver").value.trim(),
+    est_delivery: $("rq-est").value.trim(),
+    notes: $("rq-notes").value.trim(),
+  };
+  try { await POST("/api/part-requests", body); closeRqModal(); toast("Request filed — pending mentor approval."); renderParts(); }
+  catch (e) { toast("Error: " + e.message); }
+});
+const _rqCancel = $("rq-cancel");
+if (_rqCancel) _rqCancel.addEventListener("click", closeRqModal);
 
 const _prPartSel = $("pr-part");
 if (_prPartSel) _prPartSel.addEventListener("change", () => {

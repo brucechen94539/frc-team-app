@@ -944,13 +944,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   duplicate vendor + SKU 409s — link the existing part instead.
   The catalog is visible to everyone; adding, editing, and deleting
   are mentor-only, and a part referenced by any request cannot be
-  deleted. **Buy again** is the catalog row's "Req. part" button,
-  which prefills a new request from history. Catalog rows
+  deleted. **Buy again** is the catalog row's "Request" button,
+  which opens a request overlay for that part. Catalog rows
   alternate a subtle shade (re-striped after filtering); part
   names are semibold with SKU, vendor, and subsystems muted and
-  costs/on-hand in tabular figures; the row actions (Req. part /
+  costs/on-hand in tabular figures; the row actions (Request /
   Edit / Delete) are compact (11px labels, tight padding, about
-  two-thirds of their previous height). Edit opens a modal
+  two-thirds of their previous height, labels never wrap). Edit opens a modal
   overlay over the list (same fields as the add form; Save,
   Cancel, backdrop-click, and Escape all close it) so editing
   never scrolls away from the row — this supersedes the
@@ -963,7 +963,7 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   is always the signed-in account (never a client-supplied name).
   Students and mentors file requests; parents cannot file at all
   (the server 403s a parent filing, and parents see no request
-  form or "Req. part" buttons) — parents read the catalog,
+  form or "Request" buttons) — parents read the catalog,
   requests, batches, and planning only. Only mentors change
   requests or touch ordering.
 - **Approval flow (settled 2026-10-30):** a student picks from the
@@ -1011,14 +1011,16 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   (standalone, with the add/edit form and CSV import/export),
   Requests (the filing form plus the work queue), Batches (the
   new-batch form plus batch cards), and Planning (the stats).
-  The active tab survives re-renders, and "Req. part" jumps
-  to the Requests tab with the part preselected. The active tab
+  The active tab survives re-renders; the catalog's "Request"
+  button opens a request overlay over the list (fixed part, qty,
+  method, component, deliver-to, est. delivery, notes; File
+  request, Cancel, backdrop-click, and Escape close it) instead
+  of switching tabs. The active tab
   also survives a page refresh (stored in the browser), so
   refreshing Parts returns to the last tab visited, not Catalog.
   The "Request a part" filing form is an action card: collapsed
   by default until expanded (same create-zone pattern as the
-  Queue forms); "Req. part" expands it, and filing a request
-  collapses it again.
+  Queue forms); filing a request from it collapses it again.
 - **CSV round-trip:** mentors export the catalog (Name, SKU,
   Vendor, Order Link, Cost Each, Subsystems, On Hand, Notes) and
   import it back: upsert by vendor + SKU (or vendor + name without

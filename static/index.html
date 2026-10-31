@@ -75,6 +75,22 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         </div>
       </div>
     </div>
+    <div id="rq-modal" class="modal-backdrop">
+      <div class="modal-card" style="max-height:90vh;overflow:auto">
+        <p style="font-size:17px;font-weight:700;margin:0 0 14px">Request a part</p>
+        <p class="sub" id="rq-part-line"></p>
+        <div class="row"><div class="field"><label>Qty</label><input id="rq-qty" type="number" min="1" value="1"></div>
+        <div class="field"><label>Method</label><select id="rq-method"><option>Order</option><option>3d print</option><option>CNC</option></select></div></div>
+        <div class="row"><div class="field"><label>Major component</label><input id="rq-comp" type="text" placeholder="e.g. Shooter"></div>
+        <div class="field"><label>Deliver to</label><input id="rq-deliver" type="text"></div></div>
+        <div class="row"><div class="field"><label>Est. delivery</label><input id="rq-est" type="date"></div>
+        <div class="field"><label>Notes</label><input id="rq-notes" type="text"></div></div>
+        <div class="menu-foot">
+          <button class="btn" id="rq-submit">File request</button>
+          <button class="btn ghost" id="rq-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
     <div id="part-review-modal" class="modal-backdrop">
       <div class="modal-card">
         <p style="font-size:17px;font-weight:700;margin:0 0 14px" id="part-review-title">Review request</p>
