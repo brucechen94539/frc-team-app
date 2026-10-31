@@ -1012,7 +1012,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   import it back: upsert by vendor + SKU (or vendor + name without
   a SKU), never deletes, and only columns present in the file
   overwrite on update — so the team's Order B sheet imports as the
-  starting catalog. Students cannot import.
+  starting catalog. Students cannot import. The repo keeps the
+  reference copies at the root: the raw Order B export as
+  `order-b.csv` and the converted import file as
+  `parts-catalog.csv` (156 entries: 30 sheet rows skipped as blank,
+  section, audit-note, or CAD-reference rows; 3 duplicate-SKU rows
+  dropped, first kept; On Hand = Other bought qty + Included in
+  kits, the sheet's credited quantities).
 - **What is deliberately not v1:** no auto-checkout (mentors still
   order on vendor sites — no payment integration), no CAD BOM
   importer (FRCBOM already does it; its CSV can feed the catalog

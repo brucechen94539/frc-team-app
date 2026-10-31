@@ -6091,6 +6091,7 @@ def _part_vendor_from_link(link):
         "vexrobotics.com": "VEX",
         "swyftrobotics.com": "Swyft",
         "thriftybot.com": "ThriftyBot",
+    "thethriftybot.com": "ThriftyBot",
         "ctr-electronics.com": "CTR",
         "swervedrivespecialties.com": "SDS",
         "digikey.com": "DigiKey",
