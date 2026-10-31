@@ -346,6 +346,21 @@ and `can't make it` do not count as attending.
   across filter/search re-renders. Export CSV, Import CSV, and Archive
   season stay visible outside the event create zone, and non-mentors
   never see the zones (they are mentor-only blocks).
+- **Creation lives in Mentor Queue (2026-10-30):** both create zones
+  moved from the Events page to Mentor Queue — creating is a mentor
+  tool, so it sits with the other mentor tools. The Events page keeps
+  only display (announcements list, filters, calendar, event cards);
+  its header says mentors create events from Mentor Queue. Duplicate
+  on an event card hands the copy to Queue's create form (prefilled,
+  dates blank, zone open). Export CSV, Import CSV, and Archive season
+  stay on the Events page.
+- **Events page is one consolidated card (2026-10-30):** the old three
+  top cards (header, type filters, calendar) merged into a single
+  card holding the title, description, Export/Import/Archive row,
+  filter row, and the calendar (in Calendar mode). The global
+  "Expand all" / "Collapse all" buttons are gone — each event card's
+  own "Expand list (N)" is the way to open a list, and lists stay
+  collapsed by default to save space.
 - The Events view has a **List / Calendar** toggle: the calendar is a
   month grid (Sunday-first, prev/next/Today) over the filtered events,
   and clicking a title jumps to that event's card below. Every event card
@@ -530,19 +545,34 @@ and `can't make it` do not count as attending.
   remove anyone else's. Deleting a going/partial RSVP promotes the first
   waitlisted person.
 - **Long RSVP lists:** each event's RSVP list starts collapsed behind an
-  "Expand list (N)" button, and the Events module has "Expand all" /
-  "Collapse all" buttons. Expanded state survives re-renders within the
+  "Expand list (N)" button — the default (and only) way to open a
+  list; the old global "Expand all" / "Collapse all" buttons were
+  removed 2026-10-30. Expanded state survives re-renders within the
   session.
+- **RSVP confirm popup (2026-10-30):** clicking any RSVP button
+  (Going / Maybe / Partial / Can't make it) opens a confirm popup —
+  "Confirmed with \<answer\>?" with YES / NO — before anything is
+  filed. YES files it, NO changes nothing. It fires on first filings
+  and on later updates alike, so a mistap never lands a wrong RSVP.
 - Event pickers in the UI are **bubbles** (chips), not dropdowns: the picked
   event is highlighted and the sections below update to that event.
 
 ## Announcements
 
-- Mentors/admins post **announcements** (title + message) from a card at
-  the top of the Events page — the view everyone lands on. All logged-in
-  users read them, newest first, with the posting mentor's name and date;
-  mentors can delete them. Posting and deleting are mentor/admin-only on
-  the server (`GET|POST /api/announcements`, `DELETE /api/announcements/<id>`).
+- Mentors/admins post **announcements** (title + message) from Mentor
+  Queue (the form moved there 2026-10-30). All logged-in users read
+  them on the Events page, newest first, with the posting mentor's
+  name and date; mentors can delete them. Posting and deleting are
+  mentor/admin-only on the server (`GET|POST /api/announcements`,
+  `DELETE /api/announcements/<id>`).
+- **Announcements display is a shaded strip:** the announcements card
+  at the top of the Events page carries a tinted background — lighter
+  in dark theme, darker in light theme — so it reads as its own block
+  apart from the event cards.
+- **At most 3 announcements at a time (2026-10-30):** the server
+  rejects a 4th (`at most 3 announcements at a time — delete one
+  first`); the Queue form shows the count ("2 of 3 announcements")
+  and disables Post at the cap. Delete one to post another.
 
 ## Attendance tracking
 

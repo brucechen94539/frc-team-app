@@ -84,6 +84,9 @@ let eventCalMode = false, eventCalCursor = "";
 // Create-zone open state survives re-renders (filter/search keystrokes
 // rebuild the view); creation itself resets them to collapsed.
 let evCreateOpen = false, anCreateOpen = false;
+// Duplicate from Events hands the copied event to Queue's create
+// form (the form lives here now, not in Events).
+let pendingDupev = null;
 let openRsvpLists = new Set();  // event ids whose RSVP list is expanded
 let toolsListCollapsed = false;  // Tool sign-up list in Travel, across renders
 let trackEventId = null, travelEventId = null;
@@ -276,6 +279,24 @@ function closeQrModal() {
   const m = $("qr-modal");
   if (m) m.classList.remove("open");
 }
+/* RSVP confirm: every RSVP button click — first filing or a later
+   update — asks "Confirmed with <answer>?" with YES/NO, so a
+   mistap never lands an RSVP by accident. YES runs the original
+   RSVP action; NO changes nothing. */
+let pendingRsvpBtn = null;
+const RSVP_LABELS = {going: "Going", maybe: "Maybe", partial: "Partial (multi-day)", cant: "Can't make it"};
+function openRsvpConfirm(b) {
+  pendingRsvpBtn = b;
+  const t = $("rsvp-confirm-text");
+  if (t) t.textContent = `Confirmed with ${RSVP_LABELS[b.dataset.want] || b.dataset.want}?`;
+  const m = $("rsvp-modal");
+  if (m) m.classList.add("open");
+}
+function closeRsvpModal() {
+  pendingRsvpBtn = null;
+  const m = $("rsvp-modal");
+  if (m) m.classList.remove("open");
+}
 /* Team-account resets: per-row modals (password form, 2FA confirm). */
 let pwUid = null, pwName = "", faUid = null, faName = "", delUid = null, delName = "";
 function openPwModal(uid, name) {
@@ -334,7 +355,7 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closePwModal(); close2faModal(); closeDelModal(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
@@ -345,6 +366,12 @@ const _qrModal = $("qr-modal");
 if (_qrModal) _qrModal.addEventListener("click", (e) => { if (e.target === _qrModal) closeQrModal(); });
 const _qrClose = $("qr-close");
 if (_qrClose) _qrClose.addEventListener("click", closeQrModal);
+const _rsvpModal = $("rsvp-modal");
+if (_rsvpModal) _rsvpModal.addEventListener("click", (e) => { if (e.target === _rsvpModal) closeRsvpModal(); });
+const _rsvpYes = $("rsvp-yes");
+if (_rsvpYes) _rsvpYes.addEventListener("click", () => { const b = pendingRsvpBtn; closeRsvpModal(); if (b) rsvpAction(b); });
+const _rsvpNo = $("rsvp-no");
+if (_rsvpNo) _rsvpNo.addEventListener("click", closeRsvpModal);
 const _pwModal = $("pw-modal");
 if (_pwModal) _pwModal.addEventListener("click", (e) => { if (e.target === _pwModal) closePwModal(); });
 const _pwCancel = $("pw-cancel");
@@ -930,6 +957,7 @@ async function renderQueue() {
   const counts = {};
   for (const s of ["pending", "approved", "waitlisted", "declined", "archived"])
     counts[s] = (await GET(`/api/members?status=${s}`)).length;
+  const anCount = (await GET("/api/announcements").catch(() => [])).length;
   v.innerHTML = `
   <div class="card"><h2>Mentor Queue</h2>
   <p class="sub">Review applications. Approving adds the student to the roster (and RSVPs).</p>
@@ -982,13 +1010,117 @@ async function renderQueue() {
   <div class="card"><h3>Duplicate cleanup</h3>
     <p class="sub">Remove + re-create cycles leave two approved rows or two accounts for one person, and the lists show the name twice. Pick the row to keep per group: merging re-points RSVPs, seats, rooms, check-ins and links to it, then deletes the other rows (the survivor's own record fields are kept; rows that would collide after re-pointing are dropped and counted). A duplicate account whose driving collides with the survivor's is skipped with a reason.</p>
     <div id="dup-list"><span class="sub">Loading…</span></div>
+  </div>
+  <div class="card mo"><h3>Post announcement</h3>
+    <p class="sub">Shown to everyone on the Events page. At most 3 announcements at a time.</p>
+    <div class="create-zone ${anCreateOpen ? "" : "collapsed"}" id="an-create-zone">
+      <button class="create-toggle" type="button" data-zone="an"><span class="ct-plus">${anCreateOpen ? "－" : "＋"}</span> Post announcement</button>
+      <div class="create-body">
+        <div class="field"><label>Title</label><input id="an-title"></div>
+        <div class="field"><label>Message</label><textarea id="an-body"></textarea></div>
+        <button class="btn small" id="an-post"${anCount >= 3 ? " disabled" : ""}>Post announcement</button>
+      </div>
+    </div>
+    <p class="sub">${anCount >= 3 ? "3 of 3 announcements — delete one to post another." : `${anCount} of 3 announcements.`}</p>
+  </div>
+  <div class="card mo"><h3>Create event</h3>
+    <div class="create-zone ${evCreateOpen ? "" : "collapsed"}" id="ev-create-zone">
+      <button class="create-toggle" type="button" data-zone="ev"><span class="ct-plus">${evCreateOpen ? "－" : "＋"}</span> Create event <span class="sub">Meeting, build, competition, outreach, or club</span></button>
+      <div class="create-body">
+        <div class="grid3">
+          <div class="field"><label>Title *</label><input id="e-title" value="${pendingDupev ? esc(pendingDupev.title) : ""}"></div>
+          <div class="field"><label>Type</label><select id="e-type">
+            ${["meeting", "build", "competition", "outreach", "club"].map((t) => `<option value="${t}"${pendingDupev && pendingDupev.type === t ? " selected" : ""}>${t[0].toUpperCase() + t.slice(1)}</option>`).join("")}</select></div>
+          <div class="field"><label>Date</label><input id="e-date" type="date"></div>
+          <div class="field"><label><input id="e-multi" type="checkbox"> Multiple days</label><span class="hint">check for multi-day trips</span></div>
+          <div class="field" id="e-end-wrap" style="display:none"><label>End date</label><input id="e-end" type="date"></div>
+          <div class="field"><label>Time</label><input id="e-time" placeholder="6:00 PM" value="${pendingDupev ? esc(pendingDupev.time || "") : ""}"></div>
+          <div class="field"><label>Location</label><input id="e-loc" value="${pendingDupev ? esc(pendingDupev.location || "") : ""}"></div>
+          <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label>
+            <input id="e-cap" inputmode="numeric" value="${pendingDupev && pendingDupev.capacity !== null && pendingDupev.capacity !== undefined ? pendingDupev.capacity : ""}"></div>
+          <div class="field"><label>RSVP deadline</label><input id="e-dead" type="date"></div>
+          <div class="field"><label>Repeat weekly <span class="hint">(weeks, 1 = once, max 12)</span></label>
+            <input id="e-repeat" inputmode="numeric" value="1"></div>
+        </div>
+        <div class="row" style="gap:16px;flex-wrap:wrap"><span class="sub">Travel &amp; Logistics shows only what the event needs:</span>
+          <label><input id="e-need-hotel" type="checkbox" checked> Hotel rooms needed</label>
+          <label><input id="e-need-rides" type="checkbox" checked> Carpool rides needed</label>
+          <label><input id="e-need-tools" type="checkbox" checked> Tools / robots needed</label></div>
+        <div class="field"><label>Notes</label><textarea id="e-notes">${pendingDupev ? esc(pendingDupev.notes || "") : ""}</textarea></div>
+        <div class="row"><button class="btn" id="e-create">Create event</button>
+          <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button>
+          <button class="btn ghost" id="e-workshop" type="button">Use workshop address</button></div>
+        <p class="sub hidden" id="e-clubnote">Club meets Mondays 4:00–5:05 PM and is only for BASIS Independent Fremont students.</p>
+      </div>
+    </div>
   </div>`;
+  if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
   v.querySelectorAll("[data-f]").forEach((b) =>
     b.addEventListener("click", () => { queueFilter = b.dataset.f; renderQueue(); }));
   // Team accounts is collapsed by default; the toggle survives
   // re-renders via the module flag, like the create zones.
   const _act = $("ac-toggle");
   if (_act) _act.addEventListener("click", () => { teamAcctsOpen = !teamAcctsOpen; renderQueue(); });
+  // Creation forms live in Queue now (moved from Events): the
+  // toggle button is the title row — clicking it expands or
+  // collapses the form, and the open state survives re-renders.
+  v.querySelectorAll(".create-toggle").forEach((b) =>
+    b.addEventListener("click", () => {
+      const zone = b.closest(".create-zone");
+      const open = !zone.classList.toggle("collapsed");
+      if (b.dataset.zone === "ev") evCreateOpen = open; else anCreateOpen = open;
+      b.querySelector(".ct-plus").textContent = open ? "－" : "＋";
+    }));
+  const anPost = $("an-post");
+  if (anPost) anPost.addEventListener("click", async () => {
+    const title = $("an-title").value.trim();
+    if (!title) { toast("Title is required."); return; }
+    try {
+      await POST("/api/announcements", {title, body: $("an-body").value.trim()});
+      $("an-title").value = ""; $("an-body").value = "";
+      toast("Announcement posted.");
+      anCreateOpen = false;
+      renderQueue();
+    } catch (err) { toast("Error: " + err.message); }
+  });
+  const _ec = $("e-create"); if (_ec) _ec.addEventListener("click", createEvent);
+  const _ef = $("e-fill"); if (_ef) _ef.addEventListener("click", () => {
+    $("e-title").value = "Build Session — Intake Prototype"; $("e-type").value = "build";
+    $("e-date").value = "2026-11-02"; $("e-time").value = "10:00 AM";
+    $("e-loc").value = "4285 Santa Monica Terrace, Fremont, CA 94539"; $("e-cap").value = "12";
+  });
+  const _ew = $("e-workshop"); if (_ew) _ew.addEventListener("click", () => {
+    $("e-loc").value = "4285 Santa Monica Terrace, Fremont, CA 94539";
+  });
+  // Multi-day toggle: the end date only shows (and only counts)
+  // when the event spans more than one day.
+  const _em = $("e-multi"); if (_em) _em.addEventListener("change", () => {
+    $("e-end-wrap").style.display = _em.checked ? "" : "none";
+    if (!_em.checked) $("e-end").value = "";
+  });
+  // Club defaults: Mondays 4:00 PM, only when the mentor hasn't typed
+  // anything yet; the note reminds them of the BIF-only rule.
+  const _et = $("e-type"); if (_et) _et.addEventListener("change", () => {
+    const note = $("e-clubnote");
+    const isClub = _et.value === "club";
+    if (note) note.classList.toggle("hidden", !isClub);
+    if (!isClub) return;
+    if (!$("e-time").value) $("e-time").value = "4:00 PM";
+    if (!$("e-date").value) {
+      const d = new Date();
+      d.setDate(d.getDate() + ((8 - d.getDay()) % 7));
+      const pad = (n) => String(n).padStart(2, "0");
+      $("e-date").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+    }
+  });
+  // A duplicate handed over from Events: the form rendered prefilled
+  // above (and open); scroll to it, then clear so later re-renders
+  // don't re-prefill.
+  if (pendingDupev) {
+    const z = $("ev-create-zone");
+    if (z) z.scrollIntoView();
+    pendingDupev = null;
+  }
   $("q-clear").addEventListener("click", async () => {
     if (!confirm("Delete all sample entries?")) return;
     const r = await DEL("/api/members/sample");
@@ -1653,7 +1785,7 @@ function eventCalendarHtml(list, myRsvps) {
       ${evs.slice(0, 3).map((e) => `<a href="#ev-card-${e.id}" class="cal-ev">${esc(e.title)}</a>`).join("")}
       ${evs.length > 3 ? `<span class="sub">+${evs.length - 3} more</span>` : ""}</div>`);
   }
-  return `<div class="card"><div class="row">
+  return `<div class="row" style="margin-top:14px">
     <button class="btn small ghost" data-calnav="-1">‹ Prev</button>
     <b style="flex:1;text-align:center">${label}</b>
     <button class="btn small ghost" data-calnav="0">Today</button>
@@ -1684,65 +1816,26 @@ async function renderEvents() {
   for (const e of list) cards.push(await eventCard(e));
   const types = ["meeting", "build", "competition", "outreach", "club"];
   v.innerHTML = `
-  <div class="card"><h2>Announcements</h2>
+  <div class="card an-card"><h2>Announcements</h2>
     <div id="an-list"><span class="sub">Loading…</span></div>
-    <div class="mo create-zone ${anCreateOpen ? "" : "collapsed"}" id="an-create-zone">
-      <button class="create-toggle" type="button" data-zone="an"><span class="ct-plus">${anCreateOpen ? "－" : "＋"}</span> Post announcement <span class="sub">Shown to everyone on this page</span></button>
-      <div class="create-body">
-        <div class="field"><label>Title</label><input id="an-title"></div>
-        <div class="field"><label>Message</label><textarea id="an-body"></textarea></div>
-        <button class="btn small" id="an-post">Post announcement</button>
-      </div>
-    </div>
   </div>
   <div class="card"><h2>Events &amp; RSVPs</h2>
-  <p class="sub">Mentors create events. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote.</p>
-  <div class="mo create-zone ${evCreateOpen ? "" : "collapsed"}" id="ev-create-zone">
-    <button class="create-toggle" type="button" data-zone="ev"><span class="ct-plus">${evCreateOpen ? "－" : "＋"}</span> Create event <span class="sub">Meeting, build, competition, outreach, or club</span></button>
-    <div class="create-body">
-      <div class="grid3 mo">
-        <div class="field"><label>Title *</label><input id="e-title"></div>
-        <div class="field"><label>Type</label><select id="e-type">
-          ${types.map((t) => `<option value="${t}">${t[0].toUpperCase() + t.slice(1)}</option>`).join("")}</select></div>
-        <div class="field"><label>Date</label><input id="e-date" type="date"></div>
-        <div class="field"><label><input id="e-multi" type="checkbox"> Multiple days</label><span class="hint">check for multi-day trips</span></div>
-        <div class="field" id="e-end-wrap" style="display:none"><label>End date</label><input id="e-end" type="date"></div>
-        <div class="field"><label>Time</label><input id="e-time" placeholder="6:00 PM"></div>
-        <div class="field"><label>Location</label><input id="e-loc"></div>
-        <div class="field"><label>Capacity <span class="hint">(blank = unlimited)</span></label>
-          <input id="e-cap" inputmode="numeric"></div>
-        <div class="field"><label>RSVP deadline</label><input id="e-dead" type="date"></div>
-        <div class="field"><label>Repeat weekly <span class="hint">(weeks, 1 = once, max 12)</span></label>
-          <input id="e-repeat" inputmode="numeric" value="1"></div>
-      </div>
-      <div class="row mo" style="gap:16px;flex-wrap:wrap"><span class="sub">Travel &amp; Logistics shows only what the event needs:</span>
-        <label><input id="e-need-hotel" type="checkbox" checked> Hotel rooms needed</label>
-        <label><input id="e-need-rides" type="checkbox" checked> Carpool rides needed</label>
-        <label><input id="e-need-tools" type="checkbox" checked> Tools / robots needed</label></div>
-      <div class="field mo"><label>Notes</label><textarea id="e-notes"></textarea></div>
-      <div class="row mo"><button class="btn" id="e-create">Create event</button>
-        <button class="btn ghost" id="e-fill" type="button">Fill with an example event</button>
-        <button class="btn ghost" id="e-workshop" type="button">Use workshop address</button></div>
-      <p class="sub mo hidden" id="e-clubnote">Club meets Mondays 4:00–5:05 PM and is only for BASIS Independent Fremont students.</p>
-    </div>
-  </div>
+  <p class="sub">Mentors create events from Mentor Queue. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote.</p>
   <div class="row mo">
     <a class="btn ghost small" href="/api/events.csv">Export CSV</a>
     <button class="btn ghost small" id="e-import">Import CSV</button>
     <button class="btn ghost small" id="e-archive">Archive season…</button>
   </div>
   <div id="e-import-panel" class="mo hidden"></div>
-  </div>
-  <div class="card"><div class="row">
+  <div class="row" style="margin-top:14px">
     ${["all", ...types].map((t) =>
       `<button class="btn ${eventFilter === t ? "" : "ghost"} small" data-et="${t}">${t}</button>`).join("")}
     <input id="e-q" placeholder="Search…" value="${esc(eventSearch)}" style="max-width:200px">
-    <button class="btn small ghost" id="ev-expand-all">Expand all</button>
-    <button class="btn small ghost" id="ev-collapse-all">Collapse all</button>
     <button class="btn small ${eventCalMode ? "ghost" : ""}" id="ev-list-view">List</button>
     <button class="btn small ${eventCalMode ? "" : "ghost"}" id="ev-cal-view">Calendar</button>
-  </div></div>
+  </div>
   ${eventCalMode ? eventCalendarHtml(list, await GET("/api/my-rsvps").catch(() => [])) : ""}
+  </div>
   <div id="ev-list">${cards.join("")}</div>
   <div class="card"><button class="btn small ghost" id="ev-arch-toggle">Show archived seasons</button>
   <div id="ev-arch" class="hidden" style="margin-top:10px"></div></div>`;
@@ -1767,30 +1860,6 @@ async function renderEvents() {
       renderEvents();
     }));
   renderAnnouncements();
-  // Create zones: the toggle button is the title row — clicking it
-  // expands or collapses the form, and the open state survives the
-  // re-renders that filtering and searching cause.
-  v.querySelectorAll(".create-toggle").forEach((b) =>
-    b.addEventListener("click", () => {
-      const zone = b.closest(".create-zone");
-      const open = !zone.classList.toggle("collapsed");
-      if (b.dataset.zone === "ev") evCreateOpen = open; else anCreateOpen = open;
-      b.querySelector(".ct-plus").textContent = open ? "－" : "＋";
-    }));
-  const anPost = $("an-post");
-  if (anPost) anPost.addEventListener("click", async () => {
-    const title = $("an-title").value.trim();
-    if (!title) { toast("Title is required."); return; }
-    try {
-      await POST("/api/announcements", {title, body: $("an-body").value.trim()});
-      $("an-title").value = ""; $("an-body").value = "";
-      toast("Announcement posted."); renderAnnouncements();
-      // Back to the collapsed form (this view does not re-render).
-      anCreateOpen = false;
-      const z = $("an-create-zone");
-      if (z) { z.classList.add("collapsed"); z.querySelector(".ct-plus").textContent = "＋"; }
-    } catch (err) { toast("Error: " + err.message); }
-  });
   const eImp = $("e-import");
   if (eImp) eImp.addEventListener("click", () => $("e-import-panel").classList.toggle("hidden"));
   bindCsvImport($("e-import-panel"), "events");
@@ -1835,36 +1904,6 @@ async function renderEvents() {
     } catch (err) { box.innerHTML = `<p class="sub">Could not load archive: ${esc(err.message)}</p>`; }
   });
   if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
-  const _ec = $("e-create"); if (_ec) _ec.addEventListener("click", createEvent);
-  const _ef = $("e-fill"); if (_ef) _ef.addEventListener("click", () => {
-    $("e-title").value = "Build Session — Intake Prototype"; $("e-type").value = "build";
-    $("e-date").value = "2026-11-02"; $("e-time").value = "10:00 AM";
-    $("e-loc").value = "4285 Santa Monica Terrace, Fremont, CA 94539"; $("e-cap").value = "12";
-  });
-  const _ew = $("e-workshop"); if (_ew) _ew.addEventListener("click", () => {
-    $("e-loc").value = "4285 Santa Monica Terrace, Fremont, CA 94539";
-  });
-  // Multi-day toggle: the end date only shows (and only counts)
-  // when the event spans more than one day.
-  const _em = $("e-multi"); if (_em) _em.addEventListener("change", () => {
-    $("e-end-wrap").style.display = _em.checked ? "" : "none";
-    if (!_em.checked) $("e-end").value = "";
-  });
-  // Club defaults: Mondays 4:00 PM, only when the mentor hasn't typed
-  // anything yet; the note reminds them of the BIF-only rule.
-  const _et = $("e-type"); if (_et) _et.addEventListener("change", () => {
-    const note = $("e-clubnote");
-    const isClub = _et.value === "club";
-    if (note) note.classList.toggle("hidden", !isClub);
-    if (!isClub) return;
-    if (!$("e-time").value) $("e-time").value = "4:00 PM";
-    if (!$("e-date").value) {
-      const d = new Date();
-      d.setDate(d.getDate() + ((8 - d.getDay()) % 7));
-      const pad = (n) => String(n).padStart(2, "0");
-      $("e-date").value = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-    }
-  });
   const setRsvpList = (id, open) => {
     const el = $("rl-" + id);
     if (!el) return;
@@ -1876,16 +1915,8 @@ async function renderEvents() {
   v.querySelectorAll("[data-expand]").forEach((b) =>
     b.addEventListener("click", () => setRsvpList(parseInt(b.dataset.expand, 10),
       $("rl-" + b.dataset.expand).classList.contains("hidden"))));
-  const ea = $("ev-expand-all");
-  if (ea) ea.addEventListener("click", () =>
-    v.querySelectorAll("[data-expand]").forEach((b) =>
-      setRsvpList(parseInt(b.dataset.expand, 10), true)));
-  const ca = $("ev-collapse-all");
-  if (ca) ca.addEventListener("click", () =>
-    v.querySelectorAll("[data-expand]").forEach((b) =>
-      setRsvpList(parseInt(b.dataset.expand, 10), false)));
   v.querySelectorAll("[data-rsvp]").forEach((b) =>
-    b.addEventListener("click", () => rsvpAction(b)));
+    b.addEventListener("click", () => openRsvpConfirm(b)));
   // Partial-day gating: on a multi-day card, Going / Maybe / Can't
   // make it only make sense with every day picked. While any day is
   // unchecked, only Partial (multi-day) stays enabled, so a partial
@@ -1944,18 +1975,12 @@ async function renderEvents() {
     b.addEventListener("click", () => {
       const e = list.find((x) => x.id === parseInt(b.dataset.dupev, 10));
       if (!e) return;
-      $("e-title").value = e.title;
-      $("e-type").value = e.type;
-      $("e-time").value = e.time || "";
-      $("e-loc").value = e.location || "";
-      $("e-cap").value = e.capacity === null || e.capacity === undefined ? "" : e.capacity;
-      $("e-notes").value = e.notes || "";
-      $("e-date").value = "";
-      $("e-end").value = "";
-      if ($("e-multi")) { $("e-multi").checked = false; $("e-end-wrap").style.display = "none"; }
-      $("e-dead").value = "";
-      $("e-title").scrollIntoView();
+      // The create form lives in Queue now: hand the copy over and
+      // open it there (dates cleared — pick a new date and save).
+      pendingDupev = e;
+      evCreateOpen = true;
       toast("Copied — pick a new date and save.");
+      showView("queue");
     }));
   v.querySelectorAll("[data-editev]").forEach((b) =>
     b.addEventListener("click", () =>
@@ -2026,7 +2051,7 @@ async function createEvent() {
     }
     toast(weeks > 1 && base.date ? `Created ${weeks} weekly events.` : "Event created.");
     evCreateOpen = false;  // back to the collapsed form
-    renderEvents();
+    if (currentView === "queue") renderQueue(); else renderEvents();
   } catch (e) { toast("Error: " + e.message); }
 }
 

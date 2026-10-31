@@ -2902,6 +2902,8 @@ def api_announcements():
     b = request.get_json(force=True, silent=True) or {}
     if not (b.get("title") or "").strip():
         return err("title is required")
+    if q_one("SELECT COUNT(*) AS c FROM announcements")["c"] >= 3:
+        return err("at most 3 announcements at a time — delete one first")
     u = current_user()
     aid = execute("INSERT INTO announcements (title, body, author)"
                   " VALUES (?,?,?)",

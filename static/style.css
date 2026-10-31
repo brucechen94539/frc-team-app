@@ -445,3 +445,10 @@ input[type="radio"]:disabled{opacity:.45;cursor:default}
 .lday-even td{background:color-mix(in srgb, var(--card) 75%, white)}
 [data-theme="light"] .lday-odd td{background:color-mix(in srgb, var(--card) 50%, black)}
 [data-theme="light"] .lday-even td{background:color-mix(in srgb, var(--card) 75%, black)}
+
+/* Announcements card: shaded away from the other cards so the
+   announcements block reads as its own strip — lighter in dark
+   theme, darker in light theme (same 25% shift as the even-day
+   logistics bands). */
+.an-card{background:color-mix(in srgb, var(--card) 75%, white)}
+[data-theme="light"] .an-card{background:color-mix(in srgb, var(--card) 75%, black)}
