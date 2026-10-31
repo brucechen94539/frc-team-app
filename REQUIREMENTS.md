@@ -515,11 +515,18 @@ and `can't make it` do not count as attending.
   PDT evenings. The deadline freezes RSVPs only: carpools, rooms,
   tools, check-ins, and Archive all keep working after it passes —
   logistics is exactly what happens after RSVPs close.
-- **Closed events leave the regular user's Events view:** once an
-  event's RSVP is closed, its card is hidden from students and parents
-  entirely; mentors/admins keep seeing it. Travel & Logistics and
-  Tracking are unaffected — a trip whose RSVP closed still needs its
-  rides, rooms, and attendance visible.
+- **Closed events stay visible to everyone (2026-10-30):** once an
+  event's RSVP is closed, its card stays in every user's Events list
+  — it never disappears for students and parents (this reverses the
+  old rule that hid closed cards from regular users). What the
+  deadline freezes is changes only: the card shows the "RSVP closed"
+  pill, the picker and buttons disabled/grayed with the "RSVPs are
+  frozen" note, and the Remove buttons disabled, while headcounts
+  and the RSVP list stay readable. Mentors/admins additionally see
+  the Archive button on closed cards. Travel & Logistics and
+  Tracking are unaffected, as before. Note "closed" is judged by
+  the RSVP deadline, not the event date — an event dated in the
+  past with a future deadline is still open.
 - **Archive (freeze) for closed events:** a closed event's card carries
   an **Archive** button for mentors/admins. Archiving sets
   `events.archived` and freezes the event: every event-scoped write is

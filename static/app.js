@@ -1804,13 +1804,14 @@ async function renderEvents() {
   const events = await GET("/api/events");
   const list = events.filter((e) => {
     const q = eventSearch.toLowerCase();
+    // NOTE: closed events stay visible to everyone (2026-10-30).
+    // A past deadline freezes the RSVP controls (disabled picker
+    // and buttons, "RSVPs are frozen" note, disabled Remove) but
+    // the card itself never leaves the list — regular users still
+    // see the event, its headcounts, and its RSVP list. Mentors
+    // additionally get the Archive button on closed cards.
     return (eventFilter === "all" || e.type === eventFilter) &&
-      (!q || (e.title + e.location).toLowerCase().includes(q)) &&
-      // Closed cards leave the regular user's view entirely; mentors
-      // and admins keep them (with the Archive button). Travel and
-      // Tracking are unaffected — a trip whose RSVP closed still
-      // needs its rides and rooms.
-      (MENTOR() || !eventClosed(e));
+      (!q || (e.title + e.location).toLowerCase().includes(q));
   });
   const cards = [];
   for (const e of list) cards.push(await eventCard(e));
