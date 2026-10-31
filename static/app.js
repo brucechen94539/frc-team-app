@@ -3612,6 +3612,7 @@ function reqRowHTML(r) {
       else acts += `<button class="btn small ghost" data-statusact="${r.id}:received">Mark received</button> `;
     }
     if (r.status === "assigned") {
+      acts += `<button class="btn small ghost" data-statusact="${r.id}:approved">Unassign</button> `;
       if (r.method === "Order") acts += `<button class="btn small ghost" data-statusact="${r.id}:ordered">Mark ordered</button> `;
       else acts += `<button class="btn small ghost" data-statusact="${r.id}:received">Mark received</button> `;
     }

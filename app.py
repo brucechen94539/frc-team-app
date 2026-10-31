@@ -6197,6 +6197,8 @@ def _req_status_ok(cur, new):
             return method != "Order"
         return False
     if old == "assigned":
+        if new == "approved":
+            return True
         if new == "ordered":
             return method == "Order"
         if new == "received":

@@ -982,10 +982,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   a catalog part linked; a 3d print / CNC request cannot move
   without its spec. After approval, status moves approved →
   assigned → ordered (Order only) → received, or approved →
-  assigned → received (print/CNC); a print/CNC request may also
-  go approved → received directly. Pending leaves only via review
-  and denied/received are terminal. Deleting is allowed only for
-  pending, approved, or denied requests — fulfilled history stays.
+  assigned → received (print/CNC); either may skip assigned and
+  go straight from approved to ordered/received. Assigned can
+  return to approved via Unassign (mentor-only, Responsible
+  untouched), which also restores delete eligibility. Pending
+  leaves only via review and denied/received are terminal.
+  Deleting is allowed only for pending, approved, or denied
+  requests — fulfilled history stays.
 - **Order batches (one vendor per batch):** a mentor creates a
   batch by picking its vendor from a dropdown of vendors on
   approved or assigned, unbatched Order requests (sorted; the
