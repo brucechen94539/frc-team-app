@@ -355,7 +355,7 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); closePartReview(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); closePartReview(); closePcEditModal(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
@@ -3576,19 +3576,20 @@ function subsystemOptionsHTML(parts) {
   return out;
 }
 
-function partRowHTML(p) {
+function partRowHTML(p, alt) {
   const cost = p.cost_each == null ? "—" : "$" + Number(p.cost_each).toFixed(2);
   const mentorBtns = MENTOR() ? ` <button class="btn small ghost" data-editpart="${p.id}">Edit</button> <button class="btn small danger" data-delpart="${p.id}">Delete</button>` : "";
   const reqBtn = ME && ME.role !== "parent" ? `<button class="btn small" data-reqpart="${p.id}">Req. part</button>` : "";
   const acts = reqBtn + mentorBtns;
-  return `<tr data-sub="${esc(p.subsystems || "")}">
-    <td>${esc(p.name)}${partLinkHTML(p)}</td>
-    <td>${esc(p.sku || "—")}</td>
-    <td>${esc(p.vendor || "—")}</td>
-    <td>${cost}</td>
-    <td>${p.on_hand || 0}</td>
-    <td>${esc(p.subsystems || "—")}</td>
-    <td>${p.request_count || 0}</td>
+  const altCls = alt ? ' class="alt"' : "";
+  return `<tr data-sub="${esc(p.subsystems || "")}"${altCls}>
+    <td class="pc-name">${esc(p.name)}${partLinkHTML(p)}</td>
+    <td class="pc-dim">${esc(p.sku || "—")}</td>
+    <td class="pc-dim">${esc(p.vendor || "—")}</td>
+    <td class="pc-num">${cost}</td>
+    <td class="pc-num">${p.on_hand || 0}</td>
+    <td class="pc-dim">${esc(p.subsystems || "—")}</td>
+    <td class="pc-num">${p.request_count || 0}</td>
     <td>${acts || "—"}</td>
   </tr>`;
 }
@@ -3734,7 +3735,7 @@ async function renderParts() {
     return;
   }
   partsData = { parts, reqs, batches };
-  const catalogRows = parts.map(partRowHTML).join("");
+  const catalogRows = parts.map((p, i) => partRowHTML(p, i % 2 === 1)).join("");
   const reqRows = reqs.map(reqRowHTML).join("");
   const batchCards = batches.map(batchCardHTML).join("");
   const batchVendors = [...new Set(reqs.filter((r) => r.method === "Order" && (r.status === "approved" || r.status === "assigned") && !r.batch_id && r.part && r.part.vendor).map((r) => r.part.vendor))].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
@@ -3832,6 +3833,11 @@ function filterCatalog() {
     const okQ = !q || row.textContent.toLowerCase().includes(q);
     const okS = !sub || (row.dataset.sub || "").includes(sub);
     row.style.display = okQ && okS ? "" : "none";
+  });
+  let vi = 0;
+  v.querySelectorAll("#pc-table tr").forEach((row) => {
+    if (!("sub" in row.dataset)) return;
+    if (row.style.display !== "none") { row.classList.toggle("alt", vi % 2 === 1); vi++; }
   });
 }
 
@@ -3947,14 +3953,7 @@ function bindPartsView(v) {
   qa("[data-editpart]").forEach((b) => b.addEventListener("click", () => {
     const p = partsData.parts.find((x) => String(x.id) === b.dataset.editpart);
     if (!p) return;
-    editingPartId = p.id;
-    const set = (s, v2) => { const el = q(s); if (el) el.value = v2; };
-    set("#pc-name", p.name); set("#pc-sku", p.sku || ""); set("#pc-vendor", p.vendor || "");
-    set("#pc-link", p.order_link || ""); set("#pc-cost", p.cost_each == null ? "" : p.cost_each);
-    set("#pc-subsystems", p.subsystems || ""); set("#pc-onhand", p.on_hand || 0); set("#pc-notes", p.notes || "");
-    const t = q("#pc-form-title"); if (t) { t.textContent = "Edit catalog part"; t.scrollIntoView(); }
-    const sb = q("#pc-part-submit"); if (sb) sb.textContent = "Save changes";
-    const cb = q("#pc-cancel-edit"); if (cb) cb.classList.remove("hidden");
+    openPcEditModal(p);
   }));
   const cancelEdit = q("#pc-cancel-edit");
   if (cancelEdit) cancelEdit.addEventListener("click", resetPartForm);
@@ -3967,8 +3966,7 @@ function bindPartsView(v) {
     };
     if (!body.name) { toast("Part name is required."); return; }
     try {
-      if (editingPartId) { await PATCH("/api/parts/" + editingPartId, body); toast("Part updated."); }
-      else { await POST("/api/parts", body); toast("Part added to the catalog."); }
+      await POST("/api/parts", body); toast("Part added to the catalog.");
       resetPartForm();
       renderParts();
     } catch (e) { toast("Error: " + e.message); }
@@ -4101,6 +4099,39 @@ function closePartReview() {
   const m = $("part-review-modal");
   if (m) m.classList.remove("open");
 }
+
+function openPcEditModal(p) {
+  editingPartId = p.id;
+  const set = (id, v2) => { const el = $(id); if (el) el.value = v2; };
+  set("pe-name", p.name); set("pe-sku", p.sku || ""); set("pe-vendor", p.vendor || "");
+  set("pe-link", p.order_link || ""); set("pe-cost", p.cost_each == null ? "" : p.cost_each);
+  set("pe-subsystems", p.subsystems || ""); set("pe-onhand", p.on_hand || 0); set("pe-notes", p.notes || "");
+  const m = $("pc-edit-modal");
+  if (m) m.classList.add("open");
+}
+
+function closePcEditModal() {
+  const m = $("pc-edit-modal");
+  if (m) m.classList.remove("open");
+  editingPartId = null;
+}
+
+const _pcEditModal = $("pc-edit-modal");
+if (_pcEditModal) _pcEditModal.addEventListener("click", (e) => { if (e.target === _pcEditModal) closePcEditModal(); });
+const _peSubmit = $("pe-submit");
+if (_peSubmit) _peSubmit.addEventListener("click", async () => {
+  if (!editingPartId) return;
+  const body = {
+    name: $("pe-name").value.trim(), sku: $("pe-sku").value.trim(), vendor: $("pe-vendor").value.trim(),
+    order_link: $("pe-link").value.trim(), cost_each: $("pe-cost").value.trim(),
+    subsystems: $("pe-subsystems").value.trim(), on_hand: $("pe-onhand").value.trim(), notes: $("pe-notes").value.trim(),
+  };
+  if (!body.name) { toast("Part name is required."); return; }
+  try { await PATCH("/api/parts/" + editingPartId, body); closePcEditModal(); toast("Part updated."); renderParts(); }
+  catch (e) { toast("Error: " + e.message); }
+});
+const _peCancel = $("pe-cancel");
+if (_peCancel) _peCancel.addEventListener("click", closePcEditModal);
 
 const _prPartSel = $("pr-part");
 if (_prPartSel) _prPartSel.addEventListener("change", () => {

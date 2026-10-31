@@ -945,7 +945,16 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   The catalog is visible to everyone; adding, editing, and deleting
   are mentor-only, and a part referenced by any request cannot be
   deleted. **Buy again** is the catalog row's "Req. part" button,
-  which prefills a new request from history.
+  which prefills a new request from history. Catalog rows
+  alternate a subtle shade (re-striped after filtering); part
+  names are semibold with SKU, vendor, and subsystems muted and
+  costs/on-hand in tabular figures; the row actions (Req. part /
+  Edit / Delete) are compact (11px labels, tight padding, about
+  two-thirds of their previous height). Edit opens a modal
+  overlay over the list (same fields as the add form; Save,
+  Cancel, backdrop-click, and Escape all close it) so editing
+  never scrolls away from the row — this supersedes the
+  2026-10-31 scroll-into-view fix for the same complaint.
 - **Requests (Tide Parts mirror):** a request keeps the requester's
   own words — informal part name, spec (STL file or vendor URL),
   qty, method (Order / 3d print / CNC), major component, requester,

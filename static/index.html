@@ -58,6 +58,23 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         </div>
       </div>
     </div>
+    <div id="pc-edit-modal" class="modal-backdrop">
+      <div class="modal-card" style="max-height:90vh;overflow:auto">
+        <p style="font-size:17px;font-weight:700;margin:0 0 14px">Edit catalog part</p>
+        <div class="field"><label>Part name</label><input id="pe-name" type="text"></div>
+        <div class="field"><label>SKU / part number</label><input id="pe-sku" type="text"></div>
+        <div class="field"><label>Vendor</label><input id="pe-vendor" type="text" placeholder="Blank = derived from the link"></div>
+        <div class="field"><label>Order link</label><input id="pe-link" type="text"></div>
+        <div class="field"><label>Cost each</label><input id="pe-cost" type="number" min="0" step="0.01"></div>
+        <div class="field"><label>On hand</label><input id="pe-onhand" type="number" min="0" step="1"></div>
+        <div class="field"><label>Subsystems</label><input id="pe-subsystems" type="text" placeholder="e.g. Turret / Drivebase"></div>
+        <div class="field"><label>Notes</label><input id="pe-notes" type="text"></div>
+        <div class="menu-foot">
+          <button class="btn" id="pe-submit">Save changes</button>
+          <button class="btn ghost" id="pe-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
     <div id="part-review-modal" class="modal-backdrop">
       <div class="modal-card">
         <p style="font-size:17px;font-weight:700;margin:0 0 14px" id="part-review-title">Review request</p>

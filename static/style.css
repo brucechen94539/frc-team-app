@@ -203,6 +203,13 @@ th{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mute
   background:var(--panel)}
 tbody tr{transition:background .1s ease}
 tbody tr:hover{background:var(--hover)}
+#pc-table td:last-child .btn{font-size:11px;line-height:1.2;padding:4px 8px;margin:2px}
+#pc-table tr.alt td{background:color-mix(in srgb, var(--card) 90%, white)}
+[data-theme="light"] #pc-table tr.alt td{background:color-mix(in srgb, var(--card) 90%, black)}
+#pc-table tbody tr:hover td{background:var(--hover)}
+#pc-table td.pc-name{font-weight:600}
+#pc-table td.pc-dim{color:var(--muted)}
+#pc-table td.pc-num{font-variant-numeric:tabular-nums}
 
 /* ---------- feedback ---------- */
 .toast{
