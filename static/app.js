@@ -3579,7 +3579,7 @@ function subsystemOptionsHTML(parts) {
 function partRowHTML(p) {
   const cost = p.cost_each == null ? "—" : "$" + Number(p.cost_each).toFixed(2);
   const mentorBtns = MENTOR() ? ` <button class="btn small ghost" data-editpart="${p.id}">Edit</button> <button class="btn small danger" data-delpart="${p.id}">Delete</button>` : "";
-  const reqBtn = ME && ME.role !== "parent" ? `<button class="btn small" data-reqpart="${p.id}">Request this</button>` : "";
+  const reqBtn = ME && ME.role !== "parent" ? `<button class="btn small" data-reqpart="${p.id}">Req. part</button>` : "";
   const acts = reqBtn + mentorBtns;
   return `<tr data-sub="${esc(p.subsystems || "")}">
     <td>${esc(p.name)}${partLinkHTML(p)}</td>
@@ -3946,7 +3946,7 @@ function bindPartsView(v) {
     set("#pc-name", p.name); set("#pc-sku", p.sku || ""); set("#pc-vendor", p.vendor || "");
     set("#pc-link", p.order_link || ""); set("#pc-cost", p.cost_each == null ? "" : p.cost_each);
     set("#pc-subsystems", p.subsystems || ""); set("#pc-onhand", p.on_hand || 0); set("#pc-notes", p.notes || "");
-    const t = q("#pc-form-title"); if (t) t.textContent = "Edit catalog part";
+    const t = q("#pc-form-title"); if (t) { t.textContent = "Edit catalog part"; t.scrollIntoView(); }
     const sb = q("#pc-part-submit"); if (sb) sb.textContent = "Save changes";
     const cb = q("#pc-cancel-edit"); if (cb) cb.classList.remove("hidden");
   }));

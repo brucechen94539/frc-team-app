@@ -944,7 +944,7 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   duplicate vendor + SKU 409s — link the existing part instead.
   The catalog is visible to everyone; adding, editing, and deleting
   are mentor-only, and a part referenced by any request cannot be
-  deleted. **Buy again** is the catalog row's "Request this" button,
+  deleted. **Buy again** is the catalog row's "Req. part" button,
   which prefills a new request from history.
 - **Requests (Tide Parts mirror):** a request keeps the requester's
   own words — informal part name, spec (STL file or vendor URL),
@@ -954,7 +954,7 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   is always the signed-in account (never a client-supplied name).
   Students and mentors file requests; parents cannot file at all
   (the server 403s a parent filing, and parents see no request
-  form or "Request this" buttons) — parents read the catalog,
+  form or "Req. part" buttons) — parents read the catalog,
   requests, batches, and planning only. Only mentors change
   requests or touch ordering.
 - **Approval flow (settled 2026-10-30):** a student picks from the
@@ -999,13 +999,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   (standalone, with the add/edit form and CSV import/export),
   Requests (the filing form plus the work queue), Batches (the
   new-batch form plus batch cards), and Planning (the stats).
-  The active tab survives re-renders, and "Request this" jumps
+  The active tab survives re-renders, and "Req. part" jumps
   to the Requests tab with the part preselected. The active tab
   also survives a page refresh (stored in the browser), so
   refreshing Parts returns to the last tab visited, not Catalog.
   The "Request a part" filing form is an action card: collapsed
   by default until expanded (same create-zone pattern as the
-  Queue forms); "Request this" expands it, and filing a request
+  Queue forms); "Req. part" expands it, and filing a request
   collapses it again.
 - **CSV round-trip:** mentors export the catalog (Name, SKU,
   Vendor, Order Link, Cost Each, Subsystems, On Hand, Notes) and

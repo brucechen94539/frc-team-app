@@ -9,6 +9,23 @@ _None right now._
 
 ## Fixed
 
+### Catalog Edit button appeared dead on a long catalog (2026-10-31, commit PENDING)
+
+**Reported** (Bruce): the Edit button for a catalog item is not
+working. **Root cause:** not a dead handler — clicking Edit did
+fill the form, but the form card sits *below* the catalog table,
+and the handler never scrolled to it (unlike "Req. part", which
+scrolls to the request form). On a long catalog the filled form
+was far off-screen, so the click looked like nothing happened.
+Reproduced with 157 parts at a phone viewport: bottom-row Edit
+filled the form while the viewport stayed at the bottom of the
+page. **Fix:** the Edit handler now scrolls the form title into
+view after filling it. Verified with the same 157-row phone
+reproduction (form lands at the viewport top) plus an edit-save
+round-trip. Note: an earlier 31-row desktop reproduction did *not*
+show the symptom — the table has to be long enough (and the
+viewport small enough) for the form to leave the screen.
+
 ### Dropdowns showed a squiggly zigzag fill (2026-10-30, commit c0229209)
 
 **Reported** (Bruce, with screenshots): the Role dropdown in Team
