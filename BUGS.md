@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### Catalog import lost cost and subsystems (2026-10-31, commit PENDING)
+### Catalog import lost cost and subsystems (2026-10-31, commit 9a8d345a)
 
 **Reported** (Bruce): cost each and subsystems were not imported.
 **Root cause:** the raw Order B export had been imported instead
