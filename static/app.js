@@ -3756,6 +3756,7 @@ async function renderParts() {
     <div class="field"><label>Subsystem</label><select id="pc-sub">${subsystemOptionsHTML(parts)}</select></div></div>
     <table id="pc-table"><tr><th>Part</th><th>SKU</th><th>Vendor</th><th>Cost each</th><th>On hand</th><th>Subsystems</th><th>Requests</th><th></th></tr>${catalogRows}</table>
     ${emptyCatalogNote}
+    <div id="pc-jump" class="jump-btns"><button class="btn" id="pc-jump-top" title="Back to top" aria-label="Back to top">↑</button><button class="btn" id="pc-jump-bottom" title="To bottom" aria-label="To bottom">↓</button></div>
   </div>
   <div class="card mo"><h3 id="pc-form-title">Add a catalog part</h3>
     <div class="row"><div class="field"><label>Part name</label><input id="pc-name" type="text"></div>
@@ -3931,6 +3932,11 @@ function bindPartsView(v) {
     if (!p) return;
     openRqModal(p);
   }));
+
+  const jumpTop = q("#pc-jump-top");
+  if (jumpTop) jumpTop.addEventListener("click", () => window.scrollTo(0, 0));
+  const jumpBottom = q("#pc-jump-bottom");
+  if (jumpBottom) jumpBottom.addEventListener("click", () => window.scrollTo(0, document.body.scrollHeight));
 
   qa("[data-reqfilter]").forEach((b) => b.addEventListener("click", () => filterReqRows(b.dataset.reqfilter)));
 

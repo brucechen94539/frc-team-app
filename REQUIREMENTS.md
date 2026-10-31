@@ -954,7 +954,10 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   overlay over the list (same fields as the add form; Save,
   Cancel, backdrop-click, and Escape all close it) so editing
   never scrolls away from the row — this supersedes the
-  2026-10-31 scroll-into-view fix for the same complaint.
+  2026-10-31 scroll-into-view fix for the same complaint. Long
+  catalogs get floating ↑ / ↓ jump buttons (bottom-right, Catalog
+  tab only, below modals and toasts) for instant jumps to the top
+  and bottom of the list.
 - **Requests (Tide Parts mirror):** a request keeps the requester's
   own words — informal part name, spec (STL file or vendor URL),
   qty, method (Order / 3d print / CNC), major component, requester,
