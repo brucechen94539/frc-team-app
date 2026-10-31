@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### Catalog Edit button appeared dead on a long catalog (2026-10-31, commit PENDING)
+### Catalog Edit button appeared dead on a long catalog (2026-10-31, commit dbae344b)
 
 **Reported** (Bruce): the Edit button for a catalog item is not
 working. **Root cause:** not a dead handler — clicking Edit did
