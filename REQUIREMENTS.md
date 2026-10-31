@@ -830,9 +830,22 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   one entry per day, not repeated per row — it spans all of that
   day's rows (rowspan) and appears only on the day's first row.
   Each day's rows share one band shade so the day reads as a
-  group: odd days lean further from the card base than even days
-  (dark theme: 50% lighter on odd days, 25% lighter on even days;
-  light theme: 50% darker on odd days, 25% darker on even days).
+  group: odd days lean further from the card base than even days.
+  Toned down 2026-10-30 (the original 50% / 25% read as heavy gray
+  blocks): dark theme 25% lighter on odd days, 12% lighter on even
+  days; light theme 25% darker on odd days, 12% darker on even days.
+- **Visual theme — blue, not indigo (2026-10-30):** the accent moved
+  from indigo/purple to a blue hue — dark theme #3B82F6 / #2563EB
+  (hover #60A5FA, text #93C5FD), light theme #2563EB / #1D4ED8 —
+  across buttons, section bars, stat numbers, focus rings, the page
+  wash, and the bolt favicon, and the calendar legend now says
+  "Blue date". No orange anywhere: pending/waitlist pills went from
+  amber to steel gray (the pill class name is still `amber`), Partial
+  RSVPs went from a purple pill to a steel pill, and Delete buttons
+  and "RSVP closed" pills went from bright red to a cooler rose
+  (#E11D48). Task-board assignee chips lost their indigo, lavender,
+  and amber pastels for blue / slate / teal ones. Green (going /
+  assigned) is unchanged.
 - **Event "needs" flags (2026-10-30):** creating an event offers
   three checked-by-default checkboxes — Hotel rooms needed,
   Carpool rides needed, Tools / robots needed — stored as

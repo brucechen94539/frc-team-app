@@ -1795,7 +1795,7 @@ function eventCalendarHtml(list, myRsvps) {
     ${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => `<div class="cal-head">${d}</div>`).join("")}
     ${cells.join("")}
   </div>
-  ${anyMark ? `<p class="sub" style="margin-top:8px"><span style="color:var(--accent-text)">●</span> Indigo date = you or your student RSVP'd going / partial for an event that day.</p>` : ""}</div>`;
+  ${anyMark ? `<p class="sub" style="margin-top:8px"><span style="color:var(--accent-text)">●</span> Blue date = you or your student RSVP'd going / partial for an event that day.</p>` : ""}</div>`;
 }
 
 async function renderEvents() {
@@ -2109,7 +2109,7 @@ async function eventCard(e, ro = false) {
   const scope = selfScope();
   const row = (r) => {
     const pill = r.status === "going" ? "green" : r.status === "waitlisted" ? "amber"
-      : r.status === "maybe" ? "blue" : r.status === "partial" ? "purple" : "gray";
+      : r.status === "maybe" ? "blue" : r.status === "partial" ? "steel" : "gray";
     // List labels read as attendance, not raw codes: going = full
     // trip, can't make it = rejected from the trip.
     const label = r.status === "going" ? "full" : r.status === "cant" ? "rejected" : r.status;
@@ -2270,7 +2270,7 @@ async function renderTracking() {
 let tasksOnlyMine = false, tasksAssignee = "", tasksSubteam = "", tasksPeriod = "all",
   tasksShowArchived = false;
 const chipColor = (name) => {
-  const palette = ["#e0e7ff", "#dcefe3", "#dde8fb", "#f3e4f7", "#fdf3c4", "#e0f2f1"];
+  const palette = ["#dbeafe", "#dcefe3", "#dde8fb", "#e0f2fe", "#f1f5f9", "#e0f2f1"];
   let h = 0;
   for (const ch of String(name)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
   return palette[h % palette.length];
