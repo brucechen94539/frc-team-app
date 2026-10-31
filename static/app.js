@@ -2100,7 +2100,7 @@ async function eventCard(e, ro = false) {
       <select id="rp-${e.id}"${closed ? " disabled" : ""}>${opts}</select>
       <button class="btn small" data-rsvp="${e.id}" data-want="going"${closed ? " disabled" : ""}>RSVP Going</button>
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="maybe"${closed ? " disabled" : ""}>Maybe</button>
-      <button class="btn small ghost" data-rsvp="${e.id}" data-want="partial"${closed ? " disabled" : ""}>Partial (multi-day)</button>
+      ${eventDays(e).length > 1 ? `<button class="btn small ghost" data-rsvp="${e.id}" data-want="partial"${closed ? " disabled" : ""}>Partial (multi-day)</button>` : ""}
       <button class="btn small ghost" data-rsvp="${e.id}" data-want="cant"${closed ? " disabled" : ""}>Can't make it</button>
     </div>${eventDays(e).length > 1 ? `<div class="row" style="margin-top:6px"><span class="sub">Partial days:</span>
       ${eventDays(e).map((ds) => `<label class="sub" style="margin-right:8px"><input type="checkbox" class="rp-day" data-day="${ds}" checked${closed ? " disabled" : ""}> ${dayLabel(ds)}</label>`).join("")}
@@ -2131,7 +2131,7 @@ async function eventCard(e, ro = false) {
       ${archived ? '<span class="pill amber">Archived</span>' : closed ? '<span class="pill red">RSVP closed</span>' : ""}
       <span style="flex:1"></span>
       ${ro ? "" : `<a class="btn small ghost" href="/api/events/${e.id}.ics">Add to calendar</a>
-      ${MENTOR() ? `<button class="btn small ghost" data-qr="${e.id}">Check-in QR</button><button class="btn small ghost" data-dupev="${e.id}">Duplicate</button>${archived ? "" : `<button class="btn small ghost" data-editev="${e.id}">Edit</button><button class="btn small danger" data-delev="${e.id}">Delete</button>`}${archived ? `<button class="btn small ghost" data-unarchev="${e.id}">Unarchive</button>` : closed ? `<button class="btn small ghost" data-archev="${e.id}">Archive</button>` : ""}` : ""}`}</div>
+      ${MENTOR() ? `<button class="btn small ghost" data-dupev="${e.id}">Duplicate</button>${archived ? "" : `<button class="btn small ghost" data-editev="${e.id}">Edit</button><button class="btn small danger" data-delev="${e.id}">Delete</button>`}${archived ? `<button class="btn small ghost" data-unarchev="${e.id}">Unarchive</button>` : closed ? `<button class="btn small ghost" data-archev="${e.id}">Archive</button>` : ""}` : ""}`}</div>
     <div class="sub">${esc(eventDateLabel(e) || "")} ${esc(e.time || "")} · ${esc(e.location || "")}
       ${e.capacity ? `· ${hc.going}/${e.capacity} going` : `· ${hc.going} going`}
       · ${hc.maybe} maybe · ${hc.partial} partial

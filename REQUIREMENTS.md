@@ -439,7 +439,11 @@ and `can't make it` do not count as attending.
   **Partial (multi-day)** stays enabled — Going / Maybe / Can't
   make it are disabled until every day is checked again — so a
   partial day pick can never land as a full 'going' on the
-  logistics board. The per-event RSVP list reads as attendance,
+  logistics board. **Partial (multi-day) only shows on multi-day
+  events** (2026-10-30): a single-day event's picker offers Going /
+  Maybe / Can't make it only — the button is gated on the same
+  `eventDays > 1` test as the day checkboxes, UI-only (the server
+  still accepts a partial filing, as with the needs-flag hiding). The per-event RSVP list reads as attendance,
   not raw codes: going shows **full**, maybe shows **maybe**,
   partial shows **partial**, and can't make it shows **rejected**
   (waitlisted unchanged). Event capacity is checked **per day**:
@@ -587,13 +591,18 @@ and `can't make it` do not count as attending.
   self check-in. A self check-in is unverified until a mentor confirms it.
 - The app tracks hours per student; a dashboard summarizes attendance
   and hours.
-- **Check-in QR:** each event card (mentors) has a Check-in QR button
-  showing a QR code for that event (`GET /api/events/<id>/checkin-qr`,
-  mentor/admin-only). Scanning it opens the app and jumps straight to
-  Tracking with that event selected — the link survives the login flow,
-  so a logged-out scan lands on Tracking after signing in, and the hash
-  is consumed so later reloads use the sticky place instead. Phones must
-  reach the server (same network as the self-hosted Mac) and be logged in.
+- **Check-in QR (buttons removed 2026-10-30, feature kept):** the
+  Check-in QR buttons are gone from every event card — nothing in
+  the UI offers a QR code anymore. The feature itself stays intact
+  for future use: `GET /api/events/<id>/checkin-qr` (mentor/admin-only)
+  still returns the QR SVG + URL, the `#qr-modal` markup and its
+  click handler stay in place, the `#checkin-<id>` hash route still
+  jumps straight to Tracking with that event selected (the link
+  survives the login flow, so a logged-out scan lands on Tracking
+  after signing in, and the hash is consumed so later reloads use
+  the sticky place instead), and the `qrcode` library stays in
+  requirements. Phones must reach the server (same network as the
+  self-hosted Mac) and be logged in.
 - **Hours export:** mentors can download a per-student hours summary
   (`GET /api/hours.csv`, mentor/admin-only) for award submissions and
   service-hour verification: one row per approved roster member with
