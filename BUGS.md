@@ -9,7 +9,7 @@ _None right now._
 
 ## Fixed
 
-### Dropdowns showed a squiggly zigzag fill (2026-10-30, commit TBD)
+### Dropdowns showed a squiggly zigzag fill (2026-10-30, commit c0229209)
 
 **Reported** (Bruce, with screenshots): the Role dropdown in Team
 accounts and the Driver dropdown in Post a ride showed a squiggly
