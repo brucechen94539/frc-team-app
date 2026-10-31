@@ -3523,10 +3523,13 @@ let partsData = { parts: [], reqs: [], batches: [] };
 let editingPartId = null;
 let reviewReqId = null;
 let reviewMode = "review";
-let partsTab = "catalog"; // active Parts sub-tab; survives re-renders
+const PART_TABS = ["catalog", "requests", "batches", "planning"];
+let partsTab = PART_TABS.includes(localStorage.getItem("frc-parts-tab")) ? localStorage.getItem("frc-parts-tab") : "catalog"; // active Parts sub-tab; survives re-renders AND refreshes
+let reqFormOpen = false; // "Request a part" action card; collapsed until expanded
 
 function switchPartsTab(name) {
   partsTab = name;
+  localStorage.setItem("frc-parts-tab", name);
   const v = $("view-parts");
   if (!v) return;
   v.querySelectorAll("[data-ptab]").forEach((b) => {
@@ -3534,7 +3537,7 @@ function switchPartsTab(name) {
     b.classList.toggle("btn", true);
     b.classList.toggle("ghost", !on);
   });
-  ["catalog", "requests", "batches", "planning"].forEach((t) => {
+  PART_TABS.forEach((t) => {
     const panel = v.querySelector("#pp-" + t);
     if (panel) panel.classList.toggle("hidden", t !== name);
   });
@@ -3763,7 +3766,7 @@ async function renderParts() {
   </div>
   </div>
   <div id="pp-requests" class="hidden">
-  <div id="pf-form-wrap"><div class="card" id="pf-form-card"><h3>Request a part</h3>
+  <div id="pf-form-wrap"><div class="card create-zone ${reqFormOpen ? "" : "collapsed"}" id="pf-form-card"><button class="create-toggle" type="button" id="pf-form-toggle"><span class="ct-plus">${reqFormOpen ? "－" : "＋"}</span> Request a part</button><div class="create-body">
     <div class="field"><label>Catalog part</label><select id="pf-part">${partOptionsHTML(parts, null, false)}</select></div>
     <div id="pf-picked" class="hidden"><p class="sub" id="pf-picked-line"></p></div>
     <div id="pf-free">
@@ -3778,6 +3781,7 @@ async function renderParts() {
     <div class="field"><label>Notes</label><input id="pf-notes" type="text"></div></div>
     <button class="btn" id="pf-submit">File request</button>
     <p class="sub">Picking from the catalog files the request against that part. Not in the catalog? Describe it above and a mentor records it before approval.</p>
+    </div>
   </div>
   </div>
   <div class="card"><h3>Requests</h3>
@@ -3895,19 +3899,34 @@ function bindPartsView(v) {
     try {
       await POST("/api/part-requests", body);
       toast("Request filed — pending mentor approval.");
+      reqFormOpen = false;
       renderParts();
     } catch (e) { toast("Error: " + e.message); }
   });
 
   qa("[data-ptab]").forEach((b) => b.addEventListener("click", () => switchPartsTab(b.dataset.ptab)));
 
+  const pfToggle = q("#pf-form-toggle");
+  if (pfToggle) pfToggle.addEventListener("click", () => {
+    const zone = pfToggle.closest(".create-zone");
+    const open = !zone.classList.toggle("collapsed");
+    reqFormOpen = open;
+    pfToggle.querySelector(".ct-plus").textContent = open ? "－" : "＋";
+  });
+
   qa("[data-reqpart]").forEach((b) => b.addEventListener("click", () => {
     const sel = q("#pf-part");
     sel.value = b.dataset.reqpart;
     syncRequestForm();
     switchPartsTab("requests");
+    reqFormOpen = true;
     const card = q("#pf-form-card");
-    if (card) card.scrollIntoView();
+    if (card) {
+      card.classList.remove("collapsed");
+      const g = card.querySelector(".ct-plus");
+      if (g) g.textContent = "－";
+      card.scrollIntoView();
+    }
   }));
 
   qa("[data-reqfilter]").forEach((b) => b.addEventListener("click", () => filterReqRows(b.dataset.reqfilter)));
