@@ -6272,6 +6272,10 @@ def api_part_requests():
         return jsonify([_req_public(r) for r in q_all(
             "SELECT * FROM part_requests ORDER BY id DESC")])
     u = current_user()
+    # Parents never request parts: they can read the catalog, requests,
+    # batches, and planning, but filing is students + mentors only.
+    if u["role"] == "parent":
+        return err("only students and mentors can request parts", 403)
     b = request.get_json(force=True)
     part = None
     if b.get("part_id"):

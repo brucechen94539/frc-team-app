@@ -952,7 +952,11 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   responsible fulfiller, deliver-to, est. delivery, notes — plus,
   once a mentor links it, a catalog part reference. The requester
   is always the signed-in account (never a client-supplied name).
-  Students and parents file requests; only mentors change them.
+  Students and mentors file requests; parents cannot file at all
+  (the server 403s a parent filing, and parents see no request
+  form or "Request this" buttons) — parents read the catalog,
+  requests, batches, and planning only. Only mentors change
+  requests or touch ordering.
 - **Approval flow (settled 2026-10-30):** a student picks from the
   catalog, or files free-text when the part isn't there, and the
   request lands pending mentor approval. A mentor reviews it in
@@ -990,6 +994,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   ordered work awaiting receipt; committed spend by subsystem
   (catalog cost × qty over approved-and-later requests, unpriced
   requests excluded and counted) and batch totals by vendor.
+- **Tabbed page:** the Parts page is four tabs, not one card
+  stack, so each list can grow independently — Catalog
+  (standalone, with the add/edit form and CSV import/export),
+  Requests (the filing form plus the work queue), Batches (the
+  new-batch form plus batch cards), and Planning (the stats).
+  The active tab survives re-renders, and "Request this" jumps
+  to the Requests tab with the part preselected.
 - **CSV round-trip:** mentors export the catalog (Name, SKU,
   Vendor, Order Link, Cost Each, Subsystems, On Hand, Notes) and
   import it back: upsert by vendor + SKU (or vendor + name without

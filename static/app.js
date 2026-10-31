@@ -3523,6 +3523,22 @@ let partsData = { parts: [], reqs: [], batches: [] };
 let editingPartId = null;
 let reviewReqId = null;
 let reviewMode = "review";
+let partsTab = "catalog"; // active Parts sub-tab; survives re-renders
+
+function switchPartsTab(name) {
+  partsTab = name;
+  const v = $("view-parts");
+  if (!v) return;
+  v.querySelectorAll("[data-ptab]").forEach((b) => {
+    const on = b.dataset.ptab === name;
+    b.classList.toggle("btn", true);
+    b.classList.toggle("ghost", !on);
+  });
+  ["catalog", "requests", "batches", "planning"].forEach((t) => {
+    const panel = v.querySelector("#pp-" + t);
+    if (panel) panel.classList.toggle("hidden", t !== name);
+  });
+}
 
 const PART_PILL = (s) => s === "received" ? "green" : s === "denied" ? "red" : s === "pending" ? "steel" : "blue";
 const BATCH_PILL = (s) => s === "received" ? "green" : s === "ordered" ? "blue" : "steel";
@@ -3560,6 +3576,8 @@ function subsystemOptionsHTML(parts) {
 function partRowHTML(p) {
   const cost = p.cost_each == null ? "—" : "$" + Number(p.cost_each).toFixed(2);
   const mentorBtns = MENTOR() ? ` <button class="btn small ghost" data-editpart="${p.id}">Edit</button> <button class="btn small danger" data-delpart="${p.id}">Delete</button>` : "";
+  const reqBtn = ME && ME.role !== "parent" ? `<button class="btn small" data-reqpart="${p.id}">Request this</button>` : "";
+  const acts = reqBtn + mentorBtns;
   return `<tr data-sub="${esc(p.subsystems || "")}">
     <td>${esc(p.name)}${partLinkHTML(p)}</td>
     <td>${esc(p.sku || "—")}</td>
@@ -3568,7 +3586,7 @@ function partRowHTML(p) {
     <td>${p.on_hand || 0}</td>
     <td>${esc(p.subsystems || "—")}</td>
     <td>${p.request_count || 0}</td>
-    <td><button class="btn small" data-reqpart="${p.id}">Request this</button>${mentorBtns}</td>
+    <td>${acts || "—"}</td>
   </tr>`;
 }
 
@@ -3716,7 +3734,13 @@ async function renderParts() {
   const emptyBatchNote = batches.length ? "" : `<p class="sub">No batches yet — mentors create one per vendor from approved requests.</p>`;
   v.innerHTML = `<h2>Parts &amp; Purchasing</h2>
   <p class="sub">Robot build parts: pick from the catalog, request what you need, mentors approve and order by vendor. Invoices live with their batch.</p>
-  ${partsStatsHTML(parts, reqs, batches)}
+  <div class="row" id="pp-tabs">
+    <button class="btn small" data-ptab="catalog">Catalog</button>
+    <button class="btn small ghost" data-ptab="requests">Requests</button>
+    <button class="btn small ghost" data-ptab="batches">Batches</button>
+    <button class="btn small ghost" data-ptab="planning">Planning</button>
+  </div>
+  <div id="pp-catalog">
   <div class="card"><h3>Catalog</h3>
     <div class="row"><div class="field"><label>Search</label><input id="pc-search" type="text" placeholder="Part name, SKU, vendor"></div>
     <div class="field"><label>Subsystem</label><select id="pc-sub">${subsystemOptionsHTML(parts)}</select></div></div>
@@ -3737,7 +3761,9 @@ async function renderParts() {
     <div class="row"><div class="field"><label>Import catalog CSV</label><input id="pc-import-file" type="file" accept=".csv"></div><button class="btn small" id="pc-import-btn">Import</button></div>
     <p class="sub">Import upserts by vendor + SKU (or vendor + name without a SKU) and never deletes.</p>
   </div>
-  <div class="card" id="pf-form-card"><h3>Request a part</h3>
+  </div>
+  <div id="pp-requests" class="hidden">
+  <div id="pf-form-wrap"><div class="card" id="pf-form-card"><h3>Request a part</h3>
     <div class="field"><label>Catalog part</label><select id="pf-part">${partOptionsHTML(parts, null, false)}</select></div>
     <div id="pf-picked" class="hidden"><p class="sub" id="pf-picked-line"></p></div>
     <div id="pf-free">
@@ -3753,6 +3779,7 @@ async function renderParts() {
     <button class="btn" id="pf-submit">File request</button>
     <p class="sub">Picking from the catalog files the request against that part. Not in the catalog? Describe it above and a mentor records it before approval.</p>
   </div>
+  </div>
   <div class="card"><h3>Requests</h3>
     <div class="row" id="pf-filters">
       <button class="btn small" data-reqfilter="all">All</button>
@@ -3766,6 +3793,8 @@ async function renderParts() {
     </div>
     <table id="pf-req-table"><tr><th>Part</th><th>Spec</th><th>Qty</th><th>Method</th><th>Request by</th><th>Responsible</th><th>Status</th><th>Deliver to</th><th>Est. delivery</th><th>Notes</th><th></th></tr>${reqRows}</table>
   </div>
+  </div>
+  <div id="pp-batches" class="hidden">
   <div class="card mo"><h3>New order batch</h3>
     <div class="row"><div class="field"><label>Vendor</label><input id="pb-vendor" type="text" placeholder="e.g. WCP"></div>
     <div class="field"><label>Notes</label><input id="pb-notes" type="text"></div></div>
@@ -3773,9 +3802,15 @@ async function renderParts() {
     <p class="sub">A batch groups one vendor's approved requests: quick links, a Quick Order CSV, a confirmation number, and its invoices.</p>
   </div>
   ${emptyBatchNote}
-  ${batchCards}`;
+  ${batchCards}
+  </div>
+  <div id="pp-planning" class="hidden">
+  ${partsStatsHTML(parts, reqs, batches)}
+  </div>`;
   if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  if (ME && ME.role === "parent") { const w = v.querySelector("#pf-form-wrap"); if (w) w.remove(); }
   bindPartsView(v);
+  switchPartsTab(partsTab);
 }
 
 function filterCatalog() {
@@ -3864,10 +3899,13 @@ function bindPartsView(v) {
     } catch (e) { toast("Error: " + e.message); }
   });
 
+  qa("[data-ptab]").forEach((b) => b.addEventListener("click", () => switchPartsTab(b.dataset.ptab)));
+
   qa("[data-reqpart]").forEach((b) => b.addEventListener("click", () => {
     const sel = q("#pf-part");
     sel.value = b.dataset.reqpart;
     syncRequestForm();
+    switchPartsTab("requests");
     const card = q("#pf-form-card");
     if (card) card.scrollIntoView();
   }));
