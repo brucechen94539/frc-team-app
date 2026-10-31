@@ -6123,6 +6123,8 @@ def _part_dup(vendor, sku, exclude_id=None):
 def _parse_cost(raw):
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return None
+    if isinstance(raw, str):
+        raw = raw.replace("$", "").replace(",", "").strip()
     try:
         v = float(raw)
     except (TypeError, ValueError):
@@ -6715,6 +6717,12 @@ def api_parts_import():
         headers, rows = _csv_read(f)
     except ValueError as e:
         return err(str(e), 400)
+    orderb_only = {"total needed", "subsystem(s)",
+                   "audit / duplicate notes"}
+    if set(headers) & orderb_only:
+        return err("This looks like the raw Order B export — import"
+                   " parts-catalog.csv (the converted file), not"
+                   " order-b.csv.", 400)
     known = {"name", "part", "sku", "part number", "partnumber",
              "vendor", "order link", "orderlink", "link", "cost each",
              "cost", "price", "subsystems", "subsystem", "on hand",

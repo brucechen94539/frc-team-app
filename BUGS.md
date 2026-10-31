@@ -9,6 +9,23 @@ _None right now._
 
 ## Fixed
 
+### Catalog import lost cost and subsystems (2026-10-31, commit PENDING)
+
+**Reported** (Bruce): cost each and subsystems were not imported.
+**Root cause:** the raw Order B export had been imported instead
+of the converted catalog file. The raw sheet's Cost Each values
+carry `$`, which the import's number parser rejected, and its
+"Subsystem(s)" header matches neither the import's "subsystems"
+nor "subsystem" header — so a raw import silently drops both
+fields while everything else lands. Reproduced on a scratch
+server: raw import yields 167 parts, 0 priced, 0 with subsystems.
+**Fix:** re-import `parts-catalog.csv` — the import upserts, so
+the converted file fills the missing fields on the existing rows
+in place (no wipe needed); the handful of note/section rows a raw
+import creates are deleted by hand. The import now also refuses a
+raw Order B export outright, with a pointer to
+`parts-catalog.csv`, and tolerates `$`/comma costs elsewhere.
+
 ### Catalog Edit button appeared dead on a long catalog (2026-10-31, commit dbae344b)
 
 **Reported** (Bruce): the Edit button for a catalog item is not

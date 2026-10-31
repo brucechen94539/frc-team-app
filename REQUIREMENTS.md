@@ -975,7 +975,10 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   and denied/received are terminal. Deleting is allowed only for
   pending, approved, or denied requests — fulfilled history stays.
 - **Order batches (one vendor per batch):** a mentor creates a
-  batch for a vendor, adds approved or assigned Order requests
+  batch by picking its vendor from a dropdown of vendors on
+  approved or assigned, unbatched Order requests (sorted; the
+  form shows "No approved requests to batch yet" and Create is
+  disabled until such a request exists), then adds approved or assigned Order requests
   whose catalog part vendor matches (anything else 400s), and the
   batch carries quick links per line plus a Quick Order CSV export
   (SKU, qty, part, order link) for vendor bulk-add pages. Marking
@@ -1018,7 +1021,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   `parts-catalog.csv` (156 entries: 30 sheet rows skipped as blank,
   section, audit-note, or CAD-reference rows; 3 duplicate-SKU rows
   dropped, first kept; On Hand = Other bought qty + Included in
-  kits, the sheet's credited quantities).
+  kits, the sheet's credited quantities). Importing the raw
+  `order-b.csv` is refused with a pointer to `parts-catalog.csv`:
+  the raw sheet's `$` costs parse to nothing and its
+  "Subsystem(s)" column matches no import header, so a raw import
+  silently loses cost and subsystems (re-importing the converted
+  file repairs such rows in place via upsert). Costs with `$` or
+  commas are tolerated elsewhere in the import.
 - **What is deliberately not v1:** no auto-checkout (mentors still
   order on vendor sites — no payment integration), no CAD BOM
   importer (FRCBOM already does it; its CSV can feed the catalog

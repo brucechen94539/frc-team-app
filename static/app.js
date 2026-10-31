@@ -3653,6 +3653,11 @@ function invoiceLineHTML(f) {
   return `<div>${link}<span class="sub">${kb}${note}</span>${del}</div>`;
 }
 
+function batchVendorOptionsHTML(vendors) {
+  if (!vendors.length) return `<option value="" disabled selected>No approved requests to batch yet</option>`;
+  return vendors.map((vd) => `<option>${esc(vd)}</option>`).join("");
+}
+
 function batchAddOptionsHTML(b) {
   const eligible = partsData.reqs.filter((r) => r.method === "Order" && (r.status === "approved" || r.status === "assigned") && !r.batch_id && r.part && (r.part.vendor || "").toLowerCase() === (b.vendor || "").toLowerCase());
   let out = `<option value="">— pick an approved request —</option>`;
@@ -3732,6 +3737,7 @@ async function renderParts() {
   const catalogRows = parts.map(partRowHTML).join("");
   const reqRows = reqs.map(reqRowHTML).join("");
   const batchCards = batches.map(batchCardHTML).join("");
+  const batchVendors = [...new Set(reqs.filter((r) => r.method === "Order" && (r.status === "approved" || r.status === "assigned") && !r.batch_id && r.part && r.part.vendor).map((r) => r.part.vendor))].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
   const meName = ME ? ME.name : "";
   const emptyCatalogNote = parts.length ? "" : `<p class="sub">The catalog is empty — mentors add parts below or import the team's order sheet (Export CSV gives you the template).</p>`;
   const emptyBatchNote = batches.length ? "" : `<p class="sub">No batches yet — mentors create one per vendor from approved requests.</p>`;
@@ -3800,9 +3806,9 @@ async function renderParts() {
   </div>
   <div id="pp-batches" class="hidden">
   <div class="card mo"><h3>New order batch</h3>
-    <div class="row"><div class="field"><label>Vendor</label><input id="pb-vendor" type="text" placeholder="e.g. WCP"></div>
+    <div class="row"><div class="field"><label>Vendor</label><select id="pb-vendor">${batchVendorOptionsHTML(batchVendors)}</select></div>
     <div class="field"><label>Notes</label><input id="pb-notes" type="text"></div></div>
-    <button class="btn" id="pb-create-btn">Create batch</button>
+    <button class="btn" id="pb-create-btn"${batchVendors.length ? "" : " disabled"}>Create batch</button>
     <p class="sub">A batch groups one vendor's approved requests: quick links, a Quick Order CSV, a confirmation number, and its invoices.</p>
   </div>
   ${emptyBatchNote}
