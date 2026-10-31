@@ -1000,7 +1000,13 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   Requests (the filing form plus the work queue), Batches (the
   new-batch form plus batch cards), and Planning (the stats).
   The active tab survives re-renders, and "Request this" jumps
-  to the Requests tab with the part preselected.
+  to the Requests tab with the part preselected. The active tab
+  also survives a page refresh (stored in the browser), so
+  refreshing Parts returns to the last tab visited, not Catalog.
+  The "Request a part" filing form is an action card: collapsed
+  by default until expanded (same create-zone pattern as the
+  Queue forms); "Request this" expands it, and filing a request
+  collapses it again.
 - **CSV round-trip:** mentors export the catalog (Name, SKU,
   Vendor, Order Link, Cost Each, Subsystems, On Hand, Notes) and
   import it back: upsert by vendor + SKU (or vendor + name without
