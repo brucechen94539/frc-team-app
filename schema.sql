@@ -313,3 +313,65 @@ CREATE TABLE IF NOT EXISTS deletion_requests (
                CHECK (status IN ('pending','approved','declined')),
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Parts & purchasing (mentor-managed, robot building).
+CREATE TABLE IF NOT EXISTS parts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  name          TEXT NOT NULL,
+  sku           TEXT,
+  vendor        TEXT NOT NULL DEFAULT '',
+  order_link    TEXT,
+  cost_each     REAL,
+  subsystems    TEXT,
+  on_hand       INTEGER NOT NULL DEFAULT 0,
+  notes         TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(vendor, sku)
+);
+
+CREATE TABLE IF NOT EXISTS order_batches (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  vendor        TEXT NOT NULL,
+  status        TEXT NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'ordered', 'received')),
+  confirmation_no TEXT,
+  reimbursement TEXT NOT NULL DEFAULT 'not_submitted'
+                CHECK (reimbursement IN ('not_submitted', 'submitted',
+                                         'reimbursed')),
+  notes         TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS part_requests (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  part_id       INTEGER REFERENCES parts(id) ON DELETE SET NULL,
+  part_name     TEXT NOT NULL,
+  spec          TEXT,
+  qty           INTEGER NOT NULL DEFAULT 1,
+  method        TEXT NOT NULL DEFAULT 'Order'
+                CHECK (method IN ('Order', '3d print', 'CNC')),
+  major_component TEXT,
+  requester_user_id INTEGER,
+  requester_name TEXT,
+  responsible   TEXT,
+  batch_id      INTEGER REFERENCES order_batches(id) ON DELETE SET NULL,
+  deliver_to    TEXT,
+  est_delivery  TEXT,
+  notes         TEXT,
+  review_note   TEXT,
+  status        TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'approved', 'assigned',
+                                  'ordered', 'received', 'denied')),
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS invoice_files (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id      INTEGER NOT NULL REFERENCES order_batches(id)
+                ON DELETE CASCADE,
+  filename      TEXT NOT NULL,
+  stored_name   TEXT NOT NULL,
+  size_bytes    INTEGER,
+  note          TEXT,
+  uploaded_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);

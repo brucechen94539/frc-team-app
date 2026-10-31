@@ -24,6 +24,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
       <button data-view="tracking">Tracking</button>
       <button data-view="tasks">Task Board</button>
       <button data-view="travel">Travel &amp; Logistics</button>
+      <button data-view="parts">Parts &amp; Purchasing</button>
     </nav>
     <div id="account-box" class="navhide">
       <span id="user-avatar" title="Profile"></span>
@@ -54,6 +55,31 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         <div class="menu-foot">
           <button class="btn" id="rsvp-yes">YES</button>
           <button class="btn ghost" id="rsvp-no">NO</button>
+        </div>
+      </div>
+    </div>
+    <div id="part-review-modal" class="modal-backdrop">
+      <div class="modal-card">
+        <p style="font-size:17px;font-weight:700;margin:0 0 14px" id="part-review-title">Review request</p>
+        <div class="field"><label>Catalog part</label><select id="pr-part"></select></div>
+        <div id="pr-newpart" class="hidden">
+          <div class="field"><label>New part name</label><input id="pr-np-name" type="text"></div>
+          <div class="field"><label>SKU / part number</label><input id="pr-np-sku" type="text"></div>
+          <div class="field"><label>Vendor</label><input id="pr-np-vendor" type="text" placeholder="Blank = derived from the link"></div>
+          <div class="field"><label>Order link</label><input id="pr-np-link" type="text"></div>
+          <div class="field"><label>Cost each</label><input id="pr-np-cost" type="number" min="0" step="0.01"></div>
+        </div>
+        <div class="field"><label>Qty</label><input id="pr-qty" type="number" min="1"></div>
+        <div class="field"><label>Responsible</label><input id="pr-responsible" type="text"></div>
+        <div class="field"><label>Deliver to</label><input id="pr-deliver" type="text"></div>
+        <div class="field"><label>Est. delivery</label><input id="pr-est" type="date"></div>
+        <div class="field"><label>Notes</label><input id="pr-notes" type="text"></div>
+        <div class="field"><label>Review note</label><input id="pr-note" type="text"></div>
+        <div class="menu-foot">
+          <button class="btn" id="pr-approve">Approve</button>
+          <button class="btn danger" id="pr-deny">Deny</button>
+          <button class="btn" id="pr-save">Save changes</button>
+          <button class="btn ghost" id="pr-close">Close</button>
         </div>
       </div>
     </div>
@@ -93,6 +119,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
   <section id="view-tracking" class="view hidden"></section>
   <section id="view-tasks" class="view hidden"></section>
   <section id="view-travel" class="view hidden"></section>
+  <section id="view-parts" class="view hidden"></section>
   <section id="view-security" class="view hidden"></section>
   <section id="view-profile" class="view hidden"></section>
 </main>

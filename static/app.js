@@ -355,7 +355,7 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); closePartReview(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
@@ -368,6 +368,8 @@ const _qrClose = $("qr-close");
 if (_qrClose) _qrClose.addEventListener("click", closeQrModal);
 const _rsvpModal = $("rsvp-modal");
 if (_rsvpModal) _rsvpModal.addEventListener("click", (e) => { if (e.target === _rsvpModal) closeRsvpModal(); });
+const _partReviewModal = $("part-review-modal");
+if (_partReviewModal) _partReviewModal.addEventListener("click", (e) => { if (e.target === _partReviewModal) closePartReview(); });
 const _rsvpYes = $("rsvp-yes");
 if (_rsvpYes) _rsvpYes.addEventListener("click", () => { const b = pendingRsvpBtn; closeRsvpModal(); if (b) rsvpAction(b); });
 const _rsvpNo = $("rsvp-no");
@@ -418,6 +420,7 @@ function showView(name) {
   closeAvatarMenu();
   closeLogoutModal();
   closeQrModal();
+  closePartReview();
   closePwModal();
   close2faModal();
   closeDelModal();
@@ -438,6 +441,7 @@ function showView(name) {
   $("view-" + name).classList.remove("hidden");
   const _views = {signup: renderSignup, queue: renderQueue, roster: renderRoster,
     events: renderEvents, tracking: renderTracking, tasks: renderTasks, travel: renderTravel,
+    parts: renderParts,
     security: renderSecurity, profile: renderProfile, login: renderLogin,
     "password-change": renderPasswordChange};
   // Unknown view (e.g. a newer nav button with an older script) falls
@@ -3510,3 +3514,579 @@ function hotelTopHTML(h, args) {
     showView("login");
   }
 })();
+// ---- Parts & purchasing (mentor-managed, robot building) ----
+// Flow (settled 2026-10-30): student picks from the catalog (or files
+// free-text when the part isn't there) -> pending mentor approval ->
+// mentor links an existing catalog part or records a new one, then
+// approves -> fulfillment is gated on the reference.
+let partsData = { parts: [], reqs: [], batches: [] };
+let editingPartId = null;
+let reviewReqId = null;
+let reviewMode = "review";
+
+const PART_PILL = (s) => s === "received" ? "green" : s === "denied" ? "red" : s === "pending" ? "steel" : "blue";
+const BATCH_PILL = (s) => s === "received" ? "green" : s === "ordered" ? "blue" : "steel";
+const REIMB_LABEL = { not_submitted: "Not submitted", submitted: "Submitted", reimbursed: "Reimbursed" };
+
+function partLinkHTML(p) {
+  if (!p || !p.order_link) return "";
+  return ` <a href="${esc(p.order_link)}" target="_blank" rel="noopener">Order link ↗</a>`;
+}
+
+function partOptionsHTML(parts, selectedId, includeNew) {
+  let out = `<option value="">— Not in catalog —</option>`;
+  for (const p of parts) {
+    const sel = selectedId === p.id ? " selected" : "";
+    const sku = p.sku ? " (" + esc(p.sku) + ")" : "";
+    out += `<option value="${p.id}"${sel}>${esc(p.name)}${sku}</option>`;
+  }
+  if (includeNew) out += `<option value="__new__">＋ Record a new catalog part…</option>`;
+  return out;
+}
+
+function subsystemOptionsHTML(parts) {
+  const toks = new Set();
+  for (const p of parts) {
+    for (const t of (p.subsystems || "").split("/")) {
+      const v = t.trim();
+      if (v) toks.add(v);
+    }
+  }
+  let out = `<option value="">All subsystems</option>`;
+  for (const t of [...toks].sort()) out += `<option value="${esc(t)}">${esc(t)}</option>`;
+  return out;
+}
+
+function partRowHTML(p) {
+  const cost = p.cost_each == null ? "—" : "$" + Number(p.cost_each).toFixed(2);
+  const mentorBtns = MENTOR() ? ` <button class="btn small ghost" data-editpart="${p.id}">Edit</button> <button class="btn small danger" data-delpart="${p.id}">Delete</button>` : "";
+  return `<tr data-sub="${esc(p.subsystems || "")}">
+    <td>${esc(p.name)}${partLinkHTML(p)}</td>
+    <td>${esc(p.sku || "—")}</td>
+    <td>${esc(p.vendor || "—")}</td>
+    <td>${cost}</td>
+    <td>${p.on_hand || 0}</td>
+    <td>${esc(p.subsystems || "—")}</td>
+    <td>${p.request_count || 0}</td>
+    <td><button class="btn small" data-reqpart="${p.id}">Request this</button>${mentorBtns}</td>
+  </tr>`;
+}
+
+function reqRowHTML(r) {
+  const part = r.part;
+  let partCell = esc(r.part_name);
+  if (part) {
+    partCell = esc(part.name) + `<span class="sub">${part.sku ? esc(part.sku) : ""}${partLinkHTML(part)}</span>`;
+    if (r.part_name !== part.name) partCell += `<div class="sub">as requested: ${esc(r.part_name)}</div>`;
+  }
+  let specCell = "—";
+  if (r.spec) specCell = r.spec.startsWith("http") ? `<a href="${esc(r.spec)}" target="_blank" rel="noopener">Spec ↗</a>` : esc(r.spec);
+  let acts = "";
+  if (MENTOR()) {
+    if (r.status === "pending") acts += `<button class="btn small" data-review="${r.id}">Review</button> `;
+    if (r.status === "approved") {
+      acts += `<button class="btn small ghost" data-statusact="${r.id}:assigned">Assign</button> `;
+      if (r.method === "Order") acts += `<button class="btn small ghost" data-statusact="${r.id}:ordered">Mark ordered</button> `;
+      else acts += `<button class="btn small ghost" data-statusact="${r.id}:received">Mark received</button> `;
+    }
+    if (r.status === "assigned") {
+      if (r.method === "Order") acts += `<button class="btn small ghost" data-statusact="${r.id}:ordered">Mark ordered</button> `;
+      else acts += `<button class="btn small ghost" data-statusact="${r.id}:received">Mark received</button> `;
+    }
+    if (r.status === "ordered") acts += `<button class="btn small ghost" data-statusact="${r.id}:received">Mark received</button> `;
+    if (["pending", "approved", "denied"].includes(r.status)) acts += `<button class="btn small danger" data-delreq="${r.id}">Delete</button> `;
+    if (r.status !== "pending") acts += `<button class="btn small ghost" data-editreq="${r.id}">Edit</button>`;
+  }
+  const needs = r.needs_catalog ? ` <span class="pill steel">Needs catalog entry</span>` : "";
+  const reviewNote = r.review_note ? `<div class="sub">Review: ${esc(r.review_note)}</div>` : "";
+  return `<tr data-status="${r.status}" data-needs="${r.needs_catalog ? 1 : 0}">
+    <td>${partCell}</td>
+    <td>${specCell}</td>
+    <td>${r.qty}</td>
+    <td>${esc(r.method)}</td>
+    <td>${esc(r.requester_name || "—")}</td>
+    <td>${esc(r.responsible || "—")}</td>
+    <td><span class="pill ${PART_PILL(r.status)}">${r.status}</span>${needs}</td>
+    <td>${esc(r.deliver_to || "—")}</td>
+    <td>${esc(r.est_delivery || "—")}</td>
+    <td>${esc(r.notes || "")}${reviewNote}</td>
+    <td>${acts || "—"}</td>
+  </tr>`;
+}
+
+function batchLineHTML(m, draft, bid) {
+  const part = m.part;
+  const cost = part && part.cost_each != null ? "$" + Number(part.cost_each).toFixed(2) : "—";
+  const total = m.line_total != null ? "$" + Number(m.line_total).toFixed(2) : "—";
+  const rm = draft ? ` <button class="btn small ghost" data-rmline="${m.id}" data-rmbatch="${bid}">Remove</button>` : "";
+  return `<tr><td>${part ? esc(part.name) + partLinkHTML(part) : esc(m.part_name)}</td>
+    <td>${m.qty}</td><td>${cost}</td><td>${total}</td>
+    <td><span class="pill ${PART_PILL(m.status)}">${m.status}</span></td><td>${rm}</td></tr>`;
+}
+
+function invoiceLineHTML(f) {
+  const link = MENTOR() ? `<a href="/api/invoices/${f.id}/file">${esc(f.filename)}</a>` : esc(f.filename);
+  const del = MENTOR() ? ` <button class="btn small danger" data-delinv="${f.id}">Delete</button>` : "";
+  const note = f.note ? " — " + esc(f.note) : "";
+  const kb = f.size_bytes != null ? " (" + Math.round(f.size_bytes / 1024) + " KB)" : "";
+  return `<div>${link}<span class="sub">${kb}${note}</span>${del}</div>`;
+}
+
+function batchAddOptionsHTML(b) {
+  const eligible = partsData.reqs.filter((r) => r.method === "Order" && (r.status === "approved" || r.status === "assigned") && !r.batch_id && r.part && (r.part.vendor || "").toLowerCase() === (b.vendor || "").toLowerCase());
+  let out = `<option value="">— pick an approved request —</option>`;
+  for (const r of eligible) {
+    const label = esc(r.part.name) + " ×" + r.qty + " — " + esc(r.requester_name || "");
+    out += `<option value="${r.id}">${label}</option>`;
+  }
+  return out;
+}
+
+function batchCardHTML(b) {
+  const lines = b.members.map((m) => batchLineHTML(m, b.status === "draft", b.id)).join("");
+  const linesBlock = lines || `<tr><td colspan="6">No lines yet.</td></tr>`;
+  const invs = b.invoices.map(invoiceLineHTML).join("");
+  const reimb = MENTOR()
+    ? `<select data-reimb="${b.id}"><option value="not_submitted"${b.reimbursement === "not_submitted" ? " selected" : ""}>Not submitted</option><option value="submitted"${b.reimbursement === "submitted" ? " selected" : ""}>Submitted</option><option value="reimbursed"${b.reimbursement === "reimbursed" ? " selected" : ""}>Reimbursed</option></select>`
+    : esc(REIMB_LABEL[b.reimbursement] || b.reimbursement);
+  const draftCtrls = b.status === "draft" ? `<div class="row"><div class="field"><label>Add an approved request</label><select id="pb-add-${b.id}">${batchAddOptionsHTML(b)}</select></div><button class="btn small" data-addline="${b.id}">Add line</button></div>
+    <div class="row"><div class="field"><label>Confirmation number</label><input id="pb-conf-${b.id}" type="text"></div><button class="btn small" data-markordered="${b.id}">Mark ordered</button><button class="btn small danger" data-delbatch="${b.id}">Delete batch</button></div>` : "";
+  const recvCtrl = b.status === "ordered" ? `<div class="row"><button class="btn small" data-markreceived="${b.id}">Mark received</button></div>` : "";
+  const invForm = b.status !== "draft" ? `<div class="row mo"><div class="field"><label>Invoice file (PDF or image, 25MB max)</label><input id="pb-file-${b.id}" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.gif"></div><div class="field"><label>Note</label><input id="pb-note-${b.id}" type="text"></div><button class="btn small" data-upinv="${b.id}">Upload invoice</button></div>` : "";
+  const unpriced = b.unpriced_lines ? `<span class="sub"> + ${b.unpriced_lines} line(s) without a catalog price, not in the total</span>` : "";
+  const invHead = invs ? `<div><b>Invoices</b></div>` : "";
+  const conf = b.confirmation_no ? `Confirmation: ${esc(b.confirmation_no)} · ` : "";
+  const notes = b.notes ? ` · ${esc(b.notes)}` : "";
+  return `<div class="card">
+    <h3>${esc(b.vendor)} <span class="pill ${BATCH_PILL(b.status)}">${b.status}</span></h3>
+    <p class="sub">${conf}Reimbursement: ${reimb}${notes}</p>
+    <table><tr><th>Part</th><th>Qty</th><th>Each</th><th>Line total</th><th>Status</th><th></th></tr>${linesBlock}</table>
+    <p><b>Total: $${b.total.toFixed(2)}</b>${unpriced}</p>
+    <p><a href="/api/order-batches/${b.id}/quick-order.csv">Quick Order CSV</a></p>
+    ${draftCtrls}${recvCtrl}${invForm}
+    ${invHead}${invs}
+  </div>`;
+}
+
+function partsStatsHTML(parts, reqs, batches) {
+  const pending = reqs.filter((r) => r.status === "pending").length;
+  const needs = reqs.filter((r) => r.needs_catalog).length;
+  const awaiting = reqs.filter((r) => r.status === "approved" || r.status === "assigned").length;
+  const inTransit = reqs.filter((r) => r.status === "ordered").length;
+  const bySub = {};
+  let unpriced = 0;
+  for (const r of reqs) {
+    if (!["approved", "assigned", "ordered", "received"].includes(r.status)) continue;
+    if (!r.part || r.part.cost_each == null) { unpriced++; continue; }
+    const k = r.major_component || "Unsorted";
+    bySub[k] = (bySub[k] || 0) + r.part.cost_each * r.qty;
+  }
+  let subLines = "";
+  for (const k of Object.keys(bySub).sort()) subLines += `<div>${esc(k)}: $${bySub[k].toFixed(2)}</div>`;
+  const subBlock = subLines || `<p class="sub">Nothing committed yet.</p>`;
+  let venLines = "";
+  for (const b of batches) venLines += `<div>${esc(b.vendor)}: $${b.total.toFixed(2)} (${b.status})</div>`;
+  const venBlock = venLines || `<p class="sub">No batches yet.</p>`;
+  const unpricedNote = unpriced ? ` (${unpriced} request(s) without a catalog price, excluded)` : "";
+  return `<div class="card"><h3>Planning</h3>
+    <p>${pending} pending approval · ${needs} needing a catalog entry · ${awaiting} approved, awaiting fulfillment · ${inTransit} ordered, awaiting receipt</p>
+    <p><b>Committed spend by subsystem</b>${unpricedNote}</p>
+    ${subBlock}
+    <p><b>Batch totals by vendor</b></p>
+    ${venBlock}
+  </div>`;
+}
+
+async function renderParts() {
+  const v = $("view-parts");
+  let parts, reqs, batches;
+  try {
+    const res = await Promise.all([GET("/api/parts"), GET("/api/part-requests"), GET("/api/order-batches")]);
+    parts = res[0]; reqs = res[1]; batches = res[2];
+  } catch (e) {
+    toast("Error: " + e.message);
+    return;
+  }
+  partsData = { parts, reqs, batches };
+  const catalogRows = parts.map(partRowHTML).join("");
+  const reqRows = reqs.map(reqRowHTML).join("");
+  const batchCards = batches.map(batchCardHTML).join("");
+  const meName = ME ? ME.name : "";
+  const emptyCatalogNote = parts.length ? "" : `<p class="sub">The catalog is empty — mentors add parts below or import the team's order sheet (Export CSV gives you the template).</p>`;
+  const emptyBatchNote = batches.length ? "" : `<p class="sub">No batches yet — mentors create one per vendor from approved requests.</p>`;
+  v.innerHTML = `<h2>Parts &amp; Purchasing</h2>
+  <p class="sub">Robot build parts: pick from the catalog, request what you need, mentors approve and order by vendor. Invoices live with their batch.</p>
+  ${partsStatsHTML(parts, reqs, batches)}
+  <div class="card"><h3>Catalog</h3>
+    <div class="row"><div class="field"><label>Search</label><input id="pc-search" type="text" placeholder="Part name, SKU, vendor"></div>
+    <div class="field"><label>Subsystem</label><select id="pc-sub">${subsystemOptionsHTML(parts)}</select></div></div>
+    <table id="pc-table"><tr><th>Part</th><th>SKU</th><th>Vendor</th><th>Cost each</th><th>On hand</th><th>Subsystems</th><th>Requests</th><th></th></tr>${catalogRows}</table>
+    ${emptyCatalogNote}
+  </div>
+  <div class="card mo"><h3 id="pc-form-title">Add a catalog part</h3>
+    <div class="row"><div class="field"><label>Part name</label><input id="pc-name" type="text"></div>
+    <div class="field"><label>SKU / part number</label><input id="pc-sku" type="text"></div></div>
+    <div class="row"><div class="field"><label>Vendor</label><input id="pc-vendor" type="text" placeholder="Blank = derived from the link"></div>
+    <div class="field"><label>Order link</label><input id="pc-link" type="text"></div></div>
+    <div class="row"><div class="field"><label>Cost each</label><input id="pc-cost" type="number" min="0" step="0.01"></div>
+    <div class="field"><label>On hand</label><input id="pc-onhand" type="number" min="0" step="1"></div></div>
+    <div class="row"><div class="field"><label>Subsystems</label><input id="pc-subsystems" type="text" placeholder="e.g. Turret / Drivebase"></div>
+    <div class="field"><label>Notes</label><input id="pc-notes" type="text"></div></div>
+    <div class="row"><button class="btn" id="pc-part-submit">Add part</button><button class="btn ghost hidden" id="pc-cancel-edit">Cancel edit</button></div>
+    <div class="row"><a href="/api/parts/export">Export CSV</a></div>
+    <div class="row"><div class="field"><label>Import catalog CSV</label><input id="pc-import-file" type="file" accept=".csv"></div><button class="btn small" id="pc-import-btn">Import</button></div>
+    <p class="sub">Import upserts by vendor + SKU (or vendor + name without a SKU) and never deletes.</p>
+  </div>
+  <div class="card" id="pf-form-card"><h3>Request a part</h3>
+    <div class="field"><label>Catalog part</label><select id="pf-part">${partOptionsHTML(parts, null, false)}</select></div>
+    <div id="pf-picked" class="hidden"><p class="sub" id="pf-picked-line"></p></div>
+    <div id="pf-free">
+      <div class="field"><label>Part name</label><input id="pf-name" type="text" placeholder="As you would describe it"></div>
+      <div class="field"><label>Spec (STL file or vendor URL)</label><input id="pf-spec" type="text"></div>
+    </div>
+    <div class="row"><div class="field"><label>Qty</label><input id="pf-qty" type="number" min="1" value="1"></div>
+    <div class="field"><label>Method</label><select id="pf-method"><option>Order</option><option>3d print</option><option>CNC</option></select></div></div>
+    <div class="row"><div class="field"><label>Major component</label><input id="pf-comp" type="text" placeholder="e.g. Shooter"></div>
+    <div class="field"><label>Deliver to</label><input id="pf-deliver" type="text" value="${esc(meName)}"></div></div>
+    <div class="row"><div class="field"><label>Est. delivery</label><input id="pf-est" type="date"></div>
+    <div class="field"><label>Notes</label><input id="pf-notes" type="text"></div></div>
+    <button class="btn" id="pf-submit">File request</button>
+    <p class="sub">Picking from the catalog files the request against that part. Not in the catalog? Describe it above and a mentor records it before approval.</p>
+  </div>
+  <div class="card"><h3>Requests</h3>
+    <div class="row" id="pf-filters">
+      <button class="btn small" data-reqfilter="all">All</button>
+      <button class="btn small ghost" data-reqfilter="pending">Pending</button>
+      <button class="btn small ghost" data-reqfilter="needs">Needs catalog</button>
+      <button class="btn small ghost" data-reqfilter="approved">Approved</button>
+      <button class="btn small ghost" data-reqfilter="assigned">Assigned</button>
+      <button class="btn small ghost" data-reqfilter="ordered">Ordered</button>
+      <button class="btn small ghost" data-reqfilter="received">Received</button>
+      <button class="btn small ghost" data-reqfilter="denied">Denied</button>
+    </div>
+    <table id="pf-req-table"><tr><th>Part</th><th>Spec</th><th>Qty</th><th>Method</th><th>Request by</th><th>Responsible</th><th>Status</th><th>Deliver to</th><th>Est. delivery</th><th>Notes</th><th></th></tr>${reqRows}</table>
+  </div>
+  <div class="card mo"><h3>New order batch</h3>
+    <div class="row"><div class="field"><label>Vendor</label><input id="pb-vendor" type="text" placeholder="e.g. WCP"></div>
+    <div class="field"><label>Notes</label><input id="pb-notes" type="text"></div></div>
+    <button class="btn" id="pb-create-btn">Create batch</button>
+    <p class="sub">A batch groups one vendor's approved requests: quick links, a Quick Order CSV, a confirmation number, and its invoices.</p>
+  </div>
+  ${emptyBatchNote}
+  ${batchCards}`;
+  if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  bindPartsView(v);
+}
+
+function filterCatalog() {
+  const v = $("view-parts");
+  const q = (v.querySelector("#pc-search").value || "").toLowerCase();
+  const sub = v.querySelector("#pc-sub").value || "";
+  v.querySelectorAll("#pc-table tr").forEach((row) => {
+    if (!("sub" in row.dataset)) return;
+    const okQ = !q || row.textContent.toLowerCase().includes(q);
+    const okS = !sub || (row.dataset.sub || "").includes(sub);
+    row.style.display = okQ && okS ? "" : "none";
+  });
+}
+
+function filterReqRows(filter) {
+  const v = $("view-parts");
+  v.querySelectorAll("#pf-req-table tr").forEach((row) => {
+    if (!("status" in row.dataset)) return;
+    let show = true;
+    if (filter === "needs") show = row.dataset.needs === "1";
+    else if (filter !== "all") show = row.dataset.status === filter;
+    row.style.display = show ? "" : "none";
+  });
+  v.querySelectorAll("[data-reqfilter]").forEach((b) => {
+    const on = b.dataset.reqfilter === filter;
+    b.classList.toggle("btn", true);
+    b.classList.toggle("ghost", !on);
+  });
+}
+
+function syncRequestForm() {
+  const v = $("view-parts");
+  const sel = v.querySelector("#pf-part");
+  const picked = v.querySelector("#pf-picked");
+  const free = v.querySelector("#pf-free");
+  if (!sel) return;
+  if (sel.value) {
+    const p = partsData.parts.find((x) => String(x.id) === sel.value);
+    if (p) {
+      const cost = p.cost_each == null ? "no recorded cost" : "$" + Number(p.cost_each).toFixed(2) + " each";
+      const link = p.order_link ? ` — <a href="${esc(p.order_link)}" target="_blank" rel="noopener">Order link ↗</a>` : "";
+      const skuPart = p.sku ? " (" + esc(p.sku) + ")" : "";
+      v.querySelector("#pf-picked-line").innerHTML = "From the catalog: " + esc(p.name) + skuPart + " · " + cost + link;
+    }
+    picked.classList.remove("hidden");
+    free.classList.add("hidden");
+  } else {
+    picked.classList.add("hidden");
+    free.classList.remove("hidden");
+  }
+}
+function bindPartsView(v) {
+  const q = (sel) => v.querySelector(sel);
+  const qa = (sel) => [...v.querySelectorAll(sel)];
+  const val = (sel) => { const el = q(sel); return el ? el.value.trim() : ""; };
+
+  const search = q("#pc-search");
+  if (search) search.addEventListener("input", filterCatalog);
+  const sub = q("#pc-sub");
+  if (sub) sub.addEventListener("change", filterCatalog);
+
+  const pfPart = q("#pf-part");
+  if (pfPart) pfPart.addEventListener("change", syncRequestForm);
+
+  const pfSubmit = q("#pf-submit");
+  if (pfSubmit) pfSubmit.addEventListener("click", async () => {
+    const partId = q("#pf-part").value;
+    const body = {
+      qty: parseInt(q("#pf-qty").value || "1", 10),
+      method: q("#pf-method").value,
+      major_component: val("#pf-comp"),
+      deliver_to: val("#pf-deliver"),
+      est_delivery: val("#pf-est"),
+      notes: val("#pf-notes"),
+    };
+    if (partId) body.part_id = parseInt(partId, 10);
+    else {
+      body.part_name = val("#pf-name");
+      body.spec = val("#pf-spec");
+      if (!body.part_name) { toast("Name the part or pick one from the catalog."); return; }
+    }
+    try {
+      await POST("/api/part-requests", body);
+      toast("Request filed — pending mentor approval.");
+      renderParts();
+    } catch (e) { toast("Error: " + e.message); }
+  });
+
+  qa("[data-reqpart]").forEach((b) => b.addEventListener("click", () => {
+    const sel = q("#pf-part");
+    sel.value = b.dataset.reqpart;
+    syncRequestForm();
+    const card = q("#pf-form-card");
+    if (card) card.scrollIntoView();
+  }));
+
+  qa("[data-reqfilter]").forEach((b) => b.addEventListener("click", () => filterReqRows(b.dataset.reqfilter)));
+
+  const resetPartForm = () => {
+    editingPartId = null;
+    ["#pc-name", "#pc-sku", "#pc-vendor", "#pc-link", "#pc-cost", "#pc-subsystems", "#pc-onhand", "#pc-notes"].forEach((s) => { const el = q(s); if (el) el.value = ""; });
+    const t = q("#pc-form-title"); if (t) t.textContent = "Add a catalog part";
+    const sb = q("#pc-part-submit"); if (sb) sb.textContent = "Add part";
+    const cb = q("#pc-cancel-edit"); if (cb) cb.classList.add("hidden");
+  };
+  qa("[data-editpart]").forEach((b) => b.addEventListener("click", () => {
+    const p = partsData.parts.find((x) => String(x.id) === b.dataset.editpart);
+    if (!p) return;
+    editingPartId = p.id;
+    const set = (s, v2) => { const el = q(s); if (el) el.value = v2; };
+    set("#pc-name", p.name); set("#pc-sku", p.sku || ""); set("#pc-vendor", p.vendor || "");
+    set("#pc-link", p.order_link || ""); set("#pc-cost", p.cost_each == null ? "" : p.cost_each);
+    set("#pc-subsystems", p.subsystems || ""); set("#pc-onhand", p.on_hand || 0); set("#pc-notes", p.notes || "");
+    const t = q("#pc-form-title"); if (t) t.textContent = "Edit catalog part";
+    const sb = q("#pc-part-submit"); if (sb) sb.textContent = "Save changes";
+    const cb = q("#pc-cancel-edit"); if (cb) cb.classList.remove("hidden");
+  }));
+  const cancelEdit = q("#pc-cancel-edit");
+  if (cancelEdit) cancelEdit.addEventListener("click", resetPartForm);
+  const partSubmit = q("#pc-part-submit");
+  if (partSubmit) partSubmit.addEventListener("click", async () => {
+    const body = {
+      name: val("#pc-name"), sku: val("#pc-sku"), vendor: val("#pc-vendor"),
+      order_link: val("#pc-link"), cost_each: val("#pc-cost"),
+      subsystems: val("#pc-subsystems"), on_hand: val("#pc-onhand"), notes: val("#pc-notes"),
+    };
+    if (!body.name) { toast("Part name is required."); return; }
+    try {
+      if (editingPartId) { await PATCH("/api/parts/" + editingPartId, body); toast("Part updated."); }
+      else { await POST("/api/parts", body); toast("Part added to the catalog."); }
+      resetPartForm();
+      renderParts();
+    } catch (e) { toast("Error: " + e.message); }
+  });
+  qa("[data-delpart]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this catalog part?")) return;
+    try { await DEL("/api/parts/" + b.dataset.delpart); toast("Part deleted."); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  const importBtn = q("#pc-import-btn");
+  if (importBtn) importBtn.addEventListener("click", async () => {
+    const file = q("#pc-import-file").files[0];
+    if (!file) { toast("Choose a CSV file first."); return; }
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res = await fetch("/api/parts/import", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Import failed");
+      const sk = data.skipped.length ? ", " + data.skipped.length + " skipped" : "";
+      toast("Import: " + data.added + " added, " + data.updated + " updated" + sk + ".");
+      renderParts();
+    } catch (e) { toast("Error: " + e.message); }
+  });
+
+  qa("[data-review]").forEach((b) => b.addEventListener("click", () => openPartReview(parseInt(b.dataset.review, 10), "review")));
+  qa("[data-editreq]").forEach((b) => b.addEventListener("click", () => openPartReview(parseInt(b.dataset.editreq, 10), "edit")));
+  qa("[data-statusact]").forEach((b) => b.addEventListener("click", async () => {
+    const sp = b.dataset.statusact.split(":");
+    try { await PATCH("/api/part-requests/" + sp[0], { status: sp[1] }); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-delreq]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this request?")) return;
+    try { await DEL("/api/part-requests/" + b.dataset.delreq); toast("Request deleted."); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+
+  const batchCreate = q("#pb-create-btn");
+  if (batchCreate) batchCreate.addEventListener("click", async () => {
+    const vendor = val("#pb-vendor");
+    if (!vendor) { toast("Vendor is required."); return; }
+    try { await POST("/api/order-batches", { vendor, notes: val("#pb-notes") }); toast("Batch created."); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  });
+  qa("[data-addline]").forEach((b) => b.addEventListener("click", async () => {
+    const bid = b.dataset.addline;
+    const rid = q("#pb-add-" + bid).value;
+    if (!rid) { toast("Pick a request to add."); return; }
+    try { await POST("/api/order-batches/" + bid + "/requests", { request_id: parseInt(rid, 10) }); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-rmline]").forEach((b) => b.addEventListener("click", async () => {
+    try { await DEL("/api/order-batches/" + b.dataset.rmbatch + "/requests/" + b.dataset.rmline); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-markordered]").forEach((b) => b.addEventListener("click", async () => {
+    const bid = b.dataset.markordered;
+    const conf = val("#pb-conf-" + bid);
+    if (!conf) { toast("Enter the confirmation number first."); return; }
+    try { await PATCH("/api/order-batches/" + bid, { status: "ordered", confirmation_no: conf }); toast("Batch ordered."); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-markreceived]").forEach((b) => b.addEventListener("click", async () => {
+    try { await PATCH("/api/order-batches/" + b.dataset.markreceived, { status: "received" }); toast("Batch received."); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-delbatch]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this draft batch? Its lines go back to approved.")) return;
+    try { await DEL("/api/order-batches/" + b.dataset.delbatch); toast("Batch deleted."); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-reimb]").forEach((s) => s.addEventListener("change", async () => {
+    try { await PATCH("/api/order-batches/" + s.dataset.reimb, { reimbursement: s.value }); toast("Reimbursement updated."); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-upinv]").forEach((b) => b.addEventListener("click", async () => {
+    const bid = b.dataset.upinv;
+    const file = q("#pb-file-" + bid).files[0];
+    if (!file) { toast("Choose an invoice file first."); return; }
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("note", val("#pb-note-" + bid));
+    try {
+      const res = await fetch("/api/order-batches/" + bid + "/invoices", { method: "POST", body: fd });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      toast("Invoice uploaded.");
+      renderParts();
+    } catch (e) { toast("Error: " + e.message); }
+  }));
+  qa("[data-delinv]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this invoice?")) return;
+    try { await DEL("/api/invoices/" + b.dataset.delinv); toast("Invoice deleted."); renderParts(); }
+    catch (e) { toast("Error: " + e.message); }
+  }));
+}
+
+function openPartReview(id, mode) {
+  const r = partsData.reqs.find((x) => x.id === id);
+  if (!r) return;
+  reviewReqId = id;
+  reviewMode = mode;
+  const title = $("part-review-title");
+  if (title) title.textContent = (mode === "review" ? "Review request: " : "Edit request: ") + r.part_name;
+  const sel = $("pr-part");
+  if (sel) sel.innerHTML = partOptionsHTML(partsData.parts, r.part_id, true);
+  const setVal = (el, v2) => { const e = $(el); if (e) e.value = v2; };
+  setVal("pr-qty", r.qty);
+  setVal("pr-responsible", r.responsible || "");
+  setVal("pr-deliver", r.deliver_to || "");
+  setVal("pr-est", r.est_delivery || "");
+  setVal("pr-notes", r.notes || "");
+  setVal("pr-note", r.review_note || "");
+  const np = $("pr-newpart");
+  if (np) np.classList.add("hidden");
+  const toggleField = (el, show) => { const e = $(el); if (e && e.closest) { const f = e.closest(".field"); if (f) f.classList.toggle("hidden", !show); } };
+  toggleField("pr-qty", mode === "edit");
+  toggleField("pr-deliver", mode === "edit");
+  toggleField("pr-est", mode === "edit");
+  toggleField("pr-notes", mode === "edit");
+  const ap = $("pr-approve"); if (ap) ap.classList.toggle("hidden", mode !== "review");
+  const dn = $("pr-deny"); if (dn) dn.classList.toggle("hidden", mode !== "review");
+  const sv = $("pr-save"); if (sv) sv.classList.toggle("hidden", mode !== "edit");
+  const m = $("part-review-modal");
+  if (m) m.classList.add("open");
+}
+
+function closePartReview() {
+  const m = $("part-review-modal");
+  if (m) m.classList.remove("open");
+}
+
+const _prPartSel = $("pr-part");
+if (_prPartSel) _prPartSel.addEventListener("change", () => {
+  const np = $("pr-newpart");
+  if (np) np.classList.toggle("hidden", _prPartSel.value !== "__new__");
+});
+const _prApprove = $("pr-approve");
+if (_prApprove) _prApprove.addEventListener("click", async () => {
+  const r = partsData.reqs.find((x) => x.id === reviewReqId);
+  if (!r) return;
+  const sel = $("pr-part").value;
+  const body = { action: "approve", responsible: $("pr-responsible").value.trim(), review_note: $("pr-note").value.trim() };
+  if (sel === "__new__") {
+    const name = $("pr-np-name").value.trim();
+    if (!name) { toast("Name the new catalog part first."); return; }
+    body.new_part = { name, sku: $("pr-np-sku").value.trim(), vendor: $("pr-np-vendor").value.trim(), order_link: $("pr-np-link").value.trim(), cost_each: $("pr-np-cost").value.trim() };
+  } else if (sel) body.part_id = parseInt(sel, 10);
+  if (r.method === "Order" && !body.part_id && !body.new_part) { toast("Link a catalog part first — or record it below."); return; }
+  try { await POST("/api/part-requests/" + reviewReqId + "/review", body); closePartReview(); toast("Request approved."); renderParts(); }
+  catch (e) { toast("Error: " + e.message); }
+});
+const _prDeny = $("pr-deny");
+if (_prDeny) _prDeny.addEventListener("click", async () => {
+  try { await POST("/api/part-requests/" + reviewReqId + "/review", { action: "deny", review_note: $("pr-note").value.trim() }); closePartReview(); toast("Request denied."); renderParts(); }
+  catch (e) { toast("Error: " + e.message); }
+});
+const _prSave = $("pr-save");
+if (_prSave) _prSave.addEventListener("click", async () => {
+  const sel = $("pr-part").value;
+  let partId = null;
+  if (sel === "__new__") {
+    const name = $("pr-np-name").value.trim();
+    if (!name) { toast("Name the new catalog part first."); return; }
+    try {
+      const p = await POST("/api/parts", { name, sku: $("pr-np-sku").value.trim(), vendor: $("pr-np-vendor").value.trim(), order_link: $("pr-np-link").value.trim(), cost_each: $("pr-np-cost").value.trim() });
+      partId = p.id;
+    } catch (e) { toast("Error: " + e.message); return; }
+  } else if (sel) partId = parseInt(sel, 10);
+  const body = {
+    part_id: partId,
+    qty: parseInt($("pr-qty").value || "1", 10),
+    responsible: $("pr-responsible").value.trim(),
+    deliver_to: $("pr-deliver").value.trim(),
+    est_delivery: $("pr-est").value.trim(),
+    notes: $("pr-notes").value.trim(),
+    review_note: $("pr-note").value.trim(),
+  };
+  try { await PATCH("/api/part-requests/" + reviewReqId, body); closePartReview(); toast("Request updated."); renderParts(); }
+  catch (e) { toast("Error: " + e.message); }
+});
+const _prClose = $("pr-close");
+if (_prClose) _prClose.addEventListener("click", closePartReview);

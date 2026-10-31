@@ -9,3 +9,6 @@ __pycache__/
 venv/
 .env
 .secret_key
+
+# Uploaded invoices (team records, not code)
+invoices/

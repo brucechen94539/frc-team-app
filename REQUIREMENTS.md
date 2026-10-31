@@ -932,6 +932,76 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   databases migrate the occupants table once at boot (nullable
   member + person_name column) without losing rows.
 
+## Parts & purchasing (mentor-managed, robot building — not travel logistics)
+
+- **Catalog (evergreen):** every part ever bought, keyed by vendor +
+  SKU (the dedupe key — vendor names alone never join). A part
+  carries its vendor catalog name, SKU/part number, order link,
+  last cost each, subsystems, on-hand quantity, and notes. Vendor
+  is derived from the order-link domain when not given (WCP,
+  McMaster-Carr, AndyMark, REV, VEX, Swyft, ThriftyBot, CTR, SDS,
+  DigiKey, Mouser, Amazon, else the domain itself). Creating a
+  duplicate vendor + SKU 409s — link the existing part instead.
+  The catalog is visible to everyone; adding, editing, and deleting
+  are mentor-only, and a part referenced by any request cannot be
+  deleted. **Buy again** is the catalog row's "Request this" button,
+  which prefills a new request from history.
+- **Requests (Tide Parts mirror):** a request keeps the requester's
+  own words — informal part name, spec (STL file or vendor URL),
+  qty, method (Order / 3d print / CNC), major component, requester,
+  responsible fulfiller, deliver-to, est. delivery, notes — plus,
+  once a mentor links it, a catalog part reference. The requester
+  is always the signed-in account (never a client-supplied name).
+  Students and parents file requests; only mentors change them.
+- **Approval flow (settled 2026-10-30):** a student picks from the
+  catalog, or files free-text when the part isn't there, and the
+  request lands pending mentor approval. A mentor reviews it in
+  one step: link an existing catalog part (search by SKU or link,
+  since informal names never match vendor names) or record a new
+  catalog part and link it, set the responsible fulfiller, then
+  approve — or deny with a note. Requests that still need a
+  catalog entry carry a "Needs catalog entry" flag mentors can
+  filter on, so nothing stalls silently in pending.
+- **Fulfillment gate:** an Order request cannot be approved without
+  a catalog part linked; a 3d print / CNC request cannot move
+  without its spec. After approval, status moves approved →
+  assigned → ordered (Order only) → received, or approved →
+  assigned → received (print/CNC); a print/CNC request may also
+  go approved → received directly. Pending leaves only via review
+  and denied/received are terminal. Deleting is allowed only for
+  pending, approved, or denied requests — fulfilled history stays.
+- **Order batches (one vendor per batch):** a mentor creates a
+  batch for a vendor, adds approved or assigned Order requests
+  whose catalog part vendor matches (anything else 400s), and the
+  batch carries quick links per line plus a Quick Order CSV export
+  (SKU, qty, part, order link) for vendor bulk-add pages. Marking
+  a batch ordered requires a confirmation number and moves its
+  members to ordered; marking it received moves ordered members to
+  received. Only draft batches accept new lines or can be deleted
+  (their lines return to approved). Batch totals sum catalog cost
+  × qty over priced lines; unpriced lines are counted, not guessed.
+- **Invoices:** mentors upload a PDF or image per ordered/received
+  batch (25MB max); files live in `invoices/` next to the app
+  (gitignored — team records, never pushed to the repo), served
+  back mentor-only by id. Each batch carries a reimbursement state
+  (not submitted / submitted / reimbursed), editable by mentors.
+- **Planning:** the Parts page shows pending approvals, requests
+  needing a catalog entry, approved work awaiting fulfillment, and
+  ordered work awaiting receipt; committed spend by subsystem
+  (catalog cost × qty over approved-and-later requests, unpriced
+  requests excluded and counted) and batch totals by vendor.
+- **CSV round-trip:** mentors export the catalog (Name, SKU,
+  Vendor, Order Link, Cost Each, Subsystems, On Hand, Notes) and
+  import it back: upsert by vendor + SKU (or vendor + name without
+  a SKU), never deletes, and only columns present in the file
+  overwrite on update — so the team's Order B sheet imports as the
+  starting catalog. Students cannot import.
+- **What is deliberately not v1:** no auto-checkout (mentors still
+  order on vendor sites — no payment integration), no CAD BOM
+  importer (FRCBOM already does it; its CSV can feed the catalog
+  import), and no per-build need math (total needed / still
+  needed / packs to buy stay in the team's Order B sheet for now).
+
 ## Data & hosting
 
 - Self-hosted Flask + SQLite app; no external services required.

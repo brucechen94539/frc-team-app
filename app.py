@@ -157,6 +157,60 @@ def _migrate(db):
             person_kind TEXT, person_name TEXT NOT NULL,
             status TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS parts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            sku TEXT,
+            vendor TEXT NOT NULL DEFAULT '',
+            order_link TEXT,
+            cost_each REAL,
+            subsystems TEXT,
+            on_hand INTEGER NOT NULL DEFAULT 0,
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(vendor, sku))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS order_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vendor TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK (status IN ('draft', 'ordered', 'received')),
+            confirmation_no TEXT,
+            reimbursement TEXT NOT NULL DEFAULT 'not_submitted'
+                CHECK (reimbursement IN ('not_submitted', 'submitted',
+                                         'reimbursed')),
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS part_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL,
+            part_name TEXT NOT NULL,
+            spec TEXT,
+            qty INTEGER NOT NULL DEFAULT 1,
+            method TEXT NOT NULL DEFAULT 'Order'
+                CHECK (method IN ('Order', '3d print', 'CNC')),
+            major_component TEXT,
+            requester_user_id INTEGER,
+            requester_name TEXT,
+            responsible TEXT,
+            batch_id INTEGER REFERENCES order_batches(id)
+                ON DELETE SET NULL,
+            deliver_to TEXT,
+            est_delivery TEXT,
+            notes TEXT,
+            review_note TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'approved', 'assigned',
+                                  'ordered', 'received', 'denied')),
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS invoice_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id INTEGER NOT NULL REFERENCES order_batches(id)
+                ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            stored_name TEXT NOT NULL,
+            size_bytes INTEGER,
+            note TEXT,
+            uploaded_at TEXT NOT NULL DEFAULT (datetime('now')))""")
         if "season" not in event_cols:
             db.execute("ALTER TABLE events ADD COLUMN season TEXT")
         if "archived" not in event_cols:
@@ -5981,6 +6035,754 @@ def api_room_parent(rid):
     execute("UPDATE rooms SET parent_member_id=?, parent_name=? WHERE id=?",
             (m["id"], pname, rid))
     return jsonify({"ok": True})
+
+
+# ----------------------------------------------------------------------------
+# Parts & purchasing — mentor-managed module for robot building (not
+# travel logistics). Model mirrors the team's two sheets:
+#   * parts         — evergreen catalog (Order B side): vendor name,
+#                     SKU, order link, last cost, subsystems, on hand.
+#                     Dedupe key is (vendor, SKU); vendor is derived
+#                     from the order-link domain when not given.
+#   * part_requests — Tide Parts side: a student's informal part name
+#                     + spec, qty, method (Order / 3d print / CNC),
+#                     requester, responsible fulfiller, status,
+#                     deliver-to, est. delivery, notes. A request keeps
+#                     the student's words AND, once a mentor links it,
+#                     a part_id pointing at the catalog.
+#   * order_batches — vendor-grouped ordering: approved Order requests
+#                     move into a draft batch (quick links + Quick
+#                     Order CSV export), the batch is marked ordered
+#                     with a confirmation number, then received.
+#                     Members follow the batch status.
+#   * invoice_files — PDF/photo uploads per batch, stored on disk next
+#                     to the app (never in the git repo: pushes carry
+#                     text files only), with a reimbursement state on
+#                     the batch.
+# Flow (settled 2026-10-30): student picks from the catalog (or files
+# free-text when the part isn't there) → pending mentor approval →
+# mentor links an existing catalog part or records a new one, then
+# approves → fulfillment is gated on the reference (Order needs a
+# catalog part; print/CNC needs its spec) → ordered → received.
+# ----------------------------------------------------------------------------
+INVOICE_DIR = os.environ.get("INVOICE_DIR") or os.path.join(BASE_DIR, "invoices")
+_INVOICE_EXTS = {"pdf", "png", "jpg", "jpeg", "webp", "gif"}
+_INVOICE_MAX_BYTES = 25 * 1024 * 1024
+_REQ_METHODS = ("Order", "3d print", "CNC")
+_REQ_STATUSES = ("pending", "approved", "assigned", "ordered", "received", "denied")
+_BATCH_STATUSES = ("draft", "ordered", "received")
+_REIMB_STATUSES = ("not_submitted", "submitted", "reimbursed")
+
+
+def _part_vendor_from_link(link):
+    """Vendor guess from an order-link domain (WCP/McMaster/REV/...)."""
+    try:
+        import urllib.parse
+        host = (urllib.parse.urlparse(link or "").hostname or "").lower()
+    except Exception:
+        host = ""
+    if host.startswith("www."):
+        host = host[4:]
+    table = {
+        "wcproducts.com": "WCP",
+        "mcmaster.com": "McMaster-Carr",
+        "andymark.com": "AndyMark",
+        "revrobotics.com": "REV",
+        "vexrobotics.com": "VEX",
+        "swyftrobotics.com": "Swyft",
+        "thriftybot.com": "ThriftyBot",
+        "ctr-electronics.com": "CTR",
+        "swervedrivespecialties.com": "SDS",
+        "digikey.com": "DigiKey",
+        "mouser.com": "Mouser",
+    }
+    if host in table:
+        return table[host]
+    if host.endswith("amazon.com") or host.endswith("amazon.co.uk"):
+        return "Amazon"
+    return host
+
+
+def _clean_sku(sku):
+    s = (sku or "").strip()
+    return s or None
+
+
+def _part_dup(vendor, sku, exclude_id=None):
+    """Existing part with the same (vendor, SKU), case-insensitive."""
+    if not sku:
+        return None
+    row = q_one("""SELECT * FROM parts WHERE upper(vendor)=upper(?)
+                   AND upper(sku)=upper(?)""", (vendor or "", sku))
+    if row and (exclude_id is None or row["id"] != exclude_id):
+        return row
+    return None
+
+
+def _parse_cost(raw):
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return v if v >= 0 else None
+
+
+def _create_part(b):
+    """Validate + insert a catalog part. Returns (part_id, None) or
+    (None, error_response)."""
+    name = (b.get("name") or "").strip()
+    if not name:
+        return None, err("part name is required")
+    link = (b.get("order_link") or "").strip()
+    vendor = (b.get("vendor") or "").strip() or _part_vendor_from_link(link)
+    sku = _clean_sku(b.get("sku"))
+    cost = _parse_cost(b.get("cost_each"))
+    if b.get("cost_each") not in (None, "") and cost is None:
+        return None, err("cost must be a number >= 0")
+    dup = _part_dup(vendor, sku)
+    if dup:
+        return None, err(f"already in the catalog as '{dup['name']}'"
+                         " — link that part instead", 409)
+    try:
+        on_hand = int(b.get("on_hand") or 0)
+    except (TypeError, ValueError):
+        return None, err("on hand must be a whole number")
+    if on_hand < 0:
+        return None, err("on hand must be >= 0")
+    pid = execute("""INSERT INTO parts (name, sku, vendor, order_link,
+                   cost_each, subsystems, on_hand, notes)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (name, sku, vendor, link or None, cost,
+                 (b.get("subsystems") or "").strip() or None, on_hand,
+                 (b.get("notes") or "").strip() or None))
+    return pid, None
+
+
+def _part_public(p):
+    if not p:
+        return None
+    d = dict(p)
+    d["request_count"] = q_one("SELECT COUNT(*) AS n FROM part_requests"
+                               " WHERE part_id=?", (p["id"],))["n"]
+    return d
+
+
+def _req_public(r):
+    d = dict(r)
+    part = q_one("SELECT * FROM parts WHERE id=?", (r["part_id"],)) \
+        if r["part_id"] else None
+    d["part"] = dict(part) if part else None
+    # The catalog gate: an Order request with no catalog link still
+    # needs a mentor to find/record the part before it can be approved.
+    d["needs_catalog"] = r["method"] == "Order" and not r["part_id"]
+    return d
+
+
+def _req_status_ok(cur, new):
+    """Mentor PATCH transitions. Pending leaves only via review;
+    denied/received are terminal. Order rows go through ordered;
+    print/CNC rows go through assigned."""
+    old, method = cur["status"], cur["method"]
+    if old == "approved":
+        if new == "assigned":
+            return True
+        if new == "ordered":
+            return method == "Order"
+        if new == "received":
+            return method != "Order"
+        return False
+    if old == "assigned":
+        if new == "ordered":
+            return method == "Order"
+        if new == "received":
+            return method != "Order"
+        return False
+    if old == "ordered":
+        return new == "received"
+    return False
+
+
+@app.route("/api/parts", methods=["GET", "POST"])
+def api_parts():
+    if request.method == "GET":
+        return jsonify([_part_public(p) for p in q_all(
+            "SELECT * FROM parts ORDER BY name")])
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    pid, e = _create_part(request.get_json(force=True))
+    if e:
+        return e
+    return jsonify(_part_public(q_one("SELECT * FROM parts WHERE id=?",
+                                      (pid,)))), 201
+
+
+@app.route("/api/parts/<int:pid>", methods=["PATCH", "DELETE"])
+def api_part(pid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    part = q_one("SELECT * FROM parts WHERE id=?", (pid,))
+    if not part:
+        return err("part not found", 404)
+    if request.method == "DELETE":
+        n = q_one("SELECT COUNT(*) AS n FROM part_requests WHERE part_id=?",
+                  (pid,))["n"]
+        if n:
+            return err(f"part is referenced by {n} request(s) — unlink"
+                       " them first", 409)
+        execute("DELETE FROM parts WHERE id=?", (pid,))
+        return jsonify({"ok": True})
+    b = request.get_json(force=True)
+    name = (b.get("name") or part["name"]).strip()
+    if not name:
+        return err("part name is required")
+    link = (b.get("order_link", part["order_link"] or "") or "").strip()
+    vendor = (b.get("vendor", part["vendor"] or "") or "").strip() \
+        or _part_vendor_from_link(link)
+    sku = _clean_sku(b.get("sku", part["sku"]))
+    cost = _parse_cost(b.get("cost_each", part["cost_each"]))
+    if "cost_each" in b and b["cost_each"] not in (None, "") and cost is None:
+        return err("cost must be a number >= 0")
+    dup = _part_dup(vendor, sku, exclude_id=pid)
+    if dup:
+        return err(f"already in the catalog as '{dup['name']}'", 409)
+    try:
+        on_hand = int(b.get("on_hand", part["on_hand"] or 0))
+    except (TypeError, ValueError):
+        return err("on hand must be a whole number")
+    if on_hand < 0:
+        return err("on hand must be >= 0")
+    execute("""UPDATE parts SET name=?, sku=?, vendor=?, order_link=?,
+             cost_each=?, subsystems=?, on_hand=?, notes=? WHERE id=?""",
+            (name, sku, vendor, link or None, cost,
+             (b.get("subsystems", part["subsystems"] or "") or "").strip()
+             or None, on_hand,
+             (b.get("notes", part["notes"] or "") or "").strip() or None,
+             pid))
+    return jsonify(_part_public(q_one("SELECT * FROM parts WHERE id=?",
+                                      (pid,))))
+
+
+@app.route("/api/part-requests", methods=["GET", "POST"])
+def api_part_requests():
+    if request.method == "GET":
+        return jsonify([_req_public(r) for r in q_all(
+            "SELECT * FROM part_requests ORDER BY id DESC")])
+    u = current_user()
+    b = request.get_json(force=True)
+    part = None
+    if b.get("part_id"):
+        part = q_one("SELECT * FROM parts WHERE id=?", (b["part_id"],))
+        if not part:
+            return err("catalog part not found", 404)
+    name = (b.get("part_name") or "").strip() or (part["name"] if part else "")
+    if not name:
+        return err("part name is required (or pick a catalog part)")
+    method = b.get("method") or "Order"
+    if method not in _REQ_METHODS:
+        return err("method must be Order, 3d print, or CNC")
+    try:
+        qty = int(b.get("qty") or 1)
+    except (TypeError, ValueError):
+        return err("qty must be a whole number")
+    if qty < 1:
+        return err("qty must be >= 1")
+    rid = execute("""INSERT INTO part_requests (part_id, part_name, spec,
+                   qty, method, major_component, requester_user_id,
+                   requester_name, responsible, deliver_to, est_delivery,
+                   notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (part["id"] if part else None, name,
+                 (b.get("spec") or "").strip() or None, qty, method,
+                 (b.get("major_component") or "").strip() or None,
+                 u["id"], u["name"],
+                 (b.get("responsible") or "").strip() or None,
+                 (b.get("deliver_to") or "").strip() or None,
+                 (b.get("est_delivery") or "").strip() or None,
+                 (b.get("notes") or "").strip() or None))
+    return jsonify(_req_public(q_one("SELECT * FROM part_requests"
+                                     " WHERE id=?", (rid,)))), 201
+
+
+@app.route("/api/part-requests/<int:rid>/review", methods=["POST"])
+def api_part_request_review(rid):
+    """Mentor review: approve (linking a catalog part first when the
+    request is an uncatalogued Order) or deny. Accepts part_id to link
+    an existing part, or new_part to record one and link it in the
+    same step — the 'find it, record it, update the request' flow."""
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    r = q_one("SELECT * FROM part_requests WHERE id=?", (rid,))
+    if not r:
+        return err("request not found", 404)
+    if r["status"] != "pending":
+        return err("only pending requests can be reviewed", 400)
+    b = request.get_json(force=True)
+    action = b.get("action")
+    if action not in ("approve", "deny"):
+        return err("action must be approve or deny")
+    note = (b.get("review_note") or "").strip() or None
+    resp = (b.get("responsible") or "").strip() or None
+    if action == "deny":
+        execute("UPDATE part_requests SET status='denied', review_note=?,"
+                " responsible=COALESCE(?, responsible) WHERE id=?",
+                (note, resp, rid))
+        return jsonify(_req_public(q_one("SELECT * FROM part_requests"
+                                         " WHERE id=?", (rid,))))
+    part_id = r["part_id"]
+    if b.get("new_part"):
+        pid, e = _create_part(b["new_part"])
+        if e:
+            return e
+        part_id = pid
+    elif b.get("part_id"):
+        if not q_one("SELECT * FROM parts WHERE id=?", (b["part_id"],)):
+            return err("catalog part not found", 404)
+        part_id = b["part_id"]
+    if r["method"] == "Order" and not part_id:
+        return err("link a catalog part first — record it if it isn't"
+                   " in the catalog yet", 400)
+    execute("UPDATE part_requests SET status='approved', part_id=?,"
+            " review_note=?, responsible=COALESCE(?, responsible)"
+            " WHERE id=?", (part_id, note, resp, rid))
+    return jsonify(_req_public(q_one("SELECT * FROM part_requests"
+                                     " WHERE id=?", (rid,))))
+
+
+@app.route("/api/part-requests/<int:rid>", methods=["PATCH", "DELETE"])
+def api_part_request(rid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    r = q_one("SELECT * FROM part_requests WHERE id=?", (rid,))
+    if not r:
+        return err("request not found", 404)
+    if request.method == "DELETE":
+        if r["status"] not in ("pending", "approved", "denied"):
+            return err("only pending, approved, or denied requests can"
+                       " be deleted — fulfilled history stays", 409)
+        execute("DELETE FROM part_requests WHERE id=?", (rid,))
+        return jsonify({"ok": True})
+    b = request.get_json(force=True)
+    sets, args = [], []
+    if "part_id" in b:
+        if b["part_id"] is not None and not q_one(
+                "SELECT * FROM parts WHERE id=?", (b["part_id"],)):
+            return err("catalog part not found", 404)
+        sets.append("part_id=?")
+        args.append(b["part_id"])
+    for f in ("part_name", "spec", "major_component", "responsible",
+              "deliver_to", "est_delivery", "notes", "review_note"):
+        if f in b:
+            sets.append(f"{f}=?")
+            args.append((b[f] or "").strip() or None)
+    if "qty" in b:
+        try:
+            qty = int(b["qty"])
+        except (TypeError, ValueError):
+            return err("qty must be a whole number")
+        if qty < 1:
+            return err("qty must be >= 1")
+        sets.append("qty=?")
+        args.append(qty)
+    if "method" in b:
+        if b["method"] not in _REQ_METHODS:
+            return err("method must be Order, 3d print, or CNC")
+        if b["method"] == "Order" and not (b.get("part_id", r["part_id"])):
+            return err("an Order request needs a catalog part — link"
+                       " one first", 400)
+        sets.append("method=?")
+        args.append(b["method"])
+    if "status" in b:
+        if b["status"] not in _REQ_STATUSES:
+            return err("unknown status")
+        if b["status"] != r["status"] and not _req_status_ok(r, b["status"]):
+            return err(f"cannot move a {r['status']} request to"
+                       f" {b['status']}", 400)
+        sets.append("status=?")
+        args.append(b["status"])
+    if not sets:
+        return err("nothing to update")
+    args.append(rid)
+    execute(f"UPDATE part_requests SET {', '.join(sets)} WHERE id=?", args)
+    return jsonify(_req_public(q_one("SELECT * FROM part_requests"
+                                     " WHERE id=?", (rid,))))
+
+
+def _batch_public(batch):
+    d = dict(batch)
+    members = q_all("SELECT * FROM part_requests WHERE batch_id=?"
+                    " ORDER BY id", (batch["id"],))
+    lines, total, unpriced = [], 0.0, 0
+    for m in members:
+        line = _req_public(m)
+        cost = line["part"]["cost_each"] if line["part"] else None
+        line["line_total"] = round(cost * m["qty"], 2) \
+            if cost is not None else None
+        if line["line_total"] is None:
+            unpriced += 1
+        else:
+            total += line["line_total"]
+        lines.append(line)
+    d["members"] = lines
+    d["total"] = round(total, 2)
+    d["unpriced_lines"] = unpriced
+    d["invoices"] = [dict(f) for f in q_all(
+        "SELECT id, filename, size_bytes, note, uploaded_at"
+        " FROM invoice_files WHERE batch_id=? ORDER BY id",
+        (batch["id"],))]
+    return d
+
+
+@app.route("/api/order-batches", methods=["GET", "POST"])
+def api_order_batches():
+    if request.method == "GET":
+        return jsonify([_batch_public(x) for x in q_all(
+            "SELECT * FROM order_batches ORDER BY id DESC")])
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    b = request.get_json(force=True)
+    vendor = (b.get("vendor") or "").strip()
+    if not vendor:
+        return err("vendor is required")
+    bid = execute("INSERT INTO order_batches (vendor, notes) VALUES (?,?)",
+                  (vendor, (b.get("notes") or "").strip() or None))
+    return jsonify(_batch_public(q_one("SELECT * FROM order_batches"
+                                       " WHERE id=?", (bid,)))), 201
+
+
+@app.route("/api/order-batches/<int:bid>", methods=["PATCH", "DELETE"])
+def api_order_batch(bid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    batch = q_one("SELECT * FROM order_batches WHERE id=?", (bid,))
+    if not batch:
+        return err("batch not found", 404)
+    if request.method == "DELETE":
+        if batch["status"] != "draft":
+            return err("only draft batches can be deleted", 409)
+        execute("UPDATE part_requests SET batch_id=NULL WHERE batch_id=?",
+                (bid,))
+        execute("DELETE FROM order_batches WHERE id=?", (bid,))
+        return jsonify({"ok": True})
+    b = request.get_json(force=True)
+    sets, args = [], []
+    if "vendor" in b:
+        if batch["status"] != "draft":
+            return err("vendor can only change while the batch is draft")
+        n = q_one("SELECT COUNT(*) AS n FROM part_requests"
+                  " WHERE batch_id=?", (bid,))["n"]
+        if n:
+            return err("remove the batch lines before changing vendor")
+        if not (b["vendor"] or "").strip():
+            return err("vendor is required")
+        sets.append("vendor=?")
+        args.append(b["vendor"].strip())
+    if "notes" in b:
+        sets.append("notes=?")
+        args.append((b["notes"] or "").strip() or None)
+    if "reimbursement" in b:
+        if b["reimbursement"] not in _REIMB_STATUSES:
+            return err("reimbursement must be not_submitted, submitted,"
+                       " or reimbursed")
+        sets.append("reimbursement=?")
+        args.append(b["reimbursement"])
+    if "status" in b:
+        new = b["status"]
+        if new not in _BATCH_STATUSES:
+            return err("unknown batch status")
+        old = batch["status"]
+        if new == "ordered":
+            if old != "draft":
+                return err("only a draft batch can be ordered")
+            conf = (b.get("confirmation_no")
+                    or batch["confirmation_no"] or "").strip()
+            if not conf:
+                return err("a confirmation number is required to mark"
+                           " a batch ordered")
+            sets.append("confirmation_no=?")
+            args.append(conf)
+            execute("UPDATE part_requests SET status='ordered'"
+                    " WHERE batch_id=? AND status IN ('approved',"
+                    " 'assigned')", (bid,))
+        elif new == "received":
+            if old != "ordered":
+                return err("only an ordered batch can be received")
+            execute("UPDATE part_requests SET status='received'"
+                    " WHERE batch_id=? AND status='ordered'", (bid,))
+        elif new == "draft":
+            return err("a batch cannot go back to draft")
+        sets.append("status=?")
+        args.append(new)
+    if "confirmation_no" in b and "status" not in b:
+        sets.append("confirmation_no=?")
+        args.append((b["confirmation_no"] or "").strip() or None)
+    if not sets:
+        return err("nothing to update")
+    args.append(bid)
+    execute(f"UPDATE order_batches SET {', '.join(sets)} WHERE id=?", args)
+    return jsonify(_batch_public(q_one("SELECT * FROM order_batches"
+                                       " WHERE id=?", (bid,))))
+
+
+@app.route("/api/order-batches/<int:bid>/requests", methods=["POST"])
+def api_order_batch_add(bid):
+    """Add an approved/assigned Order request to a draft batch. The
+    request's catalog part vendor must match the batch vendor — this
+    is what keeps a batch to one vendor's cart."""
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    batch = q_one("SELECT * FROM order_batches WHERE id=?", (bid,))
+    if not batch:
+        return err("batch not found", 404)
+    if batch["status"] != "draft":
+        return err("only draft batches accept new lines")
+    b = request.get_json(force=True)
+    r = q_one("SELECT * FROM part_requests WHERE id=?", (b.get("request_id"),))
+    if not r:
+        return err("request not found", 404)
+    if r["method"] != "Order":
+        return err("only Order requests go into a vendor batch")
+    if r["status"] not in ("approved", "assigned"):
+        return err("only approved or assigned requests can be batched")
+    if r["batch_id"] is not None:
+        return err("request is already in a batch")
+    part = q_one("SELECT * FROM parts WHERE id=?", (r["part_id"],)) \
+        if r["part_id"] else None
+    if not part or (part["vendor"] or "").lower() != batch["vendor"].lower():
+        return err("the request's catalog part vendor does not match"
+                   " this batch vendor")
+    execute("UPDATE part_requests SET batch_id=? WHERE id=?", (bid, r["id"]))
+    return jsonify(_batch_public(batch))
+
+
+@app.route("/api/order-batches/<int:bid>/requests/<int:rid>",
+           methods=["DELETE"])
+def api_order_batch_remove(bid, rid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    batch = q_one("SELECT * FROM order_batches WHERE id=?", (bid,))
+    if not batch or batch["status"] != "draft":
+        return err("only draft batches can drop lines", 400)
+    r = q_one("SELECT * FROM part_requests WHERE id=? AND batch_id=?",
+              (rid, bid))
+    if not r:
+        return err("request is not in this batch", 404)
+    execute("UPDATE part_requests SET batch_id=NULL WHERE id=?", (rid,))
+    return jsonify(_batch_public(batch))
+
+
+@app.route("/api/order-batches/<int:bid>/quick-order.csv", methods=["GET"])
+def api_order_batch_csv(bid):
+    """Quick Order CSV: one row per batch line (SKU, qty) in the
+    bulk-add format AndyMark/WCP-style Quick Order pages accept, so
+    a batch goes into the vendor cart without retyping."""
+    batch = q_one("SELECT * FROM order_batches WHERE id=?", (bid,))
+    if not batch:
+        return err("batch not found", 404)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["SKU", "Qty", "Part", "Order Link"])
+    for m in q_all("SELECT * FROM part_requests WHERE batch_id=?"
+                   " ORDER BY id", (bid,)):
+        part = q_one("SELECT * FROM parts WHERE id=?", (m["part_id"],)) \
+            if m["part_id"] else None
+        w.writerow([part["sku"] if part else "", m["qty"],
+                    part["name"] if part else m["part_name"],
+                    part["order_link"] if part else ""])
+    return app.response_class(buf.getvalue(), mimetype="text/csv",
+                              headers={"Content-Disposition":
+                                       f"attachment; filename=batch-{bid}-quick-order.csv"})
+
+
+@app.route("/api/order-batches/<int:bid>/invoices", methods=["POST"])
+def api_order_batch_invoice(bid):
+    """Invoice upload (mentor-only). Files land in INVOICE_DIR (next
+    to the app, never in the git repo) under an id-based stored name;
+    the DB keeps the original filename + metadata."""
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    batch = q_one("SELECT * FROM order_batches WHERE id=?", (bid,))
+    if not batch:
+        return err("batch not found", 404)
+    if batch["status"] == "draft":
+        return err("order the batch first — invoices attach to an"
+                   " order, not a draft", 400)
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return err("no file uploaded", 400)
+    from werkzeug.utils import secure_filename
+    ext = f.filename.rsplit(".", 1)[-1].lower() if "." in f.filename else ""
+    if ext not in _INVOICE_EXTS:
+        return err("invoice must be a PDF or image"
+                   " (pdf, png, jpg, webp, gif)", 400)
+    data = f.read(_INVOICE_MAX_BYTES + 1)
+    if len(data) > _INVOICE_MAX_BYTES:
+        return err("invoice is too large (25MB max)", 400)
+    os.makedirs(INVOICE_DIR, exist_ok=True)
+    iid = execute("INSERT INTO invoice_files (batch_id, filename,"
+                  " stored_name, size_bytes, note) VALUES (?,?,?, ?,?)",
+                  (bid, secure_filename(f.filename), "", len(data),
+                   (request.form.get("note") or "").strip() or None))
+    stored = f"{bid}_{iid}_{secure_filename(f.filename)}"
+    with open(os.path.join(INVOICE_DIR, stored), "wb") as fh:
+        fh.write(data)
+    execute("UPDATE invoice_files SET stored_name=? WHERE id=?",
+            (stored, iid))
+    return jsonify(dict(q_one("SELECT id, filename, size_bytes, note,"
+                              " uploaded_at FROM invoice_files"
+                              " WHERE id=?", (iid,)))), 201
+
+
+@app.route("/api/invoices/<int:iid>/file", methods=["GET"])
+def api_invoice_file(iid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    inv = q_one("SELECT * FROM invoice_files WHERE id=?", (iid,))
+    if not inv or not inv["stored_name"]:
+        return err("invoice not found", 404)
+    path = os.path.join(INVOICE_DIR, inv["stored_name"])
+    if not os.path.isfile(path):
+        return err("invoice file is missing from disk", 404)
+    return send_from_directory(INVOICE_DIR, inv["stored_name"],
+                               as_attachment=True)
+
+
+@app.route("/api/invoices/<int:iid>", methods=["DELETE"])
+def api_invoice_delete(iid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    inv = q_one("SELECT * FROM invoice_files WHERE id=?", (iid,))
+    if not inv:
+        return err("invoice not found", 404)
+    try:
+        if inv["stored_name"]:
+            os.remove(os.path.join(INVOICE_DIR, inv["stored_name"]))
+    except OSError:
+        pass
+    execute("DELETE FROM invoice_files WHERE id=?", (iid,))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/parts/export", methods=["GET"])
+def api_parts_export():
+    """Catalog export: the same columns the import accepts, so the
+    team's Order B sheet round-trips through the module."""
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Name", "SKU", "Vendor", "Order Link", "Cost Each",
+                "Subsystems", "On Hand", "Notes"])
+    for p in q_all("SELECT * FROM parts ORDER BY name"):
+        w.writerow([p["name"], p["sku"] or "", p["vendor"] or "",
+                    p["order_link"] or "",
+                    "" if p["cost_each"] is None else p["cost_each"],
+                    p["subsystems"] or "", p["on_hand"] or 0,
+                    p["notes"] or ""])
+    return app.response_class(buf.getvalue(), mimetype="text/csv",
+                              headers={"Content-Disposition":
+                                       "attachment; filename=parts-catalog.csv"})
+
+
+@app.route("/api/parts/import", methods=["POST"])
+@require_role("mentor", "admin")
+def api_parts_import():
+    """Catalog import: upsert by (vendor, SKU) — or by vendor + name
+    when a row has no SKU — never deletes. Only columns present in
+    the file overwrite on update. Single-step (like tools import)
+    because nothing here deletes; the summary is the record."""
+    f = request.files.get("file")
+    if not f or not f.filename:
+        return err("no file uploaded", 400)
+    try:
+        headers, rows = _csv_read(f)
+    except ValueError as e:
+        return err(str(e), 400)
+    known = {"name", "part", "sku", "part number", "partnumber",
+             "vendor", "order link", "orderlink", "link", "cost each",
+             "cost", "price", "subsystems", "subsystem", "on hand",
+             "onhand", "notes"}
+    if not (set(headers) & known):
+        return err("no recognized columns — is this the right file?"
+                   " Export CSV gives you the template.", 400)
+    existing = {}
+    for p in q_all("SELECT * FROM parts"):
+        key = ((p["vendor"] or "").lower(),
+               (p["sku"] or "").lower()) if p["sku"] else \
+              ((p["vendor"] or "").lower(), _norm_name(p["name"]))
+        existing[key] = p
+    added = updated = 0
+    skipped = []
+    for line, row in rows:
+        name = (row.get("name") or row.get("part") or "").strip()
+        if not name:
+            skipped.append(f"line {line}: no name")
+            continue
+        link = (row.get("order link") or row.get("orderlink")
+                or row.get("link") or "").strip()
+        vendor = (row.get("vendor") or "").strip() \
+            or _part_vendor_from_link(link)
+        sku = _clean_sku(row.get("sku") or row.get("part number")
+                         or row.get("partnumber"))
+        key = ((vendor or "").lower(), (sku or "").lower()) if sku else \
+              ((vendor or "").lower(), _norm_name(name))
+        cost = _parse_cost(row.get("cost each") or row.get("cost")
+                           or row.get("price"))
+        vals = {"name": name, "sku": sku, "vendor": vendor,
+                "order_link": link or None, "cost_each": cost,
+                "subsystems": (row.get("subsystems")
+                               or row.get("subsystem") or "").strip()
+                or None,
+                "notes": (row.get("notes") or "").strip() or None}
+        on_hand_raw = (row.get("on hand") or row.get("onhand") or "").strip()
+        if on_hand_raw:
+            try:
+                vals["on_hand"] = int(on_hand_raw)
+            except ValueError:
+                skipped.append(f"line {line} ({name}): bad on hand")
+                continue
+        old = existing.get(key)
+        if old:
+            sets = [f"{k}=?" for k, v in vals.items()
+                    if v is not None or k in ("sku", "order_link",
+                                             "subsystems", "notes")]
+            if "on_hand" in vals:
+                sets.append("on_hand=?")
+            if not sets:
+                skipped.append(f"line {line} ({name}): nothing new")
+                continue
+            args = [vals[k] for k in vals if k in
+                    [s.split("=")[0] for s in sets]]
+            if "on_hand" in vals:
+                args.append(vals["on_hand"])
+            args.append(old["id"])
+            execute(f"UPDATE parts SET {', '.join(sets)} WHERE id=?", args)
+            updated += 1
+        else:
+            vals.setdefault("on_hand", 0)
+            pid = execute("""INSERT INTO parts (name, sku, vendor,
+                           order_link, cost_each, subsystems, on_hand,
+                           notes) VALUES (?,?,?,?,?,?,?,?)""",
+                        (vals["name"], vals["sku"], vals["vendor"],
+                         vals["order_link"], vals["cost_each"],
+                         vals["subsystems"], vals["on_hand"],
+                         vals["notes"]))
+            existing[key] = q_one("SELECT * FROM parts WHERE id=?", (pid,))
+            added += 1
+    return jsonify({"added": added, "updated": updated,
+                    "skipped": skipped})
 
 
 # ----------------------------------------------------------------------------
