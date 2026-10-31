@@ -125,6 +125,7 @@ def _migrate(db):
     member_cols = {r[1] for r in db.execute("PRAGMA table_info(members)")}
     lr_cols = {r[1] for r in db.execute("PRAGMA table_info(link_requests)")}
     tool_cols = {r[1] for r in db.execute("PRAGMA table_info(tools)")}
+    part_cols = {r[1] for r in db.execute("PRAGMA table_info(parts)")}
     van_cols = {r[1] for r in db.execute("PRAGMA table_info(team_vans)")}
     with _lock:
         if "parent_member_id" not in room_cols:
@@ -143,6 +144,10 @@ def _migrate(db):
             db.execute("ALTER TABLE tools ADD COLUMN vehicle_type TEXT")
         if "vehicle_id" not in tool_cols:
             db.execute("ALTER TABLE tools ADD COLUMN vehicle_id INTEGER")
+        if "method" not in part_cols:
+            db.execute("ALTER TABLE parts ADD COLUMN method TEXT NOT NULL DEFAULT 'Order'")
+        if "spec" not in part_cols:
+            db.execute("ALTER TABLE parts ADD COLUMN spec TEXT")
         if "driver_user_id" not in van_cols:
             db.execute("ALTER TABLE team_vans ADD COLUMN driver_user_id INTEGER")
         if "seats" not in van_cols:
@@ -6109,14 +6114,25 @@ def _clean_sku(sku):
     return s or None
 
 
-def _part_dup(vendor, sku, exclude_id=None):
-    """Existing part with the same (vendor, SKU), case-insensitive."""
-    if not sku:
+def _part_dup(vendor, sku, name=None, exclude_id=None):
+    """Existing part with the same (vendor, SKU) — or the same
+    (vendor, name) when there is no SKU — case-insensitive. The
+    no-SKU fallback mirrors the import's key; without it, sku-less
+    parts (most fab parts) could be recorded twice under one name."""
+    if sku:
+        row = q_one("""SELECT * FROM parts WHERE upper(vendor)=upper(?)
+                       AND upper(sku)=upper(?)""", (vendor or "", sku))
+        if row and (exclude_id is None or row["id"] != exclude_id):
+            return row
         return None
-    row = q_one("""SELECT * FROM parts WHERE upper(vendor)=upper(?)
-                   AND upper(sku)=upper(?)""", (vendor or "", sku))
-    if row and (exclude_id is None or row["id"] != exclude_id):
-        return row
+    if not name:
+        return None
+    norm = _norm_name(name)
+    for row in q_all("SELECT * FROM parts WHERE upper(vendor)=upper(?)",
+                     (vendor or "",)):
+        if not row["sku"] and _norm_name(row["name"]) == norm:
+            if exclude_id is None or row["id"] != exclude_id:
+                return row
     return None
 
 
@@ -6140,11 +6156,15 @@ def _create_part(b):
         return None, err("part name is required")
     link = (b.get("order_link") or "").strip()
     vendor = (b.get("vendor") or "").strip() or _part_vendor_from_link(link)
+    method = (b.get("method") or "Order").strip()
+    if method not in _REQ_METHODS:
+        return None, err("method must be Order, 3d print, or CNC")
+    spec = (b.get("spec") or "").strip() or None
     sku = _clean_sku(b.get("sku"))
     cost = _parse_cost(b.get("cost_each"))
     if b.get("cost_each") not in (None, "") and cost is None:
         return None, err("cost must be a number >= 0")
-    dup = _part_dup(vendor, sku)
+    dup = _part_dup(vendor, sku, name)
     if dup:
         return None, err(f"already in the catalog as '{dup['name']}'"
                          " — link that part instead", 409)
@@ -6155,9 +6175,9 @@ def _create_part(b):
     if on_hand < 0:
         return None, err("on hand must be >= 0")
     pid = execute("""INSERT INTO parts (name, sku, vendor, order_link,
-                   cost_each, subsystems, on_hand, notes)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (name, sku, vendor, link or None, cost,
+                   method, spec, cost_each, subsystems, on_hand, notes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (name, sku, vendor, link or None, method, spec, cost,
                  (b.get("subsystems") or "").strip() or None, on_hand,
                  (b.get("notes") or "").strip() or None))
     return pid, None
@@ -6247,11 +6267,15 @@ def api_part(pid):
     link = (b.get("order_link", part["order_link"] or "") or "").strip()
     vendor = (b.get("vendor", part["vendor"] or "") or "").strip() \
         or _part_vendor_from_link(link)
+    method = (b.get("method", part["method"] or "Order") or "Order").strip()
+    if method not in _REQ_METHODS:
+        return err("method must be Order, 3d print, or CNC")
+    spec = (b.get("spec", part["spec"] or "") or "").strip() or None
     sku = _clean_sku(b.get("sku", part["sku"]))
     cost = _parse_cost(b.get("cost_each", part["cost_each"]))
     if "cost_each" in b and b["cost_each"] not in (None, "") and cost is None:
         return err("cost must be a number >= 0")
-    dup = _part_dup(vendor, sku, exclude_id=pid)
+    dup = _part_dup(vendor, sku, name, exclude_id=pid)
     if dup:
         return err(f"already in the catalog as '{dup['name']}'", 409)
     try:
@@ -6261,8 +6285,9 @@ def api_part(pid):
     if on_hand < 0:
         return err("on hand must be >= 0")
     execute("""UPDATE parts SET name=?, sku=?, vendor=?, order_link=?,
-             cost_each=?, subsystems=?, on_hand=?, notes=? WHERE id=?""",
-            (name, sku, vendor, link or None, cost,
+             method=?, spec=?, cost_each=?, subsystems=?, on_hand=?,
+             notes=? WHERE id=?""",
+            (name, sku, vendor, link or None, method, spec, cost,
              (b.get("subsystems", part["subsystems"] or "") or "").strip()
              or None, on_hand,
              (b.get("notes", part["notes"] or "") or "").strip() or None,
@@ -6343,6 +6368,10 @@ def api_part_request_review(rid):
                                          " WHERE id=?", (rid,))))
     part_id = r["part_id"]
     if b.get("new_part"):
+        # A part recorded for a fab request inherits that request's
+        # method + spec unless the mentor says otherwise.
+        b["new_part"].setdefault("method", r["method"])
+        b["new_part"].setdefault("spec", r["spec"])
         pid, e = _create_part(b["new_part"])
         if e:
             return e
@@ -6692,11 +6721,12 @@ def api_parts_export():
         return denied
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Name", "SKU", "Vendor", "Order Link", "Cost Each",
-                "Subsystems", "On Hand", "Notes"])
+    w.writerow(["Name", "SKU", "Vendor", "Order Link", "Method", "Spec",
+                "Cost Each", "Subsystems", "On Hand", "Notes"])
     for p in q_all("SELECT * FROM parts ORDER BY name"):
         w.writerow([p["name"], p["sku"] or "", p["vendor"] or "",
-                    p["order_link"] or "",
+                    p["order_link"] or "", p["method"] or "Order",
+                    p["spec"] or "",
                     "" if p["cost_each"] is None else p["cost_each"],
                     p["subsystems"] or "", p["on_hand"] or 0,
                     p["notes"] or ""])
@@ -6726,12 +6756,18 @@ def api_parts_import():
                    " parts-catalog.csv (the converted file), not"
                    " order-b.csv.", 400)
     known = {"name", "part", "sku", "part number", "partnumber",
-             "vendor", "order link", "orderlink", "link", "cost each",
+             "vendor", "order link", "orderlink", "link", "method",
+             "spec", "spec (stl or url)", "cost each",
              "cost", "price", "subsystems", "subsystem", "on hand",
              "onhand", "notes"}
     if not (set(headers) & known):
         return err("no recognized columns — is this the right file?"
                    " Export CSV gives you the template.", 400)
+    has_method = "method" in headers
+    has_spec = "spec" in headers or "spec (stl or url)" in headers
+    clearable = {"sku", "order_link", "subsystems", "notes"}
+    if has_spec:
+        clearable.add("spec")
     existing = {}
     for p in q_all("SELECT * FROM parts"):
         key = ((p["vendor"] or "").lower(),
@@ -6755,8 +6791,16 @@ def api_parts_import():
               ((vendor or "").lower(), _norm_name(name))
         cost = _parse_cost(row.get("cost each") or row.get("cost")
                            or row.get("price"))
+        method_raw = (row.get("method") or "").strip()
+        if has_method and method_raw and method_raw not in _REQ_METHODS:
+            skipped.append(f"line {line} ({name}): bad method")
+            continue
         vals = {"name": name, "sku": sku, "vendor": vendor,
-                "order_link": link or None, "cost_each": cost,
+                "order_link": link or None,
+                "method": method_raw or None,
+                "spec": (row.get("spec") or row.get("spec (stl or url)")
+                         or "").strip() or None,
+                "cost_each": cost,
                 "subsystems": (row.get("subsystems")
                                or row.get("subsystem") or "").strip()
                 or None,
@@ -6771,8 +6815,7 @@ def api_parts_import():
         old = existing.get(key)
         if old:
             sets = [f"{k}=?" for k, v in vals.items()
-                    if v is not None or k in ("sku", "order_link",
-                                             "subsystems", "notes")]
+                    if v is not None or k in clearable]
             if "on_hand" in vals:
                 sets.append("on_hand=?")
             if not sets:
@@ -6788,10 +6831,12 @@ def api_parts_import():
         else:
             vals.setdefault("on_hand", 0)
             pid = execute("""INSERT INTO parts (name, sku, vendor,
-                           order_link, cost_each, subsystems, on_hand,
-                           notes) VALUES (?,?,?,?,?,?,?,?)""",
+                           order_link, method, spec, cost_each,
+                           subsystems, on_hand,
+                           notes) VALUES (?,?,?,?,?,?,?,?,?,?)""",
                         (vals["name"], vals["sku"], vals["vendor"],
-                         vals["order_link"], vals["cost_each"],
+                         vals["order_link"], vals["method"] or "Order",
+                         vals["spec"], vals["cost_each"],
                          vals["subsystems"], vals["on_hand"],
                          vals["notes"]))
             existing[key] = q_one("SELECT * FROM parts WHERE id=?", (pid,))

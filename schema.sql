@@ -321,6 +321,8 @@ CREATE TABLE IF NOT EXISTS parts (
   sku           TEXT,
   vendor        TEXT NOT NULL DEFAULT '',
   order_link    TEXT,
+  method        TEXT NOT NULL DEFAULT 'Order',
+  spec          TEXT,
   cost_each     REAL,
   subsystems    TEXT,
   on_hand       INTEGER NOT NULL DEFAULT 0,

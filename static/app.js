@@ -3552,6 +3552,11 @@ function partLinkHTML(p) {
   return ` <a href="${esc(p.order_link)}" target="_blank" rel="noopener">Order link ↗</a>`;
 }
 
+function partSpecHTML(p) {
+  if (!p || !p.spec) return "";
+  return p.spec.startsWith("http") ? ` <a href="${esc(p.spec)}" target="_blank" rel="noopener">Spec ↗</a>` : ` <span class="sub">Spec: ${esc(p.spec)}</span>`;
+}
+
 function partOptionsHTML(parts, selectedId, includeNew) {
   let out = `<option value="">— Not in catalog —</option>`;
   for (const p of parts) {
@@ -3582,10 +3587,11 @@ function partRowHTML(p, alt) {
   const reqBtn = ME && ME.role !== "parent" ? `<button class="btn small" data-reqpart="${p.id}">Request</button>` : "";
   const acts = reqBtn + mentorBtns;
   const altCls = alt ? ' class="alt"' : "";
+  const vendorCell = p.method && p.method !== "Order" ? esc(p.method) : esc(p.vendor || "—");
   return `<tr data-sub="${esc(p.subsystems || "")}"${altCls}>
-    <td class="pc-name">${esc(p.name)}${partLinkHTML(p)}</td>
+    <td class="pc-name">${esc(p.name)}${partLinkHTML(p)}${partSpecHTML(p)}</td>
     <td class="pc-dim">${esc(p.sku || "—")}</td>
-    <td class="pc-dim">${esc(p.vendor || "—")}</td>
+    <td class="pc-dim">${vendorCell}</td>
     <td class="pc-num">${cost}</td>
     <td class="pc-num">${p.on_hand || 0}</td>
     <td class="pc-dim">${esc(p.subsystems || "—")}</td>
@@ -3764,6 +3770,8 @@ async function renderParts() {
     <div class="field"><label>SKU / part number</label><input id="pc-sku" type="text"></div></div>
     <div class="row"><div class="field"><label>Vendor</label><input id="pc-vendor" type="text" placeholder="Blank = derived from the link"></div>
     <div class="field"><label>Order link</label><input id="pc-link" type="text"></div></div>
+    <div class="row"><div class="field"><label>Method</label><select id="pc-method"><option>Order</option><option>3d print</option><option>CNC</option></select></div>
+    <div class="field hidden" id="pc-spec-field"><label>Spec (STL file or CAD link)</label><input id="pc-spec" type="text"></div></div>
     <div class="row"><div class="field"><label>Cost each</label><input id="pc-cost" type="number" min="0" step="0.01"></div>
     <div class="field"><label>On hand</label><input id="pc-onhand" type="number" min="0" step="1"></div></div>
     <div class="row"><div class="field"><label>Subsystems</label><input id="pc-subsystems" type="text" placeholder="e.g. Turret / Drivebase"></div>
@@ -3777,7 +3785,7 @@ async function renderParts() {
   <div id="pp-requests" class="hidden">
   <div id="pf-form-wrap"><div class="card create-zone ${reqFormOpen ? "" : "collapsed"}" id="pf-form-card"><button class="create-toggle" type="button" id="pf-form-toggle"><span class="ct-plus">${reqFormOpen ? "－" : "＋"}</span> Request a part</button><div class="create-body">
     <div class="field"><label>Catalog part</label><select id="pf-part">${partOptionsHTML(parts, null, false)}</select></div>
-    <div id="pf-picked" class="hidden"><p class="sub" id="pf-picked-line"></p></div>
+    <div id="pf-picked" class="hidden"><p class="sub" id="pf-picked-line"></p><div class="field hidden" id="pf-picked-spec-field"><label>Spec (STL file or CAD link)</label><input id="pf-picked-spec" type="text"></div></div>
     <div id="pf-free">
       <div class="field"><label>Part name</label><input id="pf-name" type="text" placeholder="As you would describe it"></div>
       <div class="field"><label>Spec (STL file or vendor URL)</label><input id="pf-spec" type="text"></div>
@@ -3871,7 +3879,11 @@ function syncRequestForm() {
       const cost = p.cost_each == null ? "no recorded cost" : "$" + Number(p.cost_each).toFixed(2) + " each";
       const link = p.order_link ? ` — <a href="${esc(p.order_link)}" target="_blank" rel="noopener">Order link ↗</a>` : "";
       const skuPart = p.sku ? " (" + esc(p.sku) + ")" : "";
-      v.querySelector("#pf-picked-line").innerHTML = "From the catalog: " + esc(p.name) + skuPart + " · " + cost + link;
+      const specPart = p.method && p.method !== "Order" && p.spec ? (p.spec.startsWith("http") ? ` — <a href="${esc(p.spec)}" target="_blank" rel="noopener">Spec ↗</a>` : " · Spec: " + esc(p.spec)) : "";
+      v.querySelector("#pf-picked-line").innerHTML = "From the catalog: " + esc(p.name) + skuPart + " · " + cost + link + specPart;
+      const msel = v.querySelector("#pf-method"); if (msel) msel.value = p.method || "Order";
+      const pspec = v.querySelector("#pf-picked-spec"); if (pspec) pspec.value = p.spec || "";
+      const psf = v.querySelector("#pf-picked-spec-field"); if (psf) psf.classList.toggle("hidden", !p.method || p.method === "Order");
     }
     picked.classList.remove("hidden");
     free.classList.add("hidden");
@@ -3910,6 +3922,13 @@ function bindPartsView(v) {
       body.spec = val("#pf-spec");
       if (!body.part_name) { toast("Name the part or pick one from the catalog."); return; }
     }
+    if (partId) {
+      const psf = q("#pf-picked-spec-field");
+      if (psf && !psf.classList.contains("hidden")) {
+        const ps = val("#pf-picked-spec");
+        if (ps) body.spec = ps;
+      }
+    }
     try {
       await POST("/api/part-requests", body);
       toast("Request filed — pending mentor approval.");
@@ -3943,7 +3962,9 @@ function bindPartsView(v) {
 
   const resetPartForm = () => {
     editingPartId = null;
-    ["#pc-name", "#pc-sku", "#pc-vendor", "#pc-link", "#pc-cost", "#pc-subsystems", "#pc-onhand", "#pc-notes"].forEach((s) => { const el = q(s); if (el) el.value = ""; });
+    ["#pc-name", "#pc-sku", "#pc-vendor", "#pc-link", "#pc-cost", "#pc-subsystems", "#pc-onhand", "#pc-notes", "#pc-spec"].forEach((s) => { const el = q(s); if (el) el.value = ""; });
+    const pm = q("#pc-method"); if (pm) pm.value = "Order";
+    const psf = q("#pc-spec-field"); if (psf) psf.classList.add("hidden");
     const t = q("#pc-form-title"); if (t) t.textContent = "Add a catalog part";
     const sb = q("#pc-part-submit"); if (sb) sb.textContent = "Add part";
     const cb = q("#pc-cancel-edit"); if (cb) cb.classList.add("hidden");
@@ -3959,7 +3980,8 @@ function bindPartsView(v) {
   if (partSubmit) partSubmit.addEventListener("click", async () => {
     const body = {
       name: val("#pc-name"), sku: val("#pc-sku"), vendor: val("#pc-vendor"),
-      order_link: val("#pc-link"), cost_each: val("#pc-cost"),
+      order_link: val("#pc-link"), method: q("#pc-method") ? q("#pc-method").value : "Order",
+      spec: val("#pc-spec"), cost_each: val("#pc-cost"),
       subsystems: val("#pc-subsystems"), on_hand: val("#pc-onhand"), notes: val("#pc-notes"),
     };
     if (!body.name) { toast("Part name is required."); return; }
@@ -3968,6 +3990,11 @@ function bindPartsView(v) {
       resetPartForm();
       renderParts();
     } catch (e) { toast("Error: " + e.message); }
+  });
+  const pcMethod = q("#pc-method");
+  if (pcMethod) pcMethod.addEventListener("change", () => {
+    const psf = q("#pc-spec-field");
+    if (psf) psf.classList.toggle("hidden", pcMethod.value === "Order");
   });
   qa("[data-delpart]").forEach((b) => b.addEventListener("click", async () => {
     if (!confirm("Delete this catalog part?")) return;
@@ -4104,6 +4131,8 @@ function openPcEditModal(p) {
   set("pe-name", p.name); set("pe-sku", p.sku || ""); set("pe-vendor", p.vendor || "");
   set("pe-link", p.order_link || ""); set("pe-cost", p.cost_each == null ? "" : p.cost_each);
   set("pe-subsystems", p.subsystems || ""); set("pe-onhand", p.on_hand || 0); set("pe-notes", p.notes || "");
+  set("pe-method", p.method || "Order"); set("pe-spec", p.spec || "");
+  const psf = $("pe-spec-field"); if (psf) psf.classList.toggle("hidden", !p.method || p.method === "Order");
   const m = $("pc-edit-modal");
   if (m) m.classList.add("open");
 }
@@ -4116,12 +4145,15 @@ function closePcEditModal() {
 
 const _pcEditModal = $("pc-edit-modal");
 if (_pcEditModal) _pcEditModal.addEventListener("click", (e) => { if (e.target === _pcEditModal) closePcEditModal(); });
+const _peMethod = $("pe-method");
+if (_peMethod) _peMethod.addEventListener("change", () => { const f = $("pe-spec-field"); if (f) f.classList.toggle("hidden", _peMethod.value === "Order"); });
 const _peSubmit = $("pe-submit");
 if (_peSubmit) _peSubmit.addEventListener("click", async () => {
   if (!editingPartId) return;
   const body = {
     name: $("pe-name").value.trim(), sku: $("pe-sku").value.trim(), vendor: $("pe-vendor").value.trim(),
-    order_link: $("pe-link").value.trim(), cost_each: $("pe-cost").value.trim(),
+    order_link: $("pe-link").value.trim(), method: $("pe-method").value, spec: $("pe-spec").value.trim(),
+    cost_each: $("pe-cost").value.trim(),
     subsystems: $("pe-subsystems").value.trim(), on_hand: $("pe-onhand").value.trim(), notes: $("pe-notes").value.trim(),
   };
   if (!body.name) { toast("Part name is required."); return; }
@@ -4138,11 +4170,14 @@ function openRqModal(p) {
   const cost = p.cost_each == null ? "no recorded cost" : "$" + Number(p.cost_each).toFixed(2) + " each";
   const link = p.order_link ? ` — <a href="${esc(p.order_link)}" target="_blank" rel="noopener">Order link ↗</a>` : "";
   const skuPart = p.sku ? " (" + esc(p.sku) + ")" : "";
+  const specPart = p.method && p.method !== "Order" && p.spec ? (p.spec.startsWith("http") ? ` — <a href="${esc(p.spec)}" target="_blank" rel="noopener">Spec ↗</a>` : " · Spec: " + esc(p.spec)) : "";
   const line = $("rq-part-line");
-  if (line) line.innerHTML = "From the catalog: " + esc(p.name) + skuPart + " · " + cost + link;
+  if (line) line.innerHTML = "From the catalog: " + esc(p.name) + skuPart + " · " + cost + link + specPart;
   const set = (id, v2) => { const el = $(id); if (el) el.value = v2; };
-  set("rq-qty", 1); set("rq-method", "Order"); set("rq-comp", "");
+  set("rq-qty", 1); set("rq-method", p.method || "Order"); set("rq-comp", "");
+  set("rq-spec", p.spec || "");
   set("rq-deliver", ME ? ME.name : ""); set("rq-est", ""); set("rq-notes", "");
+  const rsf = $("rq-spec-field"); if (rsf) rsf.classList.toggle("hidden", !p.method || p.method === "Order");
   const m = $("rq-modal");
   if (m) m.classList.add("open");
 }
@@ -4162,6 +4197,7 @@ if (_rqSubmit) _rqSubmit.addEventListener("click", async () => {
     part_id: rqPartId,
     qty: parseInt($("rq-qty").value || "1", 10),
     method: $("rq-method").value,
+    spec: $("rq-spec").value.trim(),
     major_component: $("rq-comp").value.trim(),
     deliver_to: $("rq-deliver").value.trim(),
     est_delivery: $("rq-est").value.trim(),

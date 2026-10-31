@@ -942,6 +942,19 @@ well as in the UI. On a multi-day trip the ride and room lists are per day
   McMaster-Carr, AndyMark, REV, VEX, Swyft, ThriftyBot, CTR, SDS,
   DigiKey, Mouser, Amazon, else the domain itself). Creating a
   duplicate vendor + SKU 409s — link the existing part instead.
+  Sku-less parts dedupe by vendor + name (the same key the import
+  uses). **Fabricated parts:** a part also carries a Method
+  (Order / 3d print / CNC, default Order) and a Spec (STL file or
+  CAD link, shown only for print/CNC). A fab part needs no vendor
+  or SKU; its row shows the method where the vendor would be and
+  its spec as a link (URL) or plain text. Requesting a fab part
+  from the catalog defaults the request's method to the part's
+  method and copies its spec into the request (editable); the
+  Requests-tab form does the same when a fab part is picked.
+  Recording a part at review for a print/CNC request inherits
+  that request's method and spec. CSV export/import carry Method
+  and Spec columns; files without them import as Order, and a
+  re-import without those columns never wipes them.
   The catalog is visible to everyone; adding, editing, and deleting
   are mentor-only, and a part referenced by any request cannot be
   deleted. **Buy again** is the catalog row's "Request" button,

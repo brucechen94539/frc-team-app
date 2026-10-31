@@ -65,6 +65,8 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         <div class="field"><label>SKU / part number</label><input id="pe-sku" type="text"></div>
         <div class="field"><label>Vendor</label><input id="pe-vendor" type="text" placeholder="Blank = derived from the link"></div>
         <div class="field"><label>Order link</label><input id="pe-link" type="text"></div>
+        <div class="field"><label>Method</label><select id="pe-method"><option>Order</option><option>3d print</option><option>CNC</option></select></div>
+        <div class="field hidden" id="pe-spec-field"><label>Spec (STL file or CAD link)</label><input id="pe-spec" type="text"></div>
         <div class="field"><label>Cost each</label><input id="pe-cost" type="number" min="0" step="0.01"></div>
         <div class="field"><label>On hand</label><input id="pe-onhand" type="number" min="0" step="1"></div>
         <div class="field"><label>Subsystems</label><input id="pe-subsystems" type="text" placeholder="e.g. Turret / Drivebase"></div>
@@ -81,6 +83,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         <p class="sub" id="rq-part-line"></p>
         <div class="row"><div class="field"><label>Qty</label><input id="rq-qty" type="number" min="1" value="1"></div>
         <div class="field"><label>Method</label><select id="rq-method"><option>Order</option><option>3d print</option><option>CNC</option></select></div></div>
+        <div class="row"><div class="field hidden" id="rq-spec-field"><label>Spec (STL file or CAD link)</label><input id="rq-spec" type="text"></div></div>
         <div class="row"><div class="field"><label>Major component</label><input id="rq-comp" type="text" placeholder="e.g. Shooter"></div>
         <div class="field"><label>Deliver to</label><input id="rq-deliver" type="text"></div></div>
         <div class="row"><div class="field"><label>Est. delivery</label><input id="rq-est" type="date"></div>
