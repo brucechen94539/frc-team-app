@@ -3490,7 +3490,14 @@ function hotelTopHTML(h, args) {
   const themeBtn = $("theme-btn");
   const applyTheme = (t) => {
     document.documentElement.setAttribute("data-theme", t);
-    themeBtn.textContent = t === "light" ? "🌙 Dark" : "☀ Light";
+    const themeIcon = themeBtn.querySelector("#theme-icon");
+    const themeLabel = themeBtn.querySelector("#theme-label");
+    if (themeIcon && themeLabel) {
+      themeIcon.textContent = t === "light" ? "🌙" : "☀";
+      themeLabel.textContent = t === "light" ? " Dark" : " Light";
+    } else {
+      themeBtn.textContent = t === "light" ? "🌙 Dark" : "☀ Light";
+    }
     try { localStorage.setItem("frc-theme", t); } catch (e) { /* private mode */ }
   };
   themeBtn.addEventListener("click", () => {

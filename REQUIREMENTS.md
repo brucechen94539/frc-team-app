@@ -150,6 +150,18 @@ and `can't make it` do not count as attending.
   "Logout?" with YES/NO — never an instant exit. There is no header
   logout button; logout lives only behind that popup. The menu holds
   no forms; it only links onward.
+- **Mobile header (Option A, 2026-10-31):** at 860px and below the header
+  is one grid row (`minmax(0,1fr) auto`): the brand takes the leftover
+  width as a two-line lockup — "Team 9470" on line 1, "Ctrl-Alt-Defeat
+  FRC Team Portal" smaller on line 2, wrapping inside its own column —
+  and the theme / hamburger / avatar controls sit beside it in normal
+  flow, bottom-aligned, so the nav dropdown and avatar menu drop below
+  the whole header row. The theme button is icon-only on mobile (its
+  label span is hidden; `applyTheme` writes the icon and label spans
+  separately) and the tagline is hidden on mobile. Above 860px the
+  header is unchanged (absolute controls, full theme label, tagline).
+  This replaced the old layout, where the title ran full-width under
+  absolutely positioned controls and wrapped into them on a phone.
 - **Avatar API (all self-only by construction — the routes take no user
   id, they act on the logged-in account):** `GET/POST/DELETE
   /api/auth/avatar`. Uploads must be PNG, JPEG, GIF, or WebP data URLs
