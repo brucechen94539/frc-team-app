@@ -377,3 +377,42 @@ CREATE TABLE IF NOT EXISTS invoice_files (
   note          TEXT,
   uploaded_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Manufacturing Queue: in-house CNC / 3D-print jobs. Leads stay
+-- students; their scoped grants live in fab_leads, never in the role.
+CREATE TABLE IF NOT EXISTS fab_leads (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  subteam       TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, subteam)
+);
+
+CREATE TABLE IF NOT EXISTS fab_jobs (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  part_id       INTEGER REFERENCES parts(id) ON DELETE SET NULL,
+  part_name     TEXT NOT NULL,
+  spec          TEXT,
+  method        TEXT NOT NULL CHECK (method IN ('3d print', 'CNC')),
+  material      TEXT,
+  machine       TEXT,
+  qty           INTEGER NOT NULL DEFAULT 1,
+  subteam       TEXT,
+  priority      TEXT NOT NULL DEFAULT 'Normal'
+                CHECK (priority IN ('High', 'Normal')),
+  target_date   TEXT,
+  assignee_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  assignee_name TEXT,
+  source_request_id INTEGER REFERENCES part_requests(id) ON DELETE SET NULL,
+  created_by_user_id INTEGER,
+  created_by_name TEXT,
+  status        TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'in_progress', 'failed',
+                                  'done', 'cancelled')),
+  attempts      INTEGER NOT NULL DEFAULT 0,
+  fail_reason   TEXT,
+  handed_to     TEXT,
+  notes         TEXT,
+  task_id       INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);

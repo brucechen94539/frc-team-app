@@ -216,6 +216,42 @@ def _migrate(db):
             size_bytes INTEGER,
             note TEXT,
             uploaded_at TEXT NOT NULL DEFAULT (datetime('now')))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS fab_leads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL REFERENCES users(id)
+                ON DELETE CASCADE,
+            subteam TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(user_id, subteam))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS fab_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL,
+            part_name TEXT NOT NULL,
+            spec TEXT,
+            method TEXT NOT NULL CHECK (method IN ('3d print', 'CNC')),
+            material TEXT,
+            machine TEXT,
+            qty INTEGER NOT NULL DEFAULT 1,
+            subteam TEXT,
+            priority TEXT NOT NULL DEFAULT 'Normal'
+                CHECK (priority IN ('High', 'Normal')),
+            target_date TEXT,
+            assignee_user_id INTEGER REFERENCES users(id)
+                ON DELETE SET NULL,
+            assignee_name TEXT,
+            source_request_id INTEGER REFERENCES part_requests(id)
+                ON DELETE SET NULL,
+            created_by_user_id INTEGER,
+            created_by_name TEXT,
+            status TEXT NOT NULL DEFAULT 'queued'
+                CHECK (status IN ('queued', 'in_progress', 'failed',
+                                  'done', 'cancelled')),
+            attempts INTEGER NOT NULL DEFAULT 0,
+            fail_reason TEXT,
+            handed_to TEXT,
+            notes TEXT,
+            task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
         if "season" not in event_cols:
             db.execute("ALTER TABLE events ADD COLUMN season TEXT")
         if "archived" not in event_cols:
@@ -800,6 +836,15 @@ def _public_user(u):
     # to re-fetch /api/auth/me — the server rules were right, but
     # the UI silently showed parents and students nothing to pick.
     d["links"] = _user_links_map([u["id"]]).get(u["id"], [])
+    # Subteam-lead grants ride along too, so the frontend can show a
+    # lead the Manufacturing create form and scoped Task creation
+    # without a second round trip. Leads stay students: this list is
+    # a grant, never a role change.
+    try:
+        d["fab_leads"] = [r["subteam"] for r in q_all(
+            "SELECT subteam FROM fab_leads WHERE user_id=?", (u["id"],))]
+    except Exception:
+        d["fab_leads"] = []
     return d
 
 
@@ -3701,6 +3746,15 @@ def _task_out(r):
     d["assignees"] = [x for x in a if x]
     d["assignee"] = d["assignees"][0] if d["assignees"] else None
     d["archived"] = int(d.get("archived") or 0)
+    # Fab link, if any: the Task Board shows a Fab pill and a jump to
+    # the queue job. Tasks created before fab_jobs existed have none.
+    try:
+        fj = q_one("SELECT id, method, machine, status, subteam,"
+                   " assignee_user_id FROM fab_jobs WHERE task_id=?",
+                   (d["id"],))
+    except Exception:
+        fj = None
+    d["fab_job"] = dict(fj) if fj else None
     return d
 
 
@@ -3716,9 +3770,17 @@ def _task_assignees(b):
 @app.route("/api/tasks", methods=["GET", "POST"])
 def api_tasks():
     if request.method == "POST":
-        denied = _mentor_denied()
-        if denied:
-            return denied
+        # Mentors create for any subteam. A subteam lead — a student
+        # with a fab_leads grant — creates only for subteams they lead,
+        # and must name one (a blank subteam would escape the scope).
+        u = current_user()
+        if not u:
+            return err("login required", 401)
+        if u["role"] not in MENTOR_ROLES:
+            body = request.get_json(force=True, silent=True) or {}
+            if body.get("subteam") not in _fab_lead_subteams(u["id"]):
+                return err("only mentors and the subteam's lead can"
+                           " create tasks for it", 403)
     if request.method == "GET":
         return jsonify([_task_out(r) for r in
                         q_all("SELECT * FROM tasks ORDER BY id")])
@@ -3747,6 +3809,47 @@ def api_task(tid):
     b = request.get_json(force=True)
     if "archived" in b and current_user()["role"] not in MENTOR_ROLES:
         return err("only mentors can archive or restore tasks", 403)
+    # Fab cards are edited through their job, not the general task
+    # editor: title, subteam, assignees, and due date belong to the job
+    # and are synced from it. Status moves map to job transitions:
+    # Todo -> In progress starts the job (Start gate applies), In
+    # progress -> Done finishes it (on-hand and source-request effects
+    # apply); there is no pause state, so In progress -> Todo is
+    # refused here and must go through the queue as a failure or a
+    # cancellation, and finished jobs' cards cannot move at all.
+    fab = q_one("SELECT * FROM fab_jobs WHERE task_id=?", (tid,))
+    if fab and any(f in b for f in ("title", "subteam", "assignee",
+                                    "assignees", "due_date")):
+        return err("edit a fab card through its Manufacturing job", 400)
+    if fab and "status" in b:
+        u = current_user()
+        if not u:
+            return err("login required", 401)
+        actor = (u["role"] in MENTOR_ROLES
+                 or _fab_can_manage(u, fab["subteam"])
+                 or (fab.get("assignee_user_id") is not None
+                     and fab["assignee_user_id"] == u["id"]))
+        if not actor:
+            return err("only the assignee, the job's lead, or a mentor"
+                       " can move a fab card", 403)
+        if b["status"] == "doing":
+            updated, serr = _fab_set_status(fab, "in_progress")
+            if serr:
+                return serr
+            return jsonify(_task_out(
+                q_one("SELECT * FROM tasks WHERE id=?", (tid,))))
+        if b["status"] == "done":
+            updated, serr = _fab_set_status(fab, "done")
+            if serr:
+                return serr
+            return jsonify(_task_out(
+                q_one("SELECT * FROM tasks WHERE id=?", (tid,))))
+        if fab["status"] in ("done", "cancelled"):
+            return err("a finished fab job's card cannot move", 400)
+        if b["status"] == "todo" and fab["status"] == "in_progress":
+            return err("an in-progress fab job cannot go back to To do —"
+                       " mark it failed or cancel it in Manufacturing"
+                       " Queue", 400)
     sets, args = [], []
     for f in ("title", "subteam", "due_date", "notes"):
         if f in b:
@@ -3770,6 +3873,451 @@ def api_task(tid):
         args.append(tid)
         execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", args)
     return jsonify(_task_out(q_one("SELECT * FROM tasks WHERE id=?", (tid,))))
+
+
+# ----------------------------------------------------------------------------
+# Manufacturing Queue: in-house CNC / 3D-print jobs, linked to Tasks.
+#
+# Role model (Bruce, 2026-11-01): mentors are the parent/adult accounts
+# for things students should not do — finance, hotel, travel, parts
+# ordering. Subteam leads stay students (role == 'student') with scoped
+# grants, never mentor powers: a lead governs fab jobs for their own
+# subteam(s) and scoped task creation, and nothing else. In particular
+# a lead cannot order parts, manage accounts, or touch finance, hotel,
+# or travel. Lead grants live in fab_leads (account + subteam), managed
+# by mentors; removing a designation immediately removes the grant,
+# and jobs created under it stay.
+# ----------------------------------------------------------------------------
+FAB_METHODS = ("3d print", "CNC")
+FAB_STATUSES = ("queued", "in_progress", "failed", "done", "cancelled")
+FAB_TASK_STATUS = {"queued": "todo", "in_progress": "doing",
+                   "failed": "todo", "done": "done"}
+
+
+def _fab_lead_subteams(uid):
+    """Subteams the account leads (empty for everyone else)."""
+    try:
+        return [r["subteam"] for r in q_all(
+            "SELECT subteam FROM fab_leads WHERE user_id=? ORDER BY subteam",
+            (uid,))]
+    except Exception:
+        return []
+
+
+def _fab_can_manage(u, subteam):
+    if not u:
+        return False
+    if u["role"] in MENTOR_ROLES:
+        return True
+    return subteam in _fab_lead_subteams(u["id"])
+
+
+def _fab_job_out(r):
+    return row(r)
+
+
+def _fab_task_notes(job):
+    return ("Manufacturing job: %s, qty %s — see Manufacturing Queue "
+            "for spec, machine, and material."
+            % (job["method"], job["qty"]))
+
+
+def _fab_sync_task(job):
+    """Create or update the Task Board card for a fab job. The job is
+    the source of truth for fab fields; the card's notes are set only
+    at creation, so later note edits on the board are never wiped.
+    Cancelled jobs archive their card; every other status unarchives
+    it (a fab card's visibility follows its job)."""
+    status = job["status"]
+    tid = job.get("task_id")
+    task = q_one("SELECT * FROM tasks WHERE id=?", (tid,)) if tid else None
+    assignees = [job["assignee_name"]] if job.get("assignee_name") else []
+    if task is None:
+        tid = execute(
+            "INSERT INTO tasks (title, subteam, assignee, assignees,"
+            " due_date, notes, status, sample) VALUES (?,?,?,?,?,?,?,0)",
+            (job["part_name"], job.get("subteam"),
+             assignees[0] if assignees else None, json.dumps(assignees),
+             job.get("target_date"), _fab_task_notes(job),
+             FAB_TASK_STATUS.get(status, "todo")))
+        execute("UPDATE fab_jobs SET task_id=? WHERE id=?", (tid, job["id"]))
+        if status == "cancelled":
+            execute("UPDATE tasks SET archived=1 WHERE id=?", (tid,))
+        return tid
+    archived = 1 if status == "cancelled" else 0
+    execute(
+        "UPDATE tasks SET title=?, subteam=?, assignee=?, assignees=?,"
+        " due_date=?, status=?, archived=? WHERE id=?",
+        (job["part_name"], job.get("subteam"),
+         assignees[0] if assignees else None, json.dumps(assignees),
+         job.get("target_date"), FAB_TASK_STATUS.get(status, task["status"]),
+         archived, tid))
+    return tid
+
+
+def _fab_sync_task_fields(job):
+    """Field edits (not status changes) update the card's title,
+    subteam, assignee, and due date only — never its status, archived
+    flag, or notes."""
+    if not job.get("task_id"):
+        return
+    assignees = [job["assignee_name"]] if job.get("assignee_name") else []
+    execute(
+        "UPDATE tasks SET title=?, subteam=?, assignee=?, assignees=?,"
+        " due_date=? WHERE id=?",
+        (job["part_name"], job.get("subteam"),
+         assignees[0] if assignees else None, json.dumps(assignees),
+         job.get("target_date"), job["task_id"]))
+
+
+def _fab_validate_assignee(uid):
+    """A job's maker must be an enabled student account."""
+    a = q_one("SELECT * FROM users WHERE id=?", (uid,)) if uid else None
+    if not a or a["role"] != "student":
+        return None, err("jobs are assigned to student accounts", 400)
+    if a.get("disabled"):
+        return None, err("that account is disabled", 400)
+    return a, None
+
+
+def _fab_set_status(job, new_status, fail_reason=None, handed_to=None):
+    """Apply a job status transition plus its side effects, then sync
+    the Task card. Callers authorize first; this only enforces the
+    transition table and the Start gate. Returns (job, None) or
+    (None, error response)."""
+    old = job["status"]
+    if old in ("done", "cancelled"):
+        return None, err("a finished job cannot change status", 400)
+    if new_status == "in_progress":
+        if old != "queued":
+            return None, err("only a queued job can start", 400)
+        if not (job.get("spec") and job.get("material")):
+            return None, err("spec and material are required before starting",
+                             400)
+        execute("UPDATE fab_jobs SET status='in_progress' WHERE id=?",
+                (job["id"],))
+    elif new_status == "failed":
+        if old != "in_progress":
+            return None, err("only a job in progress can fail", 400)
+        if not (fail_reason or "").strip():
+            return None, err("a failure reason is required", 400)
+        execute("UPDATE fab_jobs SET status='failed', attempts=attempts+1,"
+                " fail_reason=? WHERE id=?",
+                (fail_reason.strip(), job["id"]))
+    elif new_status == "done":
+        if old != "in_progress":
+            return None, err("only a job in progress can finish", 400)
+        execute("UPDATE fab_jobs SET status='done', handed_to=? WHERE id=?",
+                (handed_to.strip() if handed_to else None, job["id"]))
+        if job.get("part_id"):
+            execute("UPDATE parts SET on_hand=on_hand+? WHERE id=?",
+                    (job["qty"], job["part_id"]))
+        if job.get("source_request_id"):
+            r = q_one("SELECT status FROM part_requests WHERE id=?",
+                      (job["source_request_id"],))
+            if r and r["status"] in ("approved", "assigned"):
+                execute("UPDATE part_requests SET status='received'"
+                        " WHERE id=?", (job["source_request_id"],))
+    elif new_status == "cancelled":
+        if old not in ("queued", "in_progress", "failed"):
+            return None, err("that job cannot be cancelled", 400)
+        execute("UPDATE fab_jobs SET status='cancelled' WHERE id=?",
+                (job["id"],))
+    elif new_status == "queued":
+        if old != "failed":
+            return None, err("only a failed job can be requeued", 400)
+        execute("UPDATE fab_jobs SET status='queued', fail_reason=NULL"
+                " WHERE id=?", (job["id"],))
+    else:
+        return None, err("bad status", 400)
+    updated = q_one("SELECT * FROM fab_jobs WHERE id=?", (job["id"],))
+    _fab_sync_task(updated)
+    return updated, None
+
+
+@app.route("/api/fab-jobs", methods=["GET", "POST"])
+def api_fab_jobs():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if request.method == "GET":
+        rows = q_all(
+            "SELECT * FROM fab_jobs ORDER BY (target_date IS NULL),"
+            " target_date, CASE WHEN priority='High' THEN 0 ELSE 1 END, id")
+        return jsonify([_fab_job_out(r) for r in rows])
+    b = request.get_json(force=True, silent=True) or {}
+    from seed import SUBTEAMS
+    src = None
+    if b.get("source_request_id"):
+        src = q_one("SELECT * FROM part_requests WHERE id=?",
+                    (b["source_request_id"],))
+        if not src:
+            return err("source request not found", 404)
+        if src["method"] not in FAB_METHODS:
+            return err("only 3d print and CNC requests can become fab jobs",
+                       400)
+        if src["status"] not in ("approved", "assigned"):
+            return err("only approved or assigned requests can become fab jobs",
+                       400)
+        active = q_one(
+            "SELECT id FROM fab_jobs WHERE source_request_id=?"
+            " AND status IN ('queued','in_progress','failed')", (src["id"],))
+        if active:
+            return err("that request already has an open fab job", 409)
+    part = None
+    if b.get("part_id"):
+        part = q_one("SELECT * FROM parts WHERE id=?", (b["part_id"],))
+        if not part:
+            return err("catalog part not found", 404)
+        if part["method"] not in FAB_METHODS:
+            return err("that catalog part is not a fab part", 400)
+    part_name = ((b.get("part_name") or "").strip()
+                 or (src["part_name"] if src else None)
+                 or (part["name"] if part else None))
+    if not part_name:
+        return err("a part name is required", 400)
+    method = (b.get("method") or (src["method"] if src else None)
+              or (part["method"] if part else None))
+    if method not in FAB_METHODS:
+        return err("method must be 3d print or CNC", 400)
+    spec = b.get("spec")
+    if spec is None:
+        spec = src["spec"] if src else (part["spec"] if part else None)
+    if isinstance(spec, str):
+        spec = spec.strip() or None
+    try:
+        qty = int(b.get("qty", src["qty"] if src else 1))
+    except (TypeError, ValueError):
+        return err("qty must be a whole number", 400)
+    if qty < 1:
+        return err("qty must be at least 1", 400)
+    subteam = (b.get("subteam") or "").strip()
+    if subteam not in SUBTEAMS:
+        return err("pick one of the team's subteams", 400)
+    if not _fab_can_manage(u, subteam):
+        return err("only the subteam's lead or a mentor can create a job"
+                   " for it", 403)
+    priority = b.get("priority") or "Normal"
+    if priority not in ("High", "Normal"):
+        return err("priority must be High or Normal", 400)
+    assignee_id = b.get("assignee_user_id")
+    assignee_name = None
+    if assignee_id is not None:
+        a, aerr = _fab_validate_assignee(assignee_id)
+        if aerr:
+            return aerr
+        assignee_name = a["name"]
+    jid = execute(
+        "INSERT INTO fab_jobs (part_id, part_name, spec, method, material,"
+        " machine, qty, subteam, priority, target_date, assignee_user_id,"
+        " assignee_name, source_request_id, created_by_user_id,"
+        " created_by_name, status, notes)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'queued', ?)",
+        (part["id"] if part else None, part_name, spec, method,
+         (b.get("material") or "").strip() or None,
+         (b.get("machine") or "").strip() or None, qty, subteam, priority,
+         (b.get("target_date") or "").strip() or None, assignee_id,
+         assignee_name, src["id"] if src else None, u["id"], u["name"],
+         (b.get("notes") or "").strip() or None))
+    job = q_one("SELECT * FROM fab_jobs WHERE id=?", (jid,))
+    _fab_sync_task(job)
+    if src and src["status"] == "approved":
+        execute("UPDATE part_requests SET status='assigned' WHERE id=?",
+                (src["id"],))
+    return jsonify(_fab_job_out(
+        q_one("SELECT * FROM fab_jobs WHERE id=?", (jid,)))), 201
+
+
+@app.route("/api/fab-jobs/<int:jid>", methods=["PATCH", "DELETE"])
+def api_fab_job(jid):
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    job = q_one("SELECT * FROM fab_jobs WHERE id=?", (jid,))
+    if not job:
+        return err("job not found", 404)
+    if request.method == "DELETE":
+        if u["role"] not in MENTOR_ROLES:
+            return err("mentor/admin access required", 403)
+        if job["status"] not in ("queued", "cancelled"):
+            return err("only queued or cancelled jobs can be deleted", 409)
+        execute("DELETE FROM fab_jobs WHERE id=?", (jid,))
+        if job.get("task_id"):
+            execute("DELETE FROM tasks WHERE id=?", (job["task_id"],))
+        return jsonify({"deleted": jid})
+    b = request.get_json(force=True, silent=True) or {}
+    manager = _fab_can_manage(u, job.get("subteam"))
+    is_assignee = (job.get("assignee_user_id") is not None
+                   and job["assignee_user_id"] == u["id"])
+    from seed import SUBTEAMS
+    editable = ("part_name", "spec", "material", "machine", "qty", "subteam",
+                "priority", "target_date", "notes", "assignee_user_id",
+                "handed_to")
+    if any(f in b for f in editable):
+        if not manager:
+            return err("only the job's lead or a mentor can edit a job", 403)
+        if job["status"] in ("done", "cancelled"):
+            return err("a finished job cannot be edited", 400)
+        locked = ("part_name", "spec", "material", "machine", "qty",
+                  "subteam") if job["status"] == "in_progress" else ()
+        for f in locked:
+            if f in b:
+                return err("cannot change %s once a job is in progress —"
+                           " cancel and recreate it" % f, 400)
+        sets, args = [], []
+        if "part_name" in b:
+            name = (b["part_name"] or "").strip()
+            if not name:
+                return err("a part name is required", 400)
+            sets.append("part_name=?")
+            args.append(name)
+        if "spec" in b:
+            sets.append("spec=?")
+            args.append((b["spec"] or "").strip() or None
+                        if isinstance(b["spec"], str) else None)
+        if "material" in b:
+            sets.append("material=?")
+            args.append((b["material"] or "").strip() or None
+                        if isinstance(b["material"], str) else None)
+        if "machine" in b:
+            sets.append("machine=?")
+            args.append((b["machine"] or "").strip() or None
+                        if isinstance(b["machine"], str) else None)
+        if "qty" in b:
+            try:
+                qv = int(b["qty"])
+            except (TypeError, ValueError):
+                return err("qty must be a whole number", 400)
+            if qv < 1:
+                return err("qty must be at least 1", 400)
+            sets.append("qty=?")
+            args.append(qv)
+        if "subteam" in b:
+            ns = (b["subteam"] or "").strip()
+            if ns not in SUBTEAMS:
+                return err("pick one of the team's subteams", 400)
+            if not _fab_can_manage(u, ns):
+                return err("only the new subteam's lead or a mentor can"
+                           " move a job there", 403)
+            sets.append("subteam=?")
+            args.append(ns)
+        if "priority" in b:
+            if b["priority"] not in ("High", "Normal"):
+                return err("priority must be High or Normal", 400)
+            sets.append("priority=?")
+            args.append(b["priority"])
+        if "target_date" in b:
+            sets.append("target_date=?")
+            args.append((b["target_date"] or "").strip() or None
+                        if isinstance(b["target_date"], str) else None)
+        if "notes" in b:
+            sets.append("notes=?")
+            args.append((b["notes"] or "").strip() or None
+                        if isinstance(b["notes"], str) else None)
+        if "handed_to" in b:
+            sets.append("handed_to=?")
+            args.append((b["handed_to"] or "").strip() or None
+                        if isinstance(b["handed_to"], str) else None)
+        if "assignee_user_id" in b:
+            aid = b["assignee_user_id"]
+            if aid is None:
+                sets.append("assignee_user_id=NULL")
+                sets.append("assignee_name=NULL")
+            else:
+                a, aerr = _fab_validate_assignee(aid)
+                if aerr:
+                    return aerr
+                sets.append("assignee_user_id=?")
+                args.append(aid)
+                sets.append("assignee_name=?")
+                args.append(a["name"])
+        if sets:
+            args.append(jid)
+            execute("UPDATE fab_jobs SET %s WHERE id=?" % ", ".join(sets),
+                    tuple(args))
+            job = q_one("SELECT * FROM fab_jobs WHERE id=?", (jid,))
+            _fab_sync_task_fields(job)
+    if "status" in b:
+        new = b["status"]
+        if new not in FAB_STATUSES:
+            return err("bad status", 400)
+        if new != job["status"]:
+            if new in ("in_progress", "failed", "done"):
+                if not (manager or is_assignee):
+                    return err("only the assignee, the job's lead, or a"
+                               " mentor can change a job's status", 403)
+            else:
+                if not manager:
+                    return err("only the job's lead or a mentor can"
+                               " requeue or cancel a job", 403)
+            updated, serr = _fab_set_status(
+                job, new, fail_reason=b.get("fail_reason"),
+                handed_to=b.get("handed_to"))
+            if serr:
+                return serr
+            job = updated
+    return jsonify(_fab_job_out(job))
+
+
+@app.route("/api/fab-leads", methods=["GET", "POST"])
+def api_fab_leads():
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] not in MENTOR_ROLES:
+        return err("mentor/admin access required", 403)
+    if request.method == "GET":
+        rows = q_all(
+            "SELECT fab_leads.*, users.name AS user_name FROM fab_leads"
+            " JOIN users ON users.id = fab_leads.user_id"
+            " ORDER BY subteam, user_name")
+        return jsonify([row(r) for r in rows])
+    b = request.get_json(force=True, silent=True) or {}
+    from seed import SUBTEAMS
+    target = q_one("SELECT * FROM users WHERE id=?", (b.get("user_id"),))
+    if not target:
+        return err("account not found", 404)
+    if target["role"] != "student":
+        return err("leads stay students — pick a student account", 400)
+    subteam = (b.get("subteam") or "").strip()
+    if subteam not in SUBTEAMS:
+        return err("pick one of the team's subteams", 400)
+    if q_one("SELECT id FROM fab_leads WHERE user_id=? AND subteam=?",
+             (target["id"], subteam)):
+        return err("that account already leads that subteam", 409)
+    lid = execute("INSERT INTO fab_leads (user_id, subteam) VALUES (?,?)",
+                  (target["id"], subteam))
+    return jsonify(row(q_one("SELECT * FROM fab_leads WHERE id=?", (lid,)))), 201
+
+
+@app.route("/api/fab-leads/<int:lid>", methods=["DELETE"])
+def api_fab_lead(lid):
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if u["role"] not in MENTOR_ROLES:
+        return err("mentor/admin access required", 403)
+    if not q_one("SELECT id FROM fab_leads WHERE id=?", (lid,)):
+        return err("lead designation not found", 404)
+    execute("DELETE FROM fab_leads WHERE id=?", (lid,))
+    return jsonify({"deleted": lid})
+
+
+@app.route("/api/fab-assignable")
+def api_fab_assignable():
+    """Student accounts a lead or mentor may assign a job to (id + name
+    only — no contact details, which leads do not need for assignment)."""
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    if (u["role"] not in MENTOR_ROLES
+            and not _fab_lead_subteams(u["id"])):
+        return err("mentor or subteam lead access required", 403)
+    rows = q_all(
+        "SELECT id, name FROM users WHERE role='student'"
+        " AND COALESCE(disabled, 0)=0 ORDER BY name")
+    return jsonify([{"id": r["id"], "name": r["name"]} for r in rows])
+
 
 
 # ----------------------------------------------------------------------------

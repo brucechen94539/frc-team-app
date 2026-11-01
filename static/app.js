@@ -138,6 +138,10 @@ let ME = null;          // logged-in user ({id,name,email,role}) or null
 let ME_AVATAR = null;   // logged-in user's photo data URL, or null for initials
 let SETUP = false;      // first run: no account has a password yet
 const MENTOR = () => !!(ME && (ME.role === "mentor" || ME.role === "admin"));
+// A subteam lead is a student with a fab_leads grant for one or more
+// subteams — never a mentor. The grant list rides on ME from /api/auth/me.
+const LEAD = () => !!(ME && ME.fab_leads && ME.fab_leads.length);
+const LEAD_FOR = (s) => !!(ME && (ME.fab_leads || []).includes(s));
 // Self-only seats and beds (mirrors _may_act_for server-side): a
 // student only themself; a parent only themself as a rider (kind
 // "parent" — a parent's own rider row carries their linked child's
@@ -355,7 +359,7 @@ document.addEventListener("click", (e) => {
   if (am && !am.classList.contains("hidden") &&
       !e.target.closest("#avatar-menu") && !e.target.closest("#user-avatar")) closeAvatarMenu();
 });
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); closePartReview(); closePcEditModal(); closeRqModal(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { closeMenu(); closeAvatarMenu(); closeLogoutModal(); closeQrModal(); closeRsvpModal(); closePwModal(); close2faModal(); closeDelModal(); closePartReview(); closePcEditModal(); closeRqModal(); closeFabEditModal(); closeFabFailModal(); } });
 const _loYes = $("lo-yes");
 if (_loYes) _loYes.addEventListener("click", () => doLogout());
 const _loNo = $("lo-no");
@@ -405,6 +409,51 @@ if (_faYes) _faYes.addEventListener("click", async () => {
 });
 const _delModal = $("del-modal");
 if (_delModal) _delModal.addEventListener("click", (e) => { if (e.target === _delModal) closeDelModal(); });
+/* Manufacturing Queue modals: edit job, mark failed. Wired once at
+   boot like the other modals; the edit form reads editingFabId. */
+const _fabEditModal = $("fab-edit-modal");
+if (_fabEditModal) _fabEditModal.addEventListener("click", (e) => { if (e.target === _fabEditModal) closeFabEditModal(); });
+const _fabFailModal = $("fab-fail-modal");
+if (_fabFailModal) _fabFailModal.addEventListener("click", (e) => { if (e.target === _fabFailModal) closeFabFailModal(); });
+const _feCancel = $("fe-cancel");
+if (_feCancel) _feCancel.addEventListener("click", closeFabEditModal);
+const _ffCancel = $("ff-cancel");
+if (_ffCancel) _ffCancel.addEventListener("click", closeFabFailModal);
+const _feSubmit = $("fe-submit");
+if (_feSubmit) _feSubmit.addEventListener("click", async () => {
+  if (!editingFabId) return;
+  const body = {
+    part_name: $("fe-name").value.trim(),
+    spec: $("fe-spec").value.trim() || null,
+    material: $("fe-material").value.trim() || null,
+    machine: $("fe-machine").value.trim() || null,
+    qty: parseInt($("fe-qty").value, 10) || 1,
+    subteam: $("fe-subteam").value,
+    priority: $("fe-priority").value,
+    target_date: $("fe-target").value || null,
+    assignee_user_id: $("fe-assignee").value
+      ? parseInt($("fe-assignee").value, 10) : null,
+    notes: $("fe-notes").value.trim() || null,
+    handed_to: $("fe-handed").value.trim() || null,
+  };
+  try { await PATCH(`/api/fab-jobs/${editingFabId}`, body); toast("Job updated."); }
+  catch (e) { toast("Error: " + e.message); return; }
+  closeFabEditModal();
+  renderManufacturing();
+});
+const _ffSubmit = $("ff-submit");
+if (_ffSubmit) _ffSubmit.addEventListener("click", async () => {
+  if (!failingFabId) return;
+  const reason = $("ff-reason").value.trim();
+  if (!reason) { toast("A failure reason is required."); return; }
+  try {
+    await PATCH(`/api/fab-jobs/${failingFabId}`,
+      {status: "failed", fail_reason: reason});
+    toast("Job marked failed.");
+  } catch (e) { toast("Error: " + e.message); return; }
+  closeFabFailModal();
+  renderManufacturing();
+});
 const _delNo = $("del-no");
 if (_delNo) _delNo.addEventListener("click", closeDelModal);
 const _delYes = $("del-yes");
@@ -424,6 +473,8 @@ function showView(name) {
   closePwModal();
   close2faModal();
   closeDelModal();
+  closeFabEditModal();
+  closeFabFailModal();
   // A temporary password comes first: nothing else is reachable until
   // the user sets their own (the server enforces the same rule).
   if (ME && ME.must_change_password && name !== "password-change" && name !== "login")
@@ -441,6 +492,7 @@ function showView(name) {
   $("view-" + name).classList.remove("hidden");
   const _views = {signup: renderSignup, queue: renderQueue, roster: renderRoster,
     events: renderEvents, tracking: renderTracking, tasks: renderTasks, travel: renderTravel,
+    manufacturing: renderManufacturing,
     parts: renderParts,
     security: renderSecurity, profile: renderProfile, login: renderLogin,
     "password-change": renderPasswordChange};
@@ -2328,12 +2380,19 @@ async function renderTasks() {
   const card = (t, k) => {
     const chips = (t.assignees || []).map((a) =>
       `<span class="pill" style="background:${chipColor(a)}" title="${esc(a)}">${esc(initials(a))} ${esc(a.split(" ")[0])}</span>`).join(" ");
+    // Fab cards move only for their assignee, their subteam's lead,
+    // or a mentor — the server enforces the same rule; hiding the
+    // arrows here keeps a mistap from surfacing a 403.
+    const fab = t.fab_job;
+    const fabActor = !fab || MENTOR() || LEAD_FOR(t.subteam)
+      || (t.assignees || []).some((a) => normName(a) === me);
     return `<div class="task"><div class="t">${esc(t.title)}</div>
+      ${fab ? `<div class="row" style="margin:4px 0;flex-wrap:wrap"><span class="pill blue">Fab · ${esc(fab.method)}</span><span class="pill gray">${esc(fab.status)}</span><button class="btn small ghost" data-fabjob="${fab.id}">View job</button></div>` : ""}
       <div class="row" style="margin:4px 0;flex-wrap:wrap">${chips || '<span class="pill gray">Unassigned</span>'}</div>
       <div class="m">${esc(t.subteam || "")} ${duePill(t.due_date)}</div>
       ${t.notes ? `<div class="m">${esc(t.notes)}</div>` : ""}
       <div class="row" style="margin-top:4px">
-        ${k === "archived" ? ""
+        ${k === "archived" || !fabActor ? ""
           : `${k !== "todo" ? `<button class="btn small ghost" data-tmove="${t.id}" data-to="${k === "doing" ? "todo" : "doing"}">←</button>` : ""}
              ${k !== "done" ? `<button class="btn small ghost" data-tmove="${t.id}" data-to="${k === "todo" ? "doing" : "done"}">→</button>` : ""}`}
         ${MENTOR() ? (k === "archived"
@@ -2342,9 +2401,13 @@ async function renderTasks() {
         ${MENTOR() ? `<button class="btn small danger" data-tdel="${t.id}">✕</button>` : ""}
       </div></div>`;
   };
+  // A lead's create form offers only the subteams they lead; the
+  // server enforces the same scope on POST /api/tasks.
+  const taskCreateSubteams = MENTOR() ? SUBTEAMS
+    : SUBTEAMS.filter((s) => LEAD_FOR(s.name));
   v.innerHTML = `
   <div class="card"><h2>Task Board</h2>
-  <p class="sub">Team-wide Kanban. Mentors create tasks and appoint students; anyone moves cards along. Archived tasks stay out of the way until restored.</p>
+  <p class="sub">Team-wide Kanban. Mentors and subteam leads create tasks and appoint students; anyone moves general cards along, while fab cards move only for their assignee, lead, or a mentor. Archived tasks stay out of the way until restored.</p>
   <div class="statgrid">
     <div class="stat"><div class="n">${doneCount}/${open.length}</div><div class="l">tasks done</div></div>
     <div class="stat"><div class="n">${archCount}</div><div class="l">archived</div></div>
@@ -2352,7 +2415,7 @@ async function renderTasks() {
   <div class="card mo"><div class="row">
     <input id="tk-title" placeholder="Task title *" style="flex:2;min-width:180px">
     <select id="tk-sub"><option value="">Subteam…</option>
-      ${SUBTEAMS.map((s) => `<option>${esc(s.name)}</option>`).join("")}</select>
+      ${taskCreateSubteams.map((s) => `<option>${esc(s.name)}</option>`).join("")}</select>
     <div class="bubbles chipgroup" id="tk-who" title="Tap students to appoint them" style="min-width:160px;max-height:120px;overflow-y:auto">
       ${students.map((p) => chipButton(p.name.replace(/ \((student|parent)\)$/, ""), p.name)).join("")}</div>
     <input id="tk-due" type="date" style="max-width:150px">
@@ -2381,7 +2444,7 @@ async function renderTasks() {
     <div>${esc(s)} — ${p.done}/${p.total}
     <div class="bar"><div style="width:${p.total ? Math.round(100 * p.done / p.total) : 0}%"></div></div></div>`).join("") || '<span class="sub">No open tasks yet.</span>'}
   </div>`;
-  if (!MENTOR()) v.querySelectorAll(".mo").forEach((e) => e.remove());
+  if (!MENTOR() && !LEAD()) v.querySelectorAll(".mo").forEach((e) => e.remove());
   bindChips(v);
   const _tk = $("tk-add"); if (_tk) _tk.addEventListener("click", async () => {
     const t = $("tk-title").value.trim();
@@ -2396,8 +2459,13 @@ async function renderTasks() {
   $("tk-fsub").addEventListener("change", (e) => { tasksSubteam = e.target.value; renderTasks(); });
   $("tk-fper").addEventListener("change", (e) => { tasksPeriod = e.target.value; renderTasks(); });
   $("tk-arch").addEventListener("click", () => { tasksShowArchived = !tasksShowArchived; renderTasks(); });
+  v.querySelectorAll("[data-fabjob]").forEach((b) => b.addEventListener("click", () => {
+    fabFocusId = parseInt(b.dataset.fabjob, 10);
+    showView("manufacturing");
+  }));
   v.querySelectorAll("[data-tmove]").forEach((b) => b.addEventListener("click", async () => {
-    await PATCH(`/api/tasks/${b.dataset.tmove}`, {status: b.dataset.to});
+    try { await PATCH(`/api/tasks/${b.dataset.tmove}`, {status: b.dataset.to}); }
+    catch (e) { toast("Error: " + e.message); }
     renderTasks();
   }));
   v.querySelectorAll("[data-tarch]").forEach((b) => b.addEventListener("click", async () => {
@@ -2415,6 +2483,303 @@ async function renderTasks() {
     await DEL(`/api/tasks/${b.dataset.tdel}`);
     renderTasks();
   }));
+}
+
+/* ---------------- manufacturing queue ---------------- */
+let fabMine = false, fabMethod = "", fabStatus = "", fabSubteam = "";
+let fabFocusId = null;
+let editingFabId = null, failingFabId = null;
+let fabAssignableCache = [], fabCatalogCache = [];
+
+function fabCanManage(j) { return MENTOR() || LEAD_FOR(j.subteam); }
+function fabCanStatus(j) {
+  return fabCanManage(j) || (ME && j.assignee_user_id === ME.id);
+}
+function fabStatusPill(s) {
+  return {queued: "steel", in_progress: "blue", failed: "red",
+    done: "green", cancelled: "gray"}[s] || "gray";
+}
+function fabStatusLabel(s) {
+  return {queued: "Queued", in_progress: "In progress", failed: "Failed",
+    done: "Done", cancelled: "Cancelled"}[s] || s;
+}
+function fabSpecHTML(spec) {
+  if (!spec) return '<span class="pill gray">No spec yet</span>';
+  if (spec.indexOf("http") === 0)
+    return `<a href="${esc(spec)}" target="_blank" rel="noopener">Spec ↗</a>`;
+  return esc(spec);
+}
+function openFabEditModal(j) {
+  editingFabId = j.id;
+  $("fe-name").value = j.part_name || "";
+  $("fe-spec").value = j.spec || "";
+  $("fe-material").value = j.material || "";
+  $("fe-machine").value = j.machine || "";
+  $("fe-qty").value = j.qty || 1;
+  const subs = MENTOR() ? SUBTEAMS
+    : SUBTEAMS.filter((s) => LEAD_FOR(s.name));
+  $("fe-subteam").innerHTML = subs.map((s) =>
+    `<option ${s.name === j.subteam ? "selected" : ""}>${esc(s.name)}</option>`).join("");
+  $("fe-priority").value = j.priority || "Normal";
+  $("fe-target").value = j.target_date || "";
+  $("fe-assignee").innerHTML = `<option value="">Unassigned</option>`
+    + fabAssignableCache.map((a) =>
+      `<option value="${a.id}" ${a.id === j.assignee_user_id ? "selected" : ""}>${esc(a.name)}</option>`).join("");
+  $("fe-notes").value = j.notes || "";
+  $("fe-handed").value = j.handed_to || "";
+  $("fab-edit-modal").classList.add("open");
+}
+function closeFabEditModal() {
+  editingFabId = null;
+  $("fab-edit-modal").classList.remove("open");
+}
+function openFabFailModal(j) {
+  failingFabId = j.id;
+  $("fab-fail-line").textContent = j.part_name;
+  $("ff-reason").value = "";
+  $("fab-fail-modal").classList.add("open");
+}
+function closeFabFailModal() {
+  failingFabId = null;
+  $("fab-fail-modal").classList.remove("open");
+}
+
+async function renderManufacturing() {
+  const v = $("view-manufacturing");
+  if (!ME) { v.innerHTML = ""; return; }
+  let jobs = [];
+  try { jobs = await GET("/api/fab-jobs"); }
+  catch (e) {
+    v.innerHTML = '<div class="card"><h2>Manufacturing Queue</h2><p class="sub">Could not load jobs.</p></div>';
+    return;
+  }
+  const canAnyManage = MENTOR() || LEAD();
+  let catalogFab = [], srcRequests = [], leads = [];
+  if (canAnyManage) {
+    fabAssignableCache = await GET("/api/fab-assignable").catch(() => []);
+    const parts = await GET("/api/parts").catch(() => []);
+    catalogFab = parts.filter((p) => p.method === "3d print" || p.method === "CNC");
+    fabCatalogCache = catalogFab;
+    const reqs = await GET("/api/part-requests").catch(() => []);
+    srcRequests = reqs.filter((r) =>
+      (r.method === "3d print" || r.method === "CNC")
+      && (r.status === "approved" || r.status === "assigned"));
+  }
+  if (MENTOR()) leads = await GET("/api/fab-leads").catch(() => []);
+  const filtered = jobs.filter((j) => {
+    if (fabMine && !(ME && j.assignee_user_id === ME.id)) return false;
+    if (fabMethod && j.method !== fabMethod) return false;
+    if (fabStatus && j.status !== fabStatus) return false;
+    if (fabSubteam && j.subteam !== fabSubteam) return false;
+    return true;
+  });
+  const openCount = jobs.filter((j) => j.status !== "done" && j.status !== "cancelled").length;
+  const progCount = jobs.filter((j) => j.status === "in_progress").length;
+  const doneCount = jobs.filter((j) => j.status === "done").length;
+  const jobCard = (j) => {
+    const manager = fabCanManage(j);
+    const actor = fabCanStatus(j);
+    const attempts = j.attempts
+      ? `<span class="pill red">${j.attempts} failed attempt${j.attempts > 1 ? "s" : ""}</span>` : "";
+    const meta = [j.subteam || "", "Qty " + j.qty,
+      j.machine || "Machine TBD", j.material || "Material TBD",
+      j.assignee_name || "Unassigned",
+      j.target_date ? "Due " + j.target_date : "No target date"].join(" · ");
+    let actions = "";
+    if (j.status === "queued" && actor)
+      actions += `<button class="btn small" data-fab-start="${j.id}">Start</button>`;
+    if (j.status === "in_progress" && actor) {
+      actions += `<button class="btn small" data-fab-done="${j.id}">Mark done</button>`;
+      actions += `<button class="btn small danger" data-fab-fail="${j.id}">Mark failed</button>`;
+    }
+    if (j.status === "failed" && manager)
+      actions += `<button class="btn small" data-fab-requeue="${j.id}">Requeue</button>`;
+    if (manager && j.status !== "done" && j.status !== "cancelled") {
+      actions += `<button class="btn small ghost" data-fab-edit="${j.id}">Edit</button>`;
+      actions += `<button class="btn small ghost" data-fab-cancel="${j.id}">Cancel</button>`;
+    }
+    if (MENTOR() && (j.status === "queued" || j.status === "cancelled"))
+      actions += `<button class="btn small danger" data-fab-del="${j.id}">✕</button>`;
+    return `<div class="card" id="fab-job-${j.id}">
+      <div class="row" style="flex-wrap:wrap;justify-content:space-between">
+        <div><strong>${esc(j.part_name)}</strong></div>
+        <div class="row" style="flex-wrap:wrap">
+          <span class="pill blue">${esc(j.method)}</span>
+          <span class="pill ${fabStatusPill(j.status)}">${fabStatusLabel(j.status)}</span>
+          <span class="pill ${j.priority === "High" ? "red" : "gray"}">${esc(j.priority)} priority</span>
+          ${attempts}
+        </div>
+      </div>
+      <div class="m">${esc(meta)}</div>
+      <div class="m">Spec: ${fabSpecHTML(j.spec)}</div>
+      ${j.fail_reason ? `<div class="m">Last failure: ${esc(j.fail_reason)}</div>` : ""}
+      ${j.notes ? `<div class="m">${esc(j.notes)}</div>` : ""}
+      ${j.source_request_id ? `<div class="m">From parts request #${j.source_request_id}</div>` : ""}
+      ${j.handed_to ? `<div class="m">Handed to: ${esc(j.handed_to)}</div>` : ""}
+      ${actions ? `<div class="row" style="margin-top:8px;flex-wrap:wrap">${actions}</div>` : ""}
+    </div>`;
+  };
+  const createSubs = MENTOR() ? SUBTEAMS
+    : SUBTEAMS.filter((s) => LEAD_FOR(s.name));
+  v.innerHTML = `
+  <div class="card"><h2>Manufacturing Queue</h2>
+  <p class="sub">In-house CNC and 3D-print jobs, planned by subteam leads and mentors — not purchases, so nothing here goes through vendor batches or invoices. Students work their jobs from here and from their Task Board cards; one status change updates both.</p>
+  <div class="statgrid">
+    <div class="stat"><div class="n">${openCount}</div><div class="l">open jobs</div></div>
+    <div class="stat"><div class="n">${progCount}</div><div class="l">in progress</div></div>
+    <div class="stat"><div class="n">${doneCount}</div><div class="l">done</div></div>
+  </div></div>
+  <div class="card"><div class="row" style="flex-wrap:wrap">
+    <button class="btn small ${fabMine ? "" : "ghost"}" id="fab-mine">Only mine</button>
+    <select id="fab-fmethod"><option value="">All methods</option>
+      <option value="3d print" ${fabMethod === "3d print" ? "selected" : ""}>3d print</option>
+      <option value="CNC" ${fabMethod === "CNC" ? "selected" : ""}>CNC</option></select>
+    <select id="fab-fstatus"><option value="">All statuses</option>
+      ${["queued", "in_progress", "failed", "done", "cancelled"].map((s) =>
+        `<option value="${s}" ${fabStatus === s ? "selected" : ""}>${fabStatusLabel(s)}</option>`).join("")}</select>
+    <select id="fab-fsub"><option value="">All subteams</option>
+      ${SUBTEAMS.map((s) => `<option ${s.name === fabSubteam ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select>
+  </div></div>
+  ${canAnyManage ? `<div class="card"><h3>Plan a fab job</h3>
+    <p class="sub">Lead-planned work only — no parts request needed. Pick a catalog fab part to inherit its method and spec, or enter a custom part. A job cannot start until spec and material are filled in.</p>
+    <div class="row" style="flex-wrap:wrap">
+      <div class="field"><label>Catalog fab part</label><select id="fc-part">
+        <option value="">Custom part…</option>
+        ${catalogFab.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}
+      </select></div>
+      <div class="field"><label>Part name *</label><input id="fc-name" type="text"></div>
+      <div class="field"><label>Method *</label><select id="fc-method"><option>3d print</option><option>CNC</option></select></div>
+      <div class="field"><label>Spec (STL file or CAD link)</label><input id="fc-spec" type="text"></div>
+    </div>
+    <div class="row" style="flex-wrap:wrap">
+      <div class="field"><label>Material</label><input id="fc-material" type="text" placeholder="e.g. PLA, aluminum 6061"></div>
+      <div class="field"><label>Machine</label><input id="fc-machine" type="text" placeholder="e.g. Printer 2, CNC router"></div>
+      <div class="field"><label>Qty</label><input id="fc-qty" type="number" min="1" value="1"></div>
+      <div class="field"><label>Subteam *</label><select id="fc-subteam">
+        ${createSubs.map((s) => `<option>${esc(s.name)}</option>`).join("")}
+      </select></div>
+      <div class="field"><label>Priority</label><select id="fc-priority"><option>Normal</option><option>High</option></select></div>
+      <div class="field"><label>Target date</label><input id="fc-target" type="date"></div>
+    </div>
+    <div class="row" style="flex-wrap:wrap">
+      <div class="field"><label>Assign to</label><select id="fc-assignee">
+        <option value="">Unassigned</option>
+        ${fabAssignableCache.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("")}
+      </select></div>
+      <div class="field"><label>From parts request (optional)</label><select id="fc-src">
+        <option value="">Lead-planned (no request)</option>
+        ${srcRequests.map((r) => `<option value="${r.id}">${esc(r.part_name)} — ${esc(r.status)}</option>`).join("")}
+      </select></div>
+      <div class="field"><label>Notes</label><input id="fc-notes" type="text"></div>
+      <button class="btn small" id="fc-add">Add job</button>
+    </div></div>` : ""}
+  ${MENTOR() ? `<div class="card"><h3>Subteam leads</h3>
+    <p class="sub">Leads stay students — this grant only lets them plan fab jobs and create tasks for their subteam. It never makes them mentors: no ordering, no finance, no hotel or travel.</p>
+    <div class="m">${leads.map((l) => `${esc(l.user_name)} — ${esc(l.subteam)} <button class="btn small danger" data-lead-del="${l.id}">✕</button>`).join("<br>") || "No leads designated yet."}</div>
+    <div class="row" style="flex-wrap:wrap">
+      <div class="field"><label>Student</label><select id="fl-user">
+        ${fabAssignableCache.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("")}
+      </select></div>
+      <div class="field"><label>Subteam</label><select id="fl-subteam">
+        ${SUBTEAMS.map((s) => `<option>${esc(s.name)}</option>`).join("")}
+      </select></div>
+      <button class="btn small" id="fl-add">Designate lead</button>
+    </div></div>` : ""}
+  ${filtered.map(jobCard).join("") || '<div class="card"><p class="sub">No jobs match these filters.</p></div>'}`;
+  $("fab-mine").addEventListener("click", () => { fabMine = !fabMine; renderManufacturing(); });
+  $("fab-fmethod").addEventListener("change", (e) => { fabMethod = e.target.value; renderManufacturing(); });
+  $("fab-fstatus").addEventListener("change", (e) => { fabStatus = e.target.value; renderManufacturing(); });
+  $("fab-fsub").addEventListener("change", (e) => { fabSubteam = e.target.value; renderManufacturing(); });
+  const fcPart = $("fc-part");
+  if (fcPart) fcPart.addEventListener("change", () => {
+    const p = fabCatalogCache.find((x) => String(x.id) === fcPart.value);
+    if (p) {
+      $("fc-name").value = p.name;
+      $("fc-method").value = p.method;
+      $("fc-spec").value = p.spec || "";
+    }
+  });
+  const fcAdd = $("fc-add");
+  if (fcAdd) fcAdd.addEventListener("click", async () => {
+    const partId = $("fc-part").value;
+    const body = {
+      part_id: partId ? parseInt(partId, 10) : null,
+      part_name: $("fc-name").value.trim(),
+      method: $("fc-method").value,
+      spec: $("fc-spec").value.trim() || null,
+      material: $("fc-material").value.trim() || null,
+      machine: $("fc-machine").value.trim() || null,
+      qty: parseInt($("fc-qty").value, 10) || 1,
+      subteam: $("fc-subteam").value,
+      priority: $("fc-priority").value,
+      target_date: $("fc-target").value || null,
+      assignee_user_id: $("fc-assignee").value
+        ? parseInt($("fc-assignee").value, 10) : null,
+      source_request_id: $("fc-src").value
+        ? parseInt($("fc-src").value, 10) : null,
+      notes: $("fc-notes").value.trim() || null,
+    };
+    // A catalog pick supplies the name/method/spec; a custom part
+    // must name itself. The server validates both paths.
+    if (!partId && !body.part_name) { toast("Part name is required."); return; }
+    if (partId) delete body.part_name;
+    try { await POST("/api/fab-jobs", body); toast("Job added."); }
+    catch (e) { toast("Error: " + e.message); return; }
+    renderManufacturing();
+  });
+  const flAdd = $("fl-add");
+  if (flAdd) flAdd.addEventListener("click", async () => {
+    try {
+      await POST("/api/fab-leads", {
+        user_id: parseInt($("fl-user").value, 10),
+        subteam: $("fl-subteam").value});
+      toast("Lead designated.");
+    } catch (e) { toast("Error: " + e.message); return; }
+    renderManufacturing();
+  });
+  const act = async (sel, fn) => {
+    v.querySelectorAll(sel).forEach((b) => b.addEventListener("click", async () => {
+      try { await fn(b); } catch (e) { toast("Error: " + e.message); return; }
+      renderManufacturing();
+    }));
+  };
+  await act("[data-fab-start]", (b) =>
+    PATCH(`/api/fab-jobs/${b.dataset.fabStart}`, {status: "in_progress"}));
+  await act("[data-fab-done]", (b) =>
+    PATCH(`/api/fab-jobs/${b.dataset.fabDone}`, {status: "done"}));
+  await act("[data-fab-requeue]", (b) =>
+    PATCH(`/api/fab-jobs/${b.dataset.fabRequeue}`, {status: "queued"}));
+  v.querySelectorAll("[data-fab-fail]").forEach((b) => b.addEventListener("click", () => {
+    const j = jobs.find((x) => String(x.id) === b.dataset.fabFail);
+    if (j) openFabFailModal(j);
+  }));
+  v.querySelectorAll("[data-fab-edit]").forEach((b) => b.addEventListener("click", () => {
+    const j = jobs.find((x) => String(x.id) === b.dataset.fabEdit);
+    if (j) openFabEditModal(j);
+  }));
+  v.querySelectorAll("[data-fab-cancel]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Cancel this job?")) return;
+    try { await PATCH(`/api/fab-jobs/${b.dataset.fabCancel}`, {status: "cancelled"}); toast("Job cancelled."); }
+    catch (e) { toast("Error: " + e.message); return; }
+    renderManufacturing();
+  }));
+  v.querySelectorAll("[data-fab-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Delete this job and its Task card?")) return;
+    try { await DEL(`/api/fab-jobs/${b.dataset.fabDel}`); toast("Job deleted."); }
+    catch (e) { toast("Error: " + e.message); return; }
+    renderManufacturing();
+  }));
+  v.querySelectorAll("[data-lead-del]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Remove this lead designation?")) return;
+    try { await DEL(`/api/fab-leads/${b.dataset.leadDel}`); toast("Lead removed."); }
+    catch (e) { toast("Error: " + e.message); return; }
+    renderManufacturing();
+  }));
+  if (fabFocusId) {
+    const el = $("fab-job-" + fabFocusId);
+    if (el) el.scrollIntoView();
+    fabFocusId = null;
+  }
 }
 
 /* ---------------- travel & logistics ---------------- */

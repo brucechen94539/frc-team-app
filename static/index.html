@@ -23,6 +23,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
       <button data-view="events">Events &amp; RSVPs</button>
       <button data-view="tracking">Tracking</button>
       <button data-view="tasks">Task Board</button>
+      <button data-view="manufacturing">Manufacturing</button>
       <button data-view="travel">Travel &amp; Logistics</button>
       <button data-view="parts">Parts &amp; Purchasing</button>
     </nav>
@@ -142,6 +143,39 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
         <div class="menu-foot"><button class="btn danger" id="del-yes">YES</button><button class="btn ghost" id="del-no">NO</button></div>
       </div>
     </div>
+    <div id="fab-edit-modal" class="modal-backdrop">
+      <div class="modal-card" style="max-height:90vh;overflow:auto">
+        <p style="font-size:17px;font-weight:700;margin:0 0 14px">Edit fab job</p>
+        <div class="field"><label>Part name</label><input id="fe-name" type="text"></div>
+        <div class="field"><label>Spec (STL file or CAD link)</label><input id="fe-spec" type="text"></div>
+        <div class="field"><label>Material</label><input id="fe-material" type="text"></div>
+        <div class="field"><label>Machine</label><input id="fe-machine" type="text"></div>
+        <div class="row"><div class="field"><label>Qty</label><input id="fe-qty" type="number" min="1"></div>
+        <div class="field"><label>Subteam</label><select id="fe-subteam"></select></div>
+        <div class="field"><label>Priority</label><select id="fe-priority"><option>Normal</option><option>High</option></select></div></div>
+        <div class="row"><div class="field"><label>Target date</label><input id="fe-target" type="date"></div>
+        <div class="field"><label>Assignee</label><select id="fe-assignee"></select></div></div>
+        <div class="field"><label>Notes</label><input id="fe-notes" type="text"></div>
+        <div class="field"><label>Handed to (on completion)</label><input id="fe-handed" type="text"></div>
+        <p class="sub">Once a job is in progress, part, spec, material, machine, quantity, and subteam are locked — cancel and recreate it if the design changed. The server enforces this.</p>
+        <div class="menu-foot">
+          <button class="btn" id="fe-submit">Save changes</button>
+          <button class="btn ghost" id="fe-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
+    <div id="fab-fail-modal" class="modal-backdrop">
+      <div class="modal-card">
+        <p style="font-size:17px;font-weight:700;margin:0 0 14px">Mark job failed</p>
+        <p class="sub" id="fab-fail-line"></p>
+        <div class="field"><label>What went wrong? *</label><input id="ff-reason" type="text" placeholder="e.g. Warped off the bed, layer shift at 60%"></div>
+        <p class="sub">The job returns to the queue for its lead to requeue or cancel. The attempt counter goes up by one.</p>
+        <div class="menu-foot">
+          <button class="btn danger" id="ff-submit">Mark failed</button>
+          <button class="btn ghost" id="ff-cancel">Cancel</button>
+        </div>
+      </div>
+    </div>
   </div>
   <p class="tagline">Team HQ — sign-ups · events · tracking · tasks</p>
 </header>
@@ -154,6 +188,7 @@ if(t==="light"||t==="dark")document.documentElement.setAttribute("data-theme",t)
   <section id="view-events" class="view hidden"></section>
   <section id="view-tracking" class="view hidden"></section>
   <section id="view-tasks" class="view hidden"></section>
+  <section id="view-manufacturing" class="view hidden"></section>
   <section id="view-travel" class="view hidden"></section>
   <section id="view-parts" class="view hidden"></section>
   <section id="view-security" class="view hidden"></section>

@@ -12,6 +12,15 @@ and `can't make it` do not count as attending.
 ## Accounts & roles
 
 - Roles: **student**, **parent**, **mentor**, **admin** (admin = mentor powers).
+- **Mentors vs subteam leads (2026-11-01):** mentors are the parent/adult
+  accounts for things students should not do — finance, arranging hotel
+  and travel, parts ordering. Subteam leads are students with higher
+  expertise who stay categorized as students but govern parts procuring
+  (in-house fab, via the Manufacturing Queue) and task assignments for
+  their subteam. A lead is never promoted to mentor: the grant lives in
+  `fab_leads` (account + subteam, mentor-managed in Manufacturing), and
+  removing it removes the grant immediately. Leads cannot order parts,
+  manage accounts, or touch finance, hotel, or travel.
 - The landing page is the login screen. Only the fresh team sign-up form is
   public; everything else requires a login.
 - Passwords are stored as scrypt hashes in SQLite; login uses a signed
@@ -626,8 +635,13 @@ and `can't make it` do not count as attending.
 - The Task Board is its **own module**, separate from Tracking: Tracking
   is per-event attendance, while tasks are team-wide (no event scope).
 - Columns: **To do / In progress / Done**. Mentors create tasks (title,
-  subteam, due date); anyone moves cards along; deleting stays
-  mentor-only.
+  subteam, due date) for any subteam; subteam leads create tasks only
+  for subteams they lead (server-enforced, and the create form offers
+  only those subteams). Anyone moves general cards along; deleting
+  stays mentor-only. **Fab cards are the exception** (see Manufacturing
+  Queue): they move only for their assignee, their subteam's lead, or
+  a mentor, and their title/subteam/assignees/due date are edited
+  through the job, not the card.
 - **User-focused cards:** assignees lead the card as colored initial
   chips with names. A task may appoint **several students** (stored as a
   list; legacy single assignees migrate to one-person lists), picked
@@ -641,6 +655,53 @@ and `can't make it` do not count as attending.
   status is preserved through archiving. A **period filter** (All time /
   This month / This quarter) filters by due date; undated tasks always
   show.
+
+## Manufacturing Queue (in-house CNC / 3D print, 2026-11-01)
+
+- A standalone module (nav: Manufacturing, between Task Board and
+  Travel) for lead-planned build-season work. It is **not** part of
+  Parts Requests: a job needs no request, purchase, vendor batch, or
+  invoice. A job may optionally carry a source Parts Request (approved
+  or assigned fab requests only); converting one marks it assigned,
+  and finishing the job marks it received, and a request with an open
+  job cannot be converted a second time.
+- A job carries a catalog fab part (method and spec inherited as a
+  snapshot) or a custom name, method (3d print or CNC only), spec
+  (STL file or CAD link), material, machine (free text), quantity,
+  subteam (one of the team's 8), priority (High/Normal), target date,
+  a single assignee (a student account — a student without an account
+  cannot be assigned, so "My jobs" stays reliable), and notes.
+- Statuses: **Queued → In progress → Done**, plus **Failed** and
+  **Cancelled**. Done means finished *and* handed off (optional
+  "handed to" name) and is terminal; finishing adds the quantity to
+  the linked catalog part's on-hand. Failed requires a reason, bumps
+  an attempt counter, and returns to Queued only when a lead or mentor
+  requeues it. Cancelled is terminal and archives the Task card.
+  There is no separate Ready status: **Start is the gate** — the
+  server refuses to start a job with a blank spec or material. Lead
+  creation counts as design release; there is no separate approval
+  step. Once in progress, part, spec, material, machine, quantity,
+  and subteam are locked (cancel and recreate if the design changed);
+  target date, priority, notes, assignee, and handed-to stay editable.
+- **Task link (one job, two views):** creating a job creates a Task
+  Board card (title, subteam, assignee name, due = target date);
+  status maps both ways — Queued ↔ To do, In progress ↔ Doing,
+  Done ↔ Done, Failed ↔ To do — and assignee/target/subteam edits
+  sync. There is no pause state: an in-progress fab card cannot go
+  back to To do from the board (mark it failed or cancel it in the
+  queue). Fab cards carry a Fab pill and a "View job" jump to the
+  queue job. Deleting a job (mentor-only, queued or cancelled only)
+  deletes its Task card too.
+- **Permissions:** everyone logged in can read the queue (parents
+  read-only, as in Parts). Create/edit/reassign/requeue/cancel:
+  mentors/admins for any subteam, designated leads for their own
+  subteam only. Start/fail/done: the assignee, or a lead/mentor on
+  their behalf. Delete: mentor/admin only. The queue sorts by target
+  date (undated last), then High priority, then oldest first; there
+  is no drag-rank reorder in v1 — a lead reorders by changing priority
+  or target date. Deliberately not in v1: CAM/slicing, a machine
+  calendar, material stock deduction, external fab, self-claiming,
+  and notifications (the app has none).
 
 ## Travel & logistics (per event, per day on multi-day trips)
 
