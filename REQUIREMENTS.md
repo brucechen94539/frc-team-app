@@ -589,6 +589,41 @@ and `can't make it` do not count as attending.
 - Event pickers in the UI are **bubbles** (chips), not dropdowns: the picked
   event is highlighted and the sections below update to that event.
 
+## Meal polls (survey per event, 2026-11-08)
+
+- One **meal poll** per event, for meal ordering. A mentor/admin creates
+  it from a mentor-only "Add meal poll" control on the event card
+  (question, default "Meal order", + 2–12 options, one per line). A
+  second poll on the same event is refused (409); the mentor can delete
+  a poll (votes go with it) and recreate it. No option editing after
+  creation — delete and recreate instead.
+- The poll card is **public on the event** for everyone logged in,
+  showing the question, the options, and its status: "Open until
+  <last day>" or "Closed — voting ended <last day>". It does **not**
+  consume one of the 3 announcement slots.
+- **Expiry is the end of the event date**: 23:59 local on the event's
+  last day (`end_date` if set, else `date`), judged by local date like
+  the RSVP deadline. The server refuses votes after expiry (403) and
+  the card grays out to Closed. A dateless event's poll never expires.
+- **Voters are the event's RSVP'd students and parents only**
+  (going/partial; waitlisted does not count). A student votes for
+  themself; a parent votes for themself or for their own child — same
+  link scope as RSVPs, never another family, with the same
+  anti-spoofing name check (roster name or account name). Mentors
+  have no proxy vote; a mentor votes only if they hold a linked
+  self/parent scope and are attending. Non-attendees see the card but
+  get no vote controls.
+- **One vote per person (eater) per poll, changeable until expiry**:
+  re-voting overwrites; clicking the already-picked option clears the
+  vote. A parent voting for a child overwrites the child's own vote
+  for that child — one meal per eater, last vote wins.
+- **Results are mentor-only**: per-option counts plus who picked what.
+  Voters see only their own pick (and the poll status); the card shows
+  each attending voter's current pick once the poll is closed.
+- Archived events accept no poll writes: creating/voting on an
+  archived event's poll is refused (the archive gate covers
+  create/delete; the vote endpoint checks archived explicitly).
+
 ## Announcements
 
 - Mentors/admins post **announcements** (title + message) from Mentor

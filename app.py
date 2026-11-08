@@ -223,6 +223,28 @@ def _migrate(db):
             subteam TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(user_id, subteam))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS meal_polls (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id INTEGER NOT NULL REFERENCES events(id)
+                ON DELETE CASCADE,
+            question TEXT NOT NULL DEFAULT 'Meal order',
+            options TEXT NOT NULL,
+            created_by_user_id INTEGER REFERENCES users(id)
+                ON DELETE SET NULL,
+            created_by_name TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(event_id))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS meal_votes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            poll_id INTEGER NOT NULL REFERENCES meal_polls(id)
+                ON DELETE CASCADE,
+            member_id INTEGER NOT NULL,
+            person_kind TEXT NOT NULL
+                CHECK (person_kind IN ('student', 'parent')),
+            person_name TEXT NOT NULL,
+            option TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(poll_id, person_kind, member_id, person_name))""")
         db.execute("""CREATE TABLE IF NOT EXISTS fab_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL,
@@ -3556,6 +3578,199 @@ def api_rsvp_delete(rid):
                 promoted = dict(nxt)
         db.commit()
     return jsonify({"deleted": rid, "promoted": promoted})
+
+
+# ---------------------------------------------------------------------------
+# Meal polls (2026-11-08): one mentor-created survey per event, for meal
+# ordering. Voters are the event's RSVP'd students and parents only: a
+# student votes for themself, a parent votes for themself or for their
+# own child (same link scope as RSVPs, never another family). One vote
+# per person per poll, changeable until the poll expires at the end of
+# the event's last day (end_date or date, judged by local date, like
+# the RSVP deadline). Results (counts + who picked what) are
+# mentor-only; voters see only their own pick. The card is public on
+# the event for everyone, showing Open/Closed and the expiry date.
+# ---------------------------------------------------------------------------
+
+def _meal_last_day(ev):
+    """Last day of an event (end_date or date), or None if dateless."""
+    days = _event_days(ev)
+    return days[-1] if days else None
+
+
+def _meal_poll_out(poll, ev, u):
+    options = json.loads(poll["options"] or "[]")
+    last_day = _meal_last_day(ev)
+    closed = bool(last_day
+                  and last_day < datetime.date.today().isoformat())
+    out = {"id": poll["id"], "event_id": poll["event_id"],
+           "question": poll["question"], "options": options,
+           "expires": last_day, "closed": closed,
+           "created_by_name": poll["created_by_name"]}
+    if u and u["role"] in MENTOR_ROLES:
+        votes = q_all("SELECT * FROM meal_votes WHERE poll_id=?"
+                      " ORDER BY person_name", (poll["id"],))
+        counts = {o: 0 for o in options}
+        for v in votes:
+            if v["option"] in counts:
+                counts[v["option"]] += 1
+        out["counts"] = counts
+        out["votes"] = [row(v) for v in votes]
+    else:
+        out["counts"] = None
+        out["votes"] = None
+    # The caller's own votes, by link scope (own student record +
+    # children a parent is linked to), whatever their role.
+    student_id, parent_ids = _self_rsvp_scope(u) if u else (None, set())
+    mine = []
+    if u:
+        ids = {student_id} | parent_ids
+        ids.discard(None)
+        if ids:
+            ph = ",".join("?" * len(ids))
+            for v in q_all(
+                    "SELECT * FROM meal_votes WHERE poll_id=?"
+                    f" AND member_id IN ({ph})",
+                    (poll["id"], *sorted(ids))):
+                mine.append(row(v))
+    out["mine"] = mine
+    return out
+
+
+@app.route("/api/events/<int:eid>/meal-polls", methods=["GET", "POST"])
+def api_meal_polls(eid):
+    ev = q_one("SELECT * FROM events WHERE id=?", (eid,))
+    if not ev:
+        return err("event not found", 404)
+    if request.method == "GET":
+        polls = q_all("SELECT * FROM meal_polls WHERE event_id=?"
+                      " ORDER BY id", (eid,))
+        u = current_user()
+        return jsonify({"polls": [_meal_poll_out(p, ev, u)
+                                  for p in polls]})
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    b = request.get_json(force=True)
+    question = (b.get("question") or "Meal order").strip() or "Meal order"
+    options = []
+    for o in (b.get("options") or []):
+        o = str(o).strip()
+        if o and o not in options:
+            options.append(o)
+    if len(options) < 2:
+        return err("give at least two meal options")
+    if len(options) > 12:
+        return err("at most 12 meal options")
+    u = current_user()
+    try:
+        pid = execute(
+            "INSERT INTO meal_polls (event_id, question, options,"
+            " created_by_user_id, created_by_name) VALUES (?,?,?,?,?)",
+            (eid, question, json.dumps(options), u["id"], u["name"]))
+    except sqlite3.IntegrityError:
+        return err("this event already has a meal poll", 409)
+    poll = q_one("SELECT * FROM meal_polls WHERE id=?", (pid,))
+    return jsonify(_meal_poll_out(poll, ev, u)), 201
+
+
+@app.route("/api/events/<int:eid>/meal-polls/<int:pid>",
+           methods=["DELETE"])
+def api_meal_poll_delete(eid, pid):
+    denied = _mentor_denied()
+    if denied:
+        return denied
+    poll = q_one("SELECT * FROM meal_polls WHERE id=? AND event_id=?",
+                 (pid, eid))
+    if not poll:
+        return err("meal poll not found", 404)
+    execute("DELETE FROM meal_polls WHERE id=?", (pid,))
+    return jsonify({"deleted": pid})
+
+
+@app.route("/api/meal-polls/<int:pid>/votes", methods=["POST"])
+def api_meal_vote(pid):
+    poll = q_one("SELECT * FROM meal_polls WHERE id=?", (pid,))
+    if not poll:
+        return err("meal poll not found", 404)
+    ev = q_one("SELECT * FROM events WHERE id=?", (poll["event_id"],))
+    if ev and ev["archived"]:
+        return err("event is archived", 403)
+    u = current_user()
+    if not u:
+        return err("login required", 401)
+    last_day = _meal_last_day(ev)
+    if last_day and last_day < datetime.date.today().isoformat():
+        return err("voting has closed — the poll expired at the end of"
+                   " the event date", 403)
+    b = request.get_json(force=True)
+    if (b.get("person_kind") not in ("student", "parent")
+            or not b.get("member_id") or not b.get("person_name")):
+        return err("person_kind (student|parent), member_id and"
+                   " person_name required")
+    student_id, parent_ids = _self_rsvp_scope(u)
+    # Kind student covers voting for oneself AND a parent voting for
+    # their own child (member_id in the parent's linked set); kind
+    # parent is the parent's own vote. A parent can never vote as
+    # another family's child.
+    ok = (b["person_kind"] == "student"
+          and (b["member_id"] == student_id
+               or b["member_id"] in parent_ids)) \
+        or (b["person_kind"] == "parent"
+            and b["member_id"] in parent_ids)
+    if not ok:
+        return err("you can only vote for yourself or your own child",
+                   403)
+    # Name must match the roster record for that member/kind, or the
+    # signer's own account name (same anti-spoofing rule as RSVPs).
+    m = q_one("SELECT first_name, last_name, parent_name FROM members"
+              " WHERE id=?", (b["member_id"],))
+    if not m:
+        return err("you can only vote for yourself or your own child",
+                   403)
+    if b["person_kind"] == "student":
+        canonical = f"{m['first_name']} {m['last_name']}".strip()
+    else:
+        canonical = (m.get("parent_name") or "").strip()
+    allowed = {_norm_name(canonical)} if canonical else set()
+    allowed.add(_norm_name(u["name"]))
+    if _norm_name(b["person_name"]) not in allowed:
+        return err("that name doesn't match your roster record or"
+                   " account — you can only vote as yourself", 403)
+    # Voters are the event's RSVP'd people only, kind-aware: a parent
+    # voting for a child needs the CHILD going/partial, not just the
+    # parent's own RSVP.
+    att = q_one(
+        "SELECT * FROM rsvps WHERE event_id=? AND member_id=?"
+        " AND person_kind=? AND status IN ('going','partial')",
+        (poll["event_id"], b["member_id"], b["person_kind"]))
+    if not att:
+        return err("only RSVP'd attendees can vote in this poll", 403)
+    opt = (b.get("option") or "").strip()
+    if opt:
+        options = json.loads(poll["options"] or "[]")
+        if opt not in options:
+            return err("not one of the poll options")
+    with _lock:
+        db = get_db()
+        if not opt:
+            db.execute(
+                "DELETE FROM meal_votes WHERE poll_id=?"
+                " AND person_kind=? AND member_id=? AND person_name=?",
+                (pid, b["person_kind"], b["member_id"],
+                 b["person_name"]))
+            db.commit()
+            return jsonify({"cleared": True})
+        db.execute(
+            "INSERT INTO meal_votes (poll_id, member_id, person_kind,"
+            " person_name, option) VALUES (?,?,?,?,?)"
+            " ON CONFLICT(poll_id, person_kind, member_id, person_name)"
+            " DO UPDATE SET option=excluded.option,"
+            " created_at=datetime('now')",
+            (pid, b["member_id"], b["person_kind"], b["person_name"],
+             opt))
+        db.commit()
+    return jsonify({"ok": True, "option": opt}), 201
 
 
 @app.route("/api/my-rsvps")

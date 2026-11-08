@@ -388,6 +388,33 @@ CREATE TABLE IF NOT EXISTS fab_leads (
   UNIQUE(user_id, subteam)
 );
 
+-- Meal polls (2026-11-08): one survey per event, mentor-created.
+-- A vote is cast "as" a person (the eater): a student votes for
+-- themself, a parent votes for themself or for their own child.
+-- Expiry is derived from the event's last day (end_date or date),
+-- so there is no expires column to drift out of sync.
+CREATE TABLE IF NOT EXISTS meal_polls (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id      INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  question      TEXT NOT NULL DEFAULT 'Meal order',
+  options       TEXT NOT NULL,
+  created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  created_by_name TEXT,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(event_id)
+);
+
+CREATE TABLE IF NOT EXISTS meal_votes (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  poll_id       INTEGER NOT NULL REFERENCES meal_polls(id) ON DELETE CASCADE,
+  member_id     INTEGER NOT NULL,
+  person_kind   TEXT NOT NULL CHECK (person_kind IN ('student', 'parent')),
+  person_name   TEXT NOT NULL,
+  option        TEXT NOT NULL,
+  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(poll_id, person_kind, member_id, person_name)
+);
+
 CREATE TABLE IF NOT EXISTS fab_jobs (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   part_id       INTEGER REFERENCES parts(id) ON DELETE SET NULL,

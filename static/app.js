@@ -1877,7 +1877,7 @@ async function renderEvents() {
     <div id="an-list"><span class="sub">Loading…</span></div>
   </div>
   <div class="card"><h2>Events &amp; RSVPs</h2>
-  <p class="sub">Mentors create events from Mentor Queue. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote.</p>
+  <p class="sub">Mentors create events from Mentor Queue. Students and parents RSVP for themselves; mentors can RSVP for anyone. Over-capacity events waitlist with auto-promote. Meal polls appear on event cards.</p>
   <div class="row mo">
     <a class="btn ghost small" href="/api/events.csv">Export CSV</a>
     <button class="btn ghost small" id="e-import">Import CSV</button>
@@ -2000,6 +2000,44 @@ async function renderEvents() {
         toast(r.promoted ? `Released — ${esc(r.promoted.person_name)} promoted from waitlist.` : "RSVP removed.");
         renderEvents();
       } catch (e) { toast("Error: " + e.message); }
+    }));
+  v.querySelectorAll("[data-mpoll-toggle]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const f = $(`mpf-${b.dataset.mpollToggle}`);
+      if (f) f.classList.toggle("hidden");
+    }));
+  v.querySelectorAll("[data-mpoll-create]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const card = b.closest(".card");
+      const q = card.querySelector(".mp-q").value.trim() || "Meal order";
+      const opts = card.querySelector(".mp-opts").value.split("\n")
+        .map((s) => s.trim()).filter(Boolean);
+      try {
+        await POST(`/api/events/${b.dataset.mpollCreate}/meal-polls`,
+          {question: q, options: opts});
+        toast("Meal poll created.");
+        renderEvents();
+      } catch (ex) { toast("Error: " + ex.message); }
+    }));
+  v.querySelectorAll("[data-mpoll-vote]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      try {
+        await POST(`/api/meal-polls/${b.dataset.poll}/votes`, {
+          member_id: parseInt(b.dataset.member, 10),
+          person_kind: b.dataset.kind,
+          person_name: b.dataset.name, option: b.dataset.option});
+        toast(b.dataset.option ? "Vote saved." : "Vote cleared.");
+        renderEvents();
+      } catch (ex) { toast("Error: " + ex.message); }
+    }));
+  v.querySelectorAll("[data-mpoll-del]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      if (!confirm("Delete this meal poll and its votes?")) return;
+      try {
+        await DEL(`/api/events/${b.dataset.mpollEv}/meal-polls/${b.dataset.mpollDel}`);
+        toast("Meal poll deleted.");
+        renderEvents();
+      } catch (ex) { toast("Error: " + ex.message); }
     }));
   v.querySelectorAll("[data-delev]").forEach((b) =>
     b.addEventListener("click", async () => {
@@ -2126,8 +2164,71 @@ function eventClosed(e) {
   return !!(e.deadline && e.deadline < todayLocal());
 }
 
+function mealVoterEntries() {
+  // Who the signed-in account may vote as: own student record, own
+  // parent self (tied to the first linked child, so one parent has
+  // one self-vote), and each linked child. Mirrors selfScope().
+  const {student, parents} = selfScope();
+  const entries = [];
+  if (student) {
+    const m = rosterCache.find((x) => x.id === student);
+    if (m) entries.push({member_id: student, kind: "student",
+      name: `${m.first_name} ${m.last_name}`});
+  }
+  parents.forEach((cid, i) => {
+    const m = rosterCache.find((x) => x.id === cid);
+    if (!m) return;
+    if (i === 0) entries.push({member_id: cid, kind: "parent",
+      name: ME.name});
+    entries.push({member_id: cid, kind: "student",
+      name: `${m.first_name} ${m.last_name}`});
+  });
+  return entries;
+}
+
+function mealPollHtml(e, poll, rsvps, ro) {
+  const status = poll.closed
+    ? `<span class="pill gray">Closed — voting ended ${poll.expires ? dayLabel(poll.expires) : ""}</span>`
+    : `<span class="pill green">Open until ${poll.expires ? dayLabel(poll.expires) : ""}</span>`;
+  const attending = new Set(rsvps.filter((r) => r.status === "going" || r.status === "partial")
+    .map((r) => `${r.member_id}:${r.person_kind}`));
+  const myVote = (en) => (poll.mine || []).find((v) => v.person_kind === en.kind && v.member_id === en.member_id);
+  let voteRows = "";
+  if (!ro && !e.archived) {
+    const entries = mealVoterEntries();
+    const open = entries.filter((en) => attending.has(`${en.member_id}:${en.kind}`));
+    if (poll.closed) {
+      voteRows = open.map((en) => {
+        const cur = myVote(en);
+        return `<div class="row" style="margin:4px 0"><span><b>${esc(en.name)}</b> <span class="sub">(${en.kind})</span></span><span>${cur ? esc(cur.option) : '<span class="sub">no vote</span>'}</span></div>`;
+      }).join("") || '<p class="sub">Voting has closed.</p>';
+    } else if (!entries.length) {
+      // Mentors don't need a vote row at all — they get the results.
+      voteRows = MENTOR() ? "" : '<p class="sub">We couldn\'t match your account to the roster, so you can\'t vote — ask a mentor to check your account name.</p>';
+    } else if (!open.length) {
+      voteRows = '<p class="sub">Only RSVP\'d attendees can vote in this poll.</p>';
+    } else {
+      voteRows = open.map((en) => {
+        const cur = myVote(en);
+        return `<div class="row" style="margin:4px 0;flex-wrap:wrap"><span><b>${esc(en.name)}</b> <span class="sub">(${en.kind})</span></span>
+          ${poll.options.map((o) => `<button class="btn small ${cur && cur.option === o ? "" : "ghost"}" data-mpoll-vote data-poll="${poll.id}" data-member="${en.member_id}" data-kind="${en.kind}" data-name="${esc(en.name)}" data-option="${cur && cur.option === o ? "" : esc(o)}">${esc(o)}${cur && cur.option === o ? " ✓" : ""}</button>`).join("")}</div>`;
+      }).join("");
+    }
+  }
+  const results = MENTOR() && poll.counts
+    ? `<div style="margin-top:6px">${poll.options.map((o) => `<span class="pill">${esc(o)} — ${poll.counts[o] || 0}</span>`).join(" ")}
+      <div class="sub" style="margin-top:4px">${(poll.votes || []).map((v) => `${esc(v.person_name)} (${v.person_kind}): ${esc(v.option)}`).join(" · ") || "No votes yet."}</div></div>` : "";
+  return `<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
+    <div class="row"><b>Meal poll</b><span class="sub">${esc(poll.question)}</span>${status}
+      <span style="flex:1"></span>
+      ${MENTOR() && !ro ? `<button class="btn small ghost" data-mpoll-del="${poll.id}" data-mpoll-ev="${e.id}">Delete poll</button>` : ""}</div>
+    ${voteRows}${results}</div>`;
+}
+
 async function eventCard(e, ro = false) {
   const d = await GET(`/api/events/${e.id}/rsvps`);
+  const mp = await GET(`/api/events/${e.id}/meal-polls`).catch(() => ({polls: []}));
+  const polls = mp.polls || [];
   const hc = d.headcounts;
   const closed = eventClosed(e);
   const archived = !!e.archived;
@@ -2164,6 +2265,20 @@ async function eventCard(e, ro = false) {
     ${closed ? `<p class="sub">RSVP deadline has passed — RSVPs are frozen.</p>` : ""}`;
   else pickerRow = `<p class="sub">We couldn't match your account to the roster, so you can't RSVP — ask a mentor to check your account name.</p>`;
   const scope = selfScope();
+  // Meal poll: one per event, public on the card. Mentors get the
+  // create form when there is none yet, and results on the poll.
+  const mpLast = eventDays(e).slice(-1)[0];
+  const pollSection = polls.length
+    ? polls.map((p) => mealPollHtml(e, p, d.rsvps, ro)).join("")
+    : (MENTOR() && !ro && !archived
+      ? `<div style="margin-top:10px"><button class="btn small ghost" data-mpoll-toggle="${e.id}">Add meal poll</button>
+        <div id="mpf-${e.id}" class="hidden" style="margin-top:8px">
+          <div class="field"><label>Question</label><input class="mp-q" value="Meal order"></div>
+          <div class="field"><label>Meal options (one per line)</label><textarea class="mp-opts" placeholder="Chicken&#10;Veggie&#10;No meal"></textarea></div>
+          <div class="sub">Open to RSVP'd students and parents; closes at the end of ${mpLast ? dayLabel(mpLast) : "the event date"}.</div>
+          <div class="row" style="margin-top:6px"><button class="btn small" data-mpoll-create="${e.id}">Create poll</button></div>
+        </div></div>`
+      : "");
   const row = (r) => {
     const pill = r.status === "going" ? "green" : r.status === "waitlisted" ? "amber"
       : r.status === "maybe" ? "blue" : r.status === "partial" ? "steel" : "gray";
@@ -2219,6 +2334,7 @@ async function eventCard(e, ro = false) {
     ${pickerRow}
     ${d.rsvps.length ? `<div class="row" style="margin-top:6px"><button class="btn small ghost" data-expand="${e.id}" data-count="${d.rsvps.length}">${openRsvpLists.has(e.id) ? "Collapse list" : `Expand list (${d.rsvps.length})`}</button></div>` : ""}
     <div id="rl-${e.id}" style="margin-top:6px" class="${openRsvpLists.has(e.id) ? "" : "hidden"}">${d.rsvps.map(row).join("") || '<span class="sub">No RSVPs yet.</span>'}</div>
+    ${pollSection}
   </div>`;
 }
 
