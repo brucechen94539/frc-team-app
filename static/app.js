@@ -2944,6 +2944,12 @@ async function renderTravel() {
   const needsRides = evNeeds.needs_rides !== 0;
   const needsTools = evNeeds.needs_tools !== 0;
   const ev = t.event;
+  // Meal summary (mentor-only): same poll payload as the event card
+  // — counts + who picked what. Voting stays on the event card;
+  // non-mentors never fetch it (their payload carries no counts).
+  const mealPolls = MENTOR()
+    ? (await GET(`/api/events/${travelEventId}/meal-polls`).catch(() => ({polls: []}))).polls || []
+    : [];
   // Day-section open state: Day 1 open, the rest closed; reset when
   // the picked event changes. Toggling a section flips visibility
   // only — it never re-renders, so in-progress forms survive.
@@ -3337,6 +3343,19 @@ async function renderTravel() {
   </div>
   <p id="tl-collapsed-note" class="sub ${toolsListCollapsed && t.tools.length ? "" : "hidden"}" style="margin-top:8px">Tool list collapsed — ${t.tools.length} tool(s) hidden.</p>
   </div>`;
+  const mealsSummaryHTML = () => {
+    if (!mealPolls.length) return `<div class="card"><h3>Meals</h3>
+      <p class="sub">No meal polls for this event yet — create one from the event card in Events.</p></div>`;
+    return `<div class="card"><h3>Meals</h3>
+    <p class="sub">Meal polls for this event — voting happens on the event card in Events.</p>
+    ${mealPolls.map((p) => `<div style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
+      <div class="row"><b>${esc(p.question)}</b>${p.closed
+        ? `<span class="pill gray">Closed — voting ended ${p.expires ? dayLabel(p.expires) : ""}</span>`
+        : `<span class="pill green">Open until ${p.expires ? dayLabel(p.expires) : ""}</span>`}</div>
+      <div style="margin-top:4px">${p.options.map((o) => `<span class="pill">${esc(o)} — ${p.counts ? (p.counts[o] || 0) : 0}</span>`).join(" ")}</div>
+      <div class="sub" style="margin-top:4px">${(p.votes || []).map((vv) => `${esc(vv.person_name)} (${vv.person_kind}): ${esc(vv.option)}`).join(" · ") || "No votes yet."}</div>
+    </div>`).join("")}</div>`;
+  };
   v.innerHTML = `
   <div class="card"><h2>Travel &amp; Logistics</h2>
   ${(() => {
@@ -3352,6 +3371,7 @@ async function renderTravel() {
   ${multi && (needsRides || needsHotel) ? `<div class="row" style="margin-top:8px"><button class="btn small ghost" id="td-expand-all">Expand all days</button><button class="btn small ghost" id="td-collapse-all">Collapse all days</button></div>` : ""}</div>
 
   ${statusTableHTML()}
+  ${MENTOR() ? mealsSummaryHTML() : ""}
   ${needsRides ? logisticsCarsHTML() : ""}
   ${needsHotel ? logisticsRoomsHTML() : ""}
   ${needsRides ? fleetHTML() : ""}

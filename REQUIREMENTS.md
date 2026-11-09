@@ -627,6 +627,11 @@ and `can't make it` do not count as attending.
 - Archived events accept no poll writes: creating/voting on an
   archived event's poll is refused (the archive gate covers
   create/delete; the vote endpoint checks archived explicitly).
+- **Travel shows a mentor-only Meals summary** per event, right after
+  the Logistics status table: each poll's question, Open/Closed
+  status, per-option counts, and who picked what. Voting stays on the
+  event card — Travel is read-only for meals, and students/parents see
+  no Meals section there.
 
 ## Announcements
 
