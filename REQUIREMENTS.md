@@ -599,14 +599,22 @@ and `can't make it` do not count as attending.
   The mentor can delete a poll (votes go with it) and recreate it. No
   option editing after creation — delete and recreate instead. Votes
   are per poll: one vote per eater on each poll.
+- **Each poll belongs to one day of the event** (2026-11-08): on a
+  multi-day event the create form offers a Day dropdown of the
+  event's days (no free-text date in the question — the card shows
+  "Fri 11/20 · Lunch order"); a single-day event has no dropdown and
+  the poll is that day. The server refuses a day that is not one of
+  the event's days (400). Polls created before days existed have no
+  day and behave as before.
 - The poll card is **public on the event** for everyone logged in,
-  showing the question, the options, and its status: "Open until
-  <last day>" or "Closed — voting ended <last day>". It does **not**
-  consume one of the 3 announcement slots.
-- **Expiry is the end of the event date**: 23:59 local on the event's
-  last day (`end_date` if set, else `date`), judged by local date like
-  the RSVP deadline. The server refuses votes after expiry (403) and
-  the card grays out to Closed. A dateless event's poll never expires.
+  showing the day (when set), the question, the options, and its
+  status: "Open until <day>" or "Closed — voting ended <day>". It
+  does **not** consume one of the 3 announcement slots.
+- **Expiry is the end of the poll's day**: 23:59 local on the picked
+  day (an undated poll expires at the end of the event's last day,
+  `end_date` if set, else `date`), judged by local date like the RSVP
+  deadline. The server refuses votes after expiry (403) and the card
+  grays out to Closed. A dateless event's poll never expires.
 - **Voters are the event's RSVP'd students and parents only**
   (going/partial; waitlisted does not count). A student votes for
   themself; a parent votes for themself or for their own child — same
@@ -628,7 +636,7 @@ and `can't make it` do not count as attending.
   archived event's poll is refused (the archive gate covers
   create/delete; the vote endpoint checks archived explicitly).
 - **Travel shows a mentor-only Meals summary** per event, right after
-  the Logistics status table: each poll's question, Open/Closed
+  the Logistics status table: each poll's day, question, Open/Closed
   status, per-option counts, and who picked what. Voting stays on the
   event card — Travel is read-only for meals, and students/parents see
   no Meals section there.

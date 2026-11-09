@@ -125,6 +125,9 @@ def _migrate(db):
     member_cols = {r[1] for r in db.execute("PRAGMA table_info(members)")}
     lr_cols = {r[1] for r in db.execute("PRAGMA table_info(link_requests)")}
     tool_cols = {r[1] for r in db.execute("PRAGMA table_info(tools)")}
+    # Named mpoll_cols, not mp_cols: the rebuild below reuses mp_cols
+    # for its comma-joined column list.
+    mpoll_cols = {r[1] for r in db.execute("PRAGMA table_info(meal_polls)")}
     part_cols = {r[1] for r in db.execute("PRAGMA table_info(parts)")}
     van_cols = {r[1] for r in db.execute("PRAGMA table_info(team_vans)")}
     with _lock:
@@ -280,6 +283,13 @@ def _migrate(db):
                 db.execute("DROP TABLE meal_polls_old")
             finally:
                 db.execute("PRAGMA foreign_keys=ON")
+        # Meal poll day (2026-11-08): a poll belongs to one of the
+        # event's days and expires at the end of that day, not the
+        # event's last day. Placed after the rebuild above, so a
+        # rebuilt table gets the column too; fresh DBs already have
+        # it from schema.sql, so the guard skips the ALTER there.
+        if "day" not in mpoll_cols:
+            db.execute("ALTER TABLE meal_polls ADD COLUMN day TEXT")
         db.execute("""CREATE TABLE IF NOT EXISTS fab_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL,
@@ -3621,8 +3631,9 @@ def api_rsvp_delete(rid):
 # student votes for themself, a parent votes for themself or for their
 # own child (same link scope as RSVPs, never another family). One vote
 # per person per poll, changeable until the poll expires at the end of
-# the event's last day (end_date or date, judged by local date, like
-# the RSVP deadline). Results (counts + who picked what) are
+# its day (a day picked from the event's days; an undated poll expires
+# at the end of the event's last day, judged by local date, like the
+# RSVP deadline). Results (counts + who picked what) are
 # mentor-only; voters see only their own pick. The card is public on
 # the event for everyone, showing Open/Closed and the expiry date.
 # ---------------------------------------------------------------------------
@@ -3635,12 +3646,16 @@ def _meal_last_day(ev):
 
 def _meal_poll_out(poll, ev, u):
     options = json.loads(poll["options"] or "[]")
-    last_day = _meal_last_day(ev)
-    closed = bool(last_day
-                  and last_day < datetime.date.today().isoformat())
+    # A dated poll expires at the end of its own day; an undated one
+    # (created before days existed, or a dateless event) expires at
+    # the end of the event's last day, as before.
+    expires = poll["day"] or _meal_last_day(ev)
+    closed = bool(expires
+                  and expires < datetime.date.today().isoformat())
     out = {"id": poll["id"], "event_id": poll["event_id"],
-           "question": poll["question"], "options": options,
-           "expires": last_day, "closed": closed,
+           "question": poll["question"], "day": poll["day"],
+           "options": options,
+           "expires": expires, "closed": closed,
            "created_by_name": poll["created_by_name"]}
     if u and u["role"] in MENTOR_ROLES:
         votes = q_all("SELECT * FROM meal_votes WHERE poll_id=?"
@@ -3697,11 +3712,14 @@ def api_meal_polls(eid):
         return err("give at least two meal options")
     if len(options) > 12:
         return err("at most 12 meal options")
+    day = (b.get("day") or "").strip() or None
+    if day and day not in _event_days(ev):
+        return err("pick one of the event's days for the poll")
     u = current_user()
     pid = execute(
-        "INSERT INTO meal_polls (event_id, question, options,"
-        " created_by_user_id, created_by_name) VALUES (?,?,?,?,?)",
-        (eid, question, json.dumps(options), u["id"], u["name"]))
+        "INSERT INTO meal_polls (event_id, question, day, options,"
+        " created_by_user_id, created_by_name) VALUES (?,?,?,?,?,?)",
+        (eid, question, day, json.dumps(options), u["id"], u["name"]))
     poll = q_one("SELECT * FROM meal_polls WHERE id=?", (pid,))
     return jsonify(_meal_poll_out(poll, ev, u)), 201
 
@@ -3731,10 +3749,10 @@ def api_meal_vote(pid):
     u = current_user()
     if not u:
         return err("login required", 401)
-    last_day = _meal_last_day(ev)
-    if last_day and last_day < datetime.date.today().isoformat():
+    expires = poll["day"] or _meal_last_day(ev)
+    if expires and expires < datetime.date.today().isoformat():
         return err("voting has closed — the poll expired at the end of"
-                   " the event date", 403)
+                   " its day", 403)
     b = request.get_json(force=True)
     if (b.get("person_kind") not in ("student", "parent")
             or not b.get("member_id") or not b.get("person_name")):

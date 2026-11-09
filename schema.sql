@@ -397,6 +397,7 @@ CREATE TABLE IF NOT EXISTS meal_polls (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id      INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   question      TEXT NOT NULL DEFAULT 'Meal order',
+  day           TEXT,
   options       TEXT NOT NULL,
   created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_by_name TEXT,

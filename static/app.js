@@ -2012,9 +2012,11 @@ async function renderEvents() {
       const q = card.querySelector(".mp-q").value.trim() || "Meal order";
       const opts = card.querySelector(".mp-opts").value.split("\n")
         .map((s) => s.trim()).filter(Boolean);
+      const daySel = card.querySelector(".mp-day");
       try {
         await POST(`/api/events/${b.dataset.mpollCreate}/meal-polls`,
-          {question: q, options: opts});
+          {question: q, options: opts,
+           day: daySel ? daySel.value : undefined});
         toast("Meal poll created.");
         renderEvents();
       } catch (ex) { toast("Error: " + ex.message); }
@@ -2219,7 +2221,7 @@ function mealPollHtml(e, poll, rsvps, ro) {
     ? `<div style="margin-top:6px">${poll.options.map((o) => `<span class="pill">${esc(o)} — ${poll.counts[o] || 0}</span>`).join(" ")}
       <div class="sub" style="margin-top:4px">${(poll.votes || []).map((v) => `${esc(v.person_name)} (${v.person_kind}): ${esc(v.option)}`).join(" · ") || "No votes yet."}</div></div>` : "";
   return `<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
-    <div class="row"><b>Meal poll</b><span class="sub">${esc(poll.question)}</span>${status}
+    <div class="row"><b>Meal poll</b><span class="sub">${poll.day ? `${dayLabel(poll.day)} · ` : ""}${esc(poll.question)}</span>${status}
       <span style="flex:1"></span>
       ${MENTOR() && !ro ? `<button class="btn small ghost" data-mpoll-del="${poll.id}" data-mpoll-ev="${e.id}">Delete poll</button>` : ""}</div>
     ${voteRows}${results}</div>`;
@@ -2276,8 +2278,9 @@ async function eventCard(e, ro = false) {
       ? `<div style="margin-top:10px"><button class="btn small ghost" data-mpoll-toggle="${e.id}">Add meal poll</button>
         <div id="mpf-${e.id}" class="hidden" style="margin-top:8px">
           <div class="field"><label>Question</label><input class="mp-q" value="Meal order"></div>
+          ${eventDays(e).length > 1 ? `<div class="field"><label>Day</label><select class="mp-day">${eventDays(e).map((ds) => `<option value="${ds}">${dayLabel(ds)}</option>`).join("")}</select></div>` : ""}
           <div class="field"><label>Meal options (one per line)</label><textarea class="mp-opts" placeholder="Chicken&#10;Veggie&#10;No meal"></textarea></div>
-          <div class="sub">Open to RSVP'd students and parents; closes at the end of ${mpLast ? dayLabel(mpLast) : "the event date"}.</div>
+          <div class="sub">Open to RSVP'd students and parents; ${eventDays(e).length > 1 ? "closes at the end of the picked day." : `closes at the end of ${mpLast ? dayLabel(mpLast) : "the event date"}.`}</div>
           <div class="row" style="margin-top:6px"><button class="btn small" data-mpoll-create="${e.id}">Create poll</button></div>
         </div></div>`
       : "");
@@ -3349,7 +3352,7 @@ async function renderTravel() {
     return `<div class="card"><h3>Meals</h3>
     <p class="sub">Meal polls for this event — voting happens on the event card in Events.</p>
     ${mealPolls.map((p) => `<div style="margin-top:8px;border-top:1px solid var(--line);padding-top:8px">
-      <div class="row"><b>${esc(p.question)}</b>${p.closed
+      <div class="row"><b>${p.day ? `${dayLabel(p.day)} · ` : ""}${esc(p.question)}</b>${p.closed
         ? `<span class="pill gray">Closed — voting ended ${p.expires ? dayLabel(p.expires) : ""}</span>`
         : `<span class="pill green">Open until ${p.expires ? dayLabel(p.expires) : ""}</span>`}</div>
       <div style="margin-top:4px">${p.options.map((o) => `<span class="pill">${esc(o)} — ${p.counts ? (p.counts[o] || 0) : 0}</span>`).join(" ")}</div>
