@@ -2026,7 +2026,7 @@ async function renderEvents() {
           member_id: parseInt(b.dataset.member, 10),
           person_kind: b.dataset.kind,
           person_name: b.dataset.name, option: b.dataset.option});
-        toast(b.dataset.option ? "Vote saved." : "Vote cleared.");
+        toast("Vote saved.");
         renderEvents();
       } catch (ex) { toast("Error: " + ex.message); }
     }));
@@ -2211,7 +2211,7 @@ function mealPollHtml(e, poll, rsvps, ro) {
       voteRows = open.map((en) => {
         const cur = myVote(en);
         return `<div class="row" style="margin:4px 0;flex-wrap:wrap"><span><b>${esc(en.name)}</b> <span class="sub">(${en.kind})</span></span>
-          ${poll.options.map((o) => `<button class="btn small ${cur && cur.option === o ? "" : "ghost"}" data-mpoll-vote data-poll="${poll.id}" data-member="${en.member_id}" data-kind="${en.kind}" data-name="${esc(en.name)}" data-option="${cur && cur.option === o ? "" : esc(o)}">${esc(o)}${cur && cur.option === o ? " ✓" : ""}</button>`).join("")}</div>`;
+          ${poll.options.map((o) => { const picked = cur && cur.option === o; return `<button class="btn small ${picked ? "" : "ghost"}"${picked ? ' disabled title="Your pick — choose another option to switch"' : ""} data-mpoll-vote data-poll="${poll.id}" data-member="${en.member_id}" data-kind="${en.kind}" data-name="${esc(en.name)}" data-option="${esc(o)}">${esc(o)}${picked ? " ✓" : ""}</button>`; }).join("")}</div>`;
       }).join("");
     }
   }
@@ -2268,9 +2268,11 @@ async function eventCard(e, ro = false) {
   // Meal poll: one per event, public on the card. Mentors get the
   // create form when there is none yet, and results on the poll.
   const mpLast = eventDays(e).slice(-1)[0];
-  const pollSection = polls.length
-    ? polls.map((p) => mealPollHtml(e, p, d.rsvps, ro)).join("")
-    : (MENTOR() && !ro && !archived
+  // Multiple polls per event (2026-11-08): the create form stays
+  // available alongside existing polls, so a mentor can add a lunch
+  // poll, a dinner poll, one per trip day, and so on.
+  const pollSection = polls.map((p) => mealPollHtml(e, p, d.rsvps, ro)).join("")
+    + (MENTOR() && !ro && !archived
       ? `<div style="margin-top:10px"><button class="btn small ghost" data-mpoll-toggle="${e.id}">Add meal poll</button>
         <div id="mpf-${e.id}" class="hidden" style="margin-top:8px">
           <div class="field"><label>Question</label><input class="mp-q" value="Meal order"></div>

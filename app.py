@@ -232,8 +232,7 @@ def _migrate(db):
             created_by_user_id INTEGER REFERENCES users(id)
                 ON DELETE SET NULL,
             created_by_name TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now')),
-            UNIQUE(event_id))""")
+            created_at TEXT NOT NULL DEFAULT (datetime('now')))""")
         db.execute("""CREATE TABLE IF NOT EXISTS meal_votes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             poll_id INTEGER NOT NULL REFERENCES meal_polls(id)
@@ -245,6 +244,42 @@ def _migrate(db):
             option TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(poll_id, person_kind, member_id, person_name))""")
+        # Multiple polls per event (2026-11-08): the first build made
+        # event_id UNIQUE (one poll per event). SQLite can't drop a
+        # UNIQUE in place, so rebuild once when the autoindex is
+        # still there. Fresh DBs already have the new shape from
+        # schema.sql, so the rebuild never runs there.
+        mp_idx = [r for r in db.execute(
+            "PRAGMA index_list(meal_polls)")
+            if r[2] == 1 and r[3] == "u"]
+        if mp_idx:
+            mp_cols = ", ".join((
+                "id", "event_id", "question", "options",
+                "created_by_user_id", "created_by_name", "created_at"))
+            # FK OFF around the rebuild: with FK on, RENAME rewrites
+            # meal_votes' REFERENCES to meal_polls_old, and the final
+            # DROP would cascade-delete every existing vote.
+            db.execute("PRAGMA foreign_keys=OFF")
+            try:
+                db.execute("ALTER TABLE meal_polls"
+                           " RENAME TO meal_polls_old")
+                db.execute("""CREATE TABLE meal_polls (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL REFERENCES events(id)
+                        ON DELETE CASCADE,
+                    question TEXT NOT NULL DEFAULT 'Meal order',
+                    options TEXT NOT NULL,
+                    created_by_user_id INTEGER REFERENCES users(id)
+                        ON DELETE SET NULL,
+                    created_by_name TEXT,
+                    created_at TEXT NOT NULL
+                        DEFAULT (datetime('now')))""")
+                db.execute("INSERT INTO meal_polls (" + mp_cols + ")"
+                           " SELECT " + mp_cols
+                           + " FROM meal_polls_old")
+                db.execute("DROP TABLE meal_polls_old")
+            finally:
+                db.execute("PRAGMA foreign_keys=ON")
         db.execute("""CREATE TABLE IF NOT EXISTS fab_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             part_id INTEGER REFERENCES parts(id) ON DELETE SET NULL,
@@ -3663,13 +3698,10 @@ def api_meal_polls(eid):
     if len(options) > 12:
         return err("at most 12 meal options")
     u = current_user()
-    try:
-        pid = execute(
-            "INSERT INTO meal_polls (event_id, question, options,"
-            " created_by_user_id, created_by_name) VALUES (?,?,?,?,?)",
-            (eid, question, json.dumps(options), u["id"], u["name"]))
-    except sqlite3.IntegrityError:
-        return err("this event already has a meal poll", 409)
+    pid = execute(
+        "INSERT INTO meal_polls (event_id, question, options,"
+        " created_by_user_id, created_by_name) VALUES (?,?,?,?,?)",
+        (eid, question, json.dumps(options), u["id"], u["name"]))
     poll = q_one("SELECT * FROM meal_polls WHERE id=?", (pid,))
     return jsonify(_meal_poll_out(poll, ev, u)), 201
 
@@ -3747,20 +3779,16 @@ def api_meal_vote(pid):
     if not att:
         return err("only RSVP'd attendees can vote in this poll", 403)
     opt = (b.get("option") or "").strip()
-    if opt:
-        options = json.loads(poll["options"] or "[]")
-        if opt not in options:
-            return err("not one of the poll options")
+    # Switch-only (2026-11-08): a vote can change to another option,
+    # never be cleared — clearing confused voters.
+    if not opt:
+        return err("pick an option — a vote can't be cleared,"
+                   " only switched")
+    options = json.loads(poll["options"] or "[]")
+    if opt not in options:
+        return err("not one of the poll options")
     with _lock:
         db = get_db()
-        if not opt:
-            db.execute(
-                "DELETE FROM meal_votes WHERE poll_id=?"
-                " AND person_kind=? AND member_id=? AND person_name=?",
-                (pid, b["person_kind"], b["member_id"],
-                 b["person_name"]))
-            db.commit()
-            return jsonify({"cleared": True})
         db.execute(
             "INSERT INTO meal_votes (poll_id, member_id, person_kind,"
             " person_name, option) VALUES (?,?,?,?,?)"

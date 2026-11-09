@@ -400,8 +400,7 @@ CREATE TABLE IF NOT EXISTS meal_polls (
   options       TEXT NOT NULL,
   created_by_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
   created_by_name TEXT,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE(event_id)
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS meal_votes (

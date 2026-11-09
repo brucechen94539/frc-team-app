@@ -591,12 +591,14 @@ and `can't make it` do not count as attending.
 
 ## Meal polls (survey per event, 2026-11-08)
 
-- One **meal poll** per event, for meal ordering. A mentor/admin creates
-  it from a mentor-only "Add meal poll" control on the event card
-  (question, default "Meal order", + 2–12 options, one per line). A
-  second poll on the same event is refused (409); the mentor can delete
-  a poll (votes go with it) and recreate it. No option editing after
-  creation — delete and recreate instead.
+- **Meal polls**, one or more per event, for meal ordering — several
+  meals a day, and multi-day events, each get their own poll. A
+  mentor/admin creates each from a mentor-only "Add meal poll" control
+  on the event card (question, default "Meal order", + 2–12 options,
+  one per line); the form stays available alongside existing polls.
+  The mentor can delete a poll (votes go with it) and recreate it. No
+  option editing after creation — delete and recreate instead. Votes
+  are per poll: one vote per eater on each poll.
 - The poll card is **public on the event** for everyone logged in,
   showing the question, the options, and its status: "Open until
   <last day>" or "Closed — voting ended <last day>". It does **not**
@@ -614,8 +616,10 @@ and `can't make it` do not count as attending.
   self/parent scope and are attending. Non-attendees see the card but
   get no vote controls.
 - **One vote per person (eater) per poll, changeable until expiry**:
-  re-voting overwrites; clicking the already-picked option clears the
-  vote. A parent voting for a child overwrites the child's own vote
+  re-voting overwrites. Switch-only since 2026-11-08: the picked
+  option is disabled in the UI and the server refuses an empty option
+  (400) — a vote can't be cleared, only switched (clearing confused
+  voters). A parent voting for a child overwrites the child's own vote
   for that child — one meal per eater, last vote wins.
 - **Results are mentor-only**: per-option counts plus who picked what.
   Voters see only their own pick (and the poll status); the card shows
